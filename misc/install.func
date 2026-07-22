@@ -43,7 +43,7 @@ setting_up_container() {
 network_check() {
   msg_info "Checking Internet connectivity"
   local i
-  for i in 1 2 3; do
+  for _ in 1 2 3; do
     if ping -c1 -W2 github.com >/dev/null 2>&1 || curl -fsm5 https://github.com >/dev/null 2>&1; then
       msg_ok "Internet connectivity is working"
       return 0
@@ -85,7 +85,33 @@ motd_ssh() {
 EOF
 }
 
-customize() { :; }
+customize() {
+  if [[ -n "${ROOT_PASSWORD:-}" ]]; then
+    msg_info "Setting root password"
+    echo "root:${ROOT_PASSWORD}" | chpasswd
+    if [[ -f /etc/ssh/sshd_config ]]; then
+      sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+      systemctl restart ssh >/dev/null 2>&1 || systemctl restart sshd >/dev/null 2>&1 || true
+    fi
+    msg_ok "Root password set (SSH root login enabled)"
+  else
+    # community-scripts convention: no password → the Proxmox console logs
+    # straight in as root ('pct enter <ctid>' works either way)
+    msg_info "Enabling console auto-login for root"
+    local tty
+    for tty in 1 2; do
+      mkdir -p "/etc/systemd/system/container-getty@${tty}.service.d"
+      cat >"/etc/systemd/system/container-getty@${tty}.service.d/override.conf" <<'EOF'
+[Service]
+ExecStart=
+ExecStart=-/sbin/agetty --autologin root --noclear --keep-baud pts/%I 115200,38400,9600 $TERM
+EOF
+    done
+    systemctl daemon-reload
+    systemctl restart container-getty@1.service container-getty@2.service >/dev/null 2>&1 || true
+    msg_ok "Console auto-login enabled (root, no password)"
+  fi
+}
 
 cleanup() {
   msg_info "Cleaning up"

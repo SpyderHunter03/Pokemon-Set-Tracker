@@ -1,0 +1,23 @@
+name: Release
+
+# Push a version tag (v1.0.0, v1.2.3, …) and this creates the GitHub Release
+# with auto-generated notes. Releases are what the Proxmox VE Helper-Scripts
+# install/update mechanism consumes (fetch_and_deploy_gh_release).
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes

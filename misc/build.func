@@ -95,8 +95,11 @@ start() {
   RAM_SIZE="${CT_MEM_MB:-$var_ram}"
   BRG="${CT_BRIDGE:-vmbr0}"
   STORAGE="${CT_STORAGE:-local-lvm}"
+  ROOT_PASSWORD="${PTCG_ROOT_PASSWORD:-}"
 
-  local summary="Container ID: ${CT_ID}\nHostname: ${HN}\nBranch: ${BRANCH}\nDisk: ${DISK_SIZE}GB  CPU: ${CORE_COUNT}  RAM: ${RAM_SIZE}MiB\nBridge: ${BRG}  Storage: ${STORAGE}\nAuto-update from git: ${AUTO_UPDATE}"
+  local pw_desc="console auto-login (none set)"
+  [[ -n "$ROOT_PASSWORD" ]] && pw_desc="set (SSH root login enabled)"
+  local summary="Container ID: ${CT_ID}\nHostname: ${HN}\nBranch: ${BRANCH}\nDisk: ${DISK_SIZE}GB  CPU: ${CORE_COUNT}  RAM: ${RAM_SIZE}MiB\nBridge: ${BRG}  Storage: ${STORAGE}\nAuto-update from git: ${AUTO_UPDATE}\nRoot password: ${pw_desc}"
 
   if [[ "${PTCG_DEFAULTS:-no}" == "yes" ]] || ! command -v whiptail >/dev/null 2>&1; then
     echo -e "${INFO}${YW}Using settings:${CL}\n${summary}"
@@ -118,6 +121,7 @@ start() {
   RAM_SIZE=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Allocate RAM in MiB" 8 58 "$RAM_SIZE" --title "RAM" 3>&1 1>&2 2>&3) || exit 0
   BRG=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set a Bridge" 8 58 "$BRG" --title "BRIDGE" 3>&1 1>&2 2>&3) || exit 0
   STORAGE=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set Storage" 8 58 "$STORAGE" --title "STORAGE" 3>&1 1>&2 2>&3) || exit 0
+  ROOT_PASSWORD=$(whiptail --backtitle "Proxmox VE Helper Scripts" --passwordbox "Set Root Password (leave empty for console auto-login; setting one also enables SSH root login)" 9 58 --title "ROOT PASSWORD" 3>&1 1>&2 2>&3) || exit 0
 }
 
 # --------------------------------------------------------- build_container --
@@ -171,6 +175,7 @@ build_container() {
     exit 1
   fi
   export REPO BRANCH AUTO_UPDATE APP NSAPP
+  export ROOT_PASSWORD="${ROOT_PASSWORD:-}"
   export VERBOSE="${VERBOSE:-no}"
   lxc-attach -n "$CT_ID" -- bash -c "$install_script" || { msg_error "Installation inside the container failed."; exit 1; }
 
