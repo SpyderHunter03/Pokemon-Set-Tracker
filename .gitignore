@@ -1,0 +1,15 @@
+# runtime state (user accounts, synced collections)
+data/
+.test-data/
+
+# generated card database (rebuild with scripts/build-data.js)
+public/cdn/
+
+# dependencies (sharp is optional, installed ad hoc)
+node_modules/
+package-lock.json
+
+# misc
+*.zip
+*.log
+.DS_Store

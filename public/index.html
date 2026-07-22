@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Pokémon TCG Tracker</title>
+  <meta name="description" content="Track which Pokémon cards you own, set by set.">
+  <meta name="theme-color" content="#0f1220">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#/">
+      <img src="icons/icon-192.png" alt="" width="28" height="28">
+      <span>TCG&nbsp;Tracker</span>
+    </a>
+    <form id="global-search" class="searchbar" autocomplete="off">
+      <input id="global-search-input" type="search" placeholder="Search all cards…" aria-label="Search all cards">
+    </form>
+    <button id="account-btn" class="icon-btn" title="Account & sync" aria-label="Account and sync">👤</button>
+  </header>
+
+  <main id="view" class="view"></main>
+
+  <nav class="bottomnav" aria-label="Main">
+    <a href="#/" data-nav="sets"><span class="nav-icon">🗂️</span>Sets</a>
+    <a href="#/pokemon" data-nav="pokemon"><span class="nav-icon">🔴</span>Pokémon</a>
+    <a href="#/scan" data-nav="scan"><span class="nav-icon">📷</span>Scan</a>
+  </nav>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <!-- Card detail modal -->
+  <dialog id="card-modal" class="modal">
+    <div class="modal-body" id="card-modal-body"></div>
+  </dialog>
+
+  <!-- Account / sync modal -->
+  <dialog id="account-modal" class="modal">
+    <div class="modal-body">
+      <h2>Account &amp; Data</h2>
+      <div id="account-status"></div>
+      <div id="account-forms"></div>
+      <div id="language-area"></div>
+      <hr>
+      <h3>Backup</h3>
+      <p class="muted">Your collection is saved on this device. Export a backup file any time, and import it on another device.</p>
+      <div class="row">
+        <button id="export-btn" class="btn">Export collection</button>
+        <button id="import-btn" class="btn">Import collection</button>
+        <input id="import-file" type="file" accept="application/json" hidden>
+      </div>
+      <hr>
+      <p class="muted small">Card data &amp; images are self-hosted (built with the included downloader). This app is not affiliated with Nintendo or The Pokémon Company.</p>
+      <p class="muted small">App version <span id="app-version"></span> · <a href="#/debug" class="close-modal-link">Debug info</a> · <a href="#" id="repair-link">Repair &amp; reload</a></p>
+      <button class="btn ghost close-modal">Close</button>
+    </div>
+  </dialog>
+
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

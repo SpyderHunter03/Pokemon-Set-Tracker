@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+    branches: [dev, main]
+
+jobs:
+  test:
+    name: End-to-end test suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install test dependencies (playwright + sharp)
+        run: npm install --no-save playwright sharp
+
+      - name: Install Playwright chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Syntax check
+        run: |
+          node --check server.js
+          node --check public/app.js
+          node --check public/sw.js
+          node --check scripts/build-data.js
+          node --check scripts/build-hashes.js
+
+      - name: Run end-to-end suite (mock API → build-data → hashes → server → browser)
+        run: node tests/run-tests.js

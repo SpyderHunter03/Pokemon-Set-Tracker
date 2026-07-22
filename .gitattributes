@@ -1,0 +1,11 @@
+* text=auto
+*.sh text eol=lf
+*.js text
+*.css text
+*.html text
+*.md text
+*.yml text
+*.json text
+*.webmanifest text
+*.png binary
+*.webp binary
