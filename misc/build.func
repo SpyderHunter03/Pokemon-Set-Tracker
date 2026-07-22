@@ -51,9 +51,10 @@ EOF
 variables() {
   NSAPP=$(echo "${APP,,}" | tr -d ' ')
   var_install="${NSAPP}-install"
-  if [[ -z "${AUTO_UPDATE:-}" ]]; then
-    [[ "$BRANCH" == "dev" ]] && AUTO_UPDATE="yes" || AUTO_UPDATE="no"
-  fi
+  # Deploys are MANUAL: run `ptcg-update` inside the container (or re-run the
+  # ct script inside it). Set AUTO_UPDATE=yes at create time if you want a
+  # container that self-updates from its git branch every 5 minutes instead.
+  AUTO_UPDATE="${AUTO_UPDATE:-no}"
 }
 
 # ------------------------------------------------------------ error traps --
@@ -110,9 +111,8 @@ start() {
 
   CT_ID=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set Container ID" 8 58 "$CT_ID" --title "CONTAINER ID" 3>&1 1>&2 2>&3) || exit 0
   HN=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set Hostname" 8 58 "$HN" --title "HOSTNAME" 3>&1 1>&2 2>&3) || exit 0
-  BRANCH=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Deploy which git branch? (dev = auto-updates, main = stable)" 8 58 "$BRANCH" --title "BRANCH" 3>&1 1>&2 2>&3) || exit 0
+  BRANCH=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Deploy which git branch? (dev or main)" 8 58 "$BRANCH" --title "BRANCH" 3>&1 1>&2 2>&3) || exit 0
   RAW="https://raw.githubusercontent.com/${REPO}/${BRANCH}"
-  [[ "$BRANCH" == "dev" ]] && AUTO_UPDATE="yes" || AUTO_UPDATE="no"
   DISK_SIZE=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Allocate Disk Size in GB (card images need room)" 8 58 "$DISK_SIZE" --title "DISK SIZE" 3>&1 1>&2 2>&3) || exit 0
   CORE_COUNT=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Allocate CPU Cores" 8 58 "$CORE_COUNT" --title "CORE COUNT" 3>&1 1>&2 2>&3) || exit 0
   RAM_SIZE=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Allocate RAM in MiB" 8 58 "$RAM_SIZE" --title "RAM" 3>&1 1>&2 2>&3) || exit 0
