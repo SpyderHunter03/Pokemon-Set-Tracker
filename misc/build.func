@@ -1,0 +1,188 @@
+#!/usr/bin/env bash
+# Copyright (c) 2026 SpyderHunter03
+# License: MIT | https://github.com/SpyderHunter03/Pokemon-Set-Tracker/raw/main/LICENSE
+#
+# A compact, self-hosted implementation of the community-scripts
+# (Proxmox VE Helper-Scripts) build.func interface, so that
+# ct/pokemon-set-tracker.sh reads and behaves like any other helper script.
+# (The upstream build.func can only install apps that live in the
+# community-scripts repo — its install-script URL is hardcoded — hence this
+# vendored, API-compatible version.)
+
+REPO="${PTCG_REPO:-SpyderHunter03/Pokemon-Set-Tracker}"
+BRANCH="${PTCG_BRANCH:-main}"
+RAW="https://raw.githubusercontent.com/${REPO}/${BRANCH}"
+
+# ------------------------------------------------------------------ colors --
+color() {
+  YW=$'\033[33m'; YWB=$'\e[93m'; BL=$'\033[36m'; RD=$'\033[01;31m'
+  BGN=$'\033[4;92m'; GN=$'\033[1;92m'; DGN=$'\033[32m'; CL=$'\033[m'
+  BFR="\\r\\033[K"; HOLD=" "; TAB="  "
+  CM="${TAB}✔️${TAB}"; CROSS="${TAB}✖️${TAB}"
+  INFO="${TAB}💡${TAB}${CL}"; OS="${TAB}🖥️${TAB}${CL}"
+  CONTAINERID="${TAB}🆔${TAB}${CL}"; GATEWAY="${TAB}🌐${TAB}${CL}"
+  CREATING="${TAB}🚀${TAB}${CL}"; HOSTNAME_ICON="${TAB}🏠${TAB}${CL}"
+}
+color
+
+msg_info()  { echo -e "${TAB}⏳${TAB}${YW}$1${CL}"; }
+msg_ok()    { echo -e "${BFR}${CM}${GN}$1${CL}"; }
+msg_error() { echo -e "${BFR}${CROSS}${RD}$1${CL}" >&2; }
+
+# ------------------------------------------------------------------ header --
+header_info() {
+  clear 2>/dev/null || true
+  cat <<"EOF"
+    ____        __                                 _____      __
+   / __ \____  / /_____  ____ ___  ____  ____     / ___/___  / /_
+  / /_/ / __ \/ //_/ _ \/ __ `__ \/ __ \/ __ \    \__ \/ _ \/ __/
+ / ____/ /_/ / ,< /  __/ / / / / / /_/ / / / /   ___/ /  __/ /_
+/_/    \____/_/|_|\___/_/ /_/ /_/\____/_/ /_/   /____/\___/\__/
+  ______                __
+ /_  __/________ ______/ /_____  _____
+  / / / ___/ __ `/ ___/ //_/ _ \/ ___/
+ / / / /  / /_/ / /__/ ,< /  __/ /
+/_/ /_/   \__,_/\___/_/|_|\___/_/
+
+EOF
+}
+
+# --------------------------------------------------------------- variables --
+variables() {
+  NSAPP=$(echo "${APP,,}" | tr -d ' ')
+  var_install="${NSAPP}-install"
+  if [[ -z "${AUTO_UPDATE:-}" ]]; then
+    [[ "$BRANCH" == "dev" ]] && AUTO_UPDATE="yes" || AUTO_UPDATE="no"
+  fi
+}
+
+# ------------------------------------------------------------ error traps --
+catch_errors() {
+  set -Eeuo pipefail
+  trap 'error_handler $LINENO "$BASH_COMMAND"' ERR
+}
+error_handler() {
+  local line=$1 cmd=$2
+  msg_error "Error in line ${line}: while executing: ${YWB}${cmd}${CL}"
+  exit 1
+}
+
+# ------------------------------- update-mode helpers (run inside the LXC) --
+check_container_storage() {
+  local used
+  used=$(df / --output=pcent 2>/dev/null | tail -n1 | tr -d '% ')
+  if [[ -n "$used" && "$used" -gt 85 ]]; then
+    msg_error "Container storage is ${used}% full — free some space."
+  fi
+}
+check_container_resources() { :; }
+
+# ------------------------------------------------------------------- start --
+# On a Proxmox host: gather settings and continue to build_container.
+# Inside an existing container (community convention: re-run the ct script
+# in the LXC console to update): run update_script instead.
+start() {
+  if ! command -v pveversion >/dev/null 2>&1; then
+    if declare -f update_script >/dev/null; then update_script; fi
+    exit 0
+  fi
+
+  CT_ID="${CT_ID:-$(pvesh get /cluster/nextid)}"
+  HN="${CT_HOSTNAME:-$NSAPP}"
+  DISK_SIZE="${CT_DISK_GB:-$var_disk}"
+  CORE_COUNT="${CT_CORES:-$var_cpu}"
+  RAM_SIZE="${CT_MEM_MB:-$var_ram}"
+  BRG="${CT_BRIDGE:-vmbr0}"
+  STORAGE="${CT_STORAGE:-local-lvm}"
+
+  local summary="Container ID: ${CT_ID}\nHostname: ${HN}\nBranch: ${BRANCH}\nDisk: ${DISK_SIZE}GB  CPU: ${CORE_COUNT}  RAM: ${RAM_SIZE}MiB\nBridge: ${BRG}  Storage: ${STORAGE}\nAuto-update from git: ${AUTO_UPDATE}"
+
+  if [[ "${PTCG_DEFAULTS:-no}" == "yes" ]] || ! command -v whiptail >/dev/null 2>&1; then
+    echo -e "${INFO}${YW}Using settings:${CL}\n${summary}"
+    return
+  fi
+
+  if whiptail --backtitle "Proxmox VE Helper Scripts" --title "${APP}" \
+      --yesno "This will create a New ${APP} LXC with these settings:\n\n${summary}\n\nUse default settings?" \
+      --yes-button "Default" --no-button "Advanced" 20 62; then
+    return
+  fi
+
+  CT_ID=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set Container ID" 8 58 "$CT_ID" --title "CONTAINER ID" 3>&1 1>&2 2>&3) || exit 0
+  HN=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set Hostname" 8 58 "$HN" --title "HOSTNAME" 3>&1 1>&2 2>&3) || exit 0
+  BRANCH=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Deploy which git branch? (dev = auto-updates, main = stable)" 8 58 "$BRANCH" --title "BRANCH" 3>&1 1>&2 2>&3) || exit 0
+  RAW="https://raw.githubusercontent.com/${REPO}/${BRANCH}"
+  [[ "$BRANCH" == "dev" ]] && AUTO_UPDATE="yes" || AUTO_UPDATE="no"
+  DISK_SIZE=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Allocate Disk Size in GB (card images need room)" 8 58 "$DISK_SIZE" --title "DISK SIZE" 3>&1 1>&2 2>&3) || exit 0
+  CORE_COUNT=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Allocate CPU Cores" 8 58 "$CORE_COUNT" --title "CORE COUNT" 3>&1 1>&2 2>&3) || exit 0
+  RAM_SIZE=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Allocate RAM in MiB" 8 58 "$RAM_SIZE" --title "RAM" 3>&1 1>&2 2>&3) || exit 0
+  BRG=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set a Bridge" 8 58 "$BRG" --title "BRIDGE" 3>&1 1>&2 2>&3) || exit 0
+  STORAGE=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set Storage" 8 58 "$STORAGE" --title "STORAGE" 3>&1 1>&2 2>&3) || exit 0
+}
+
+# --------------------------------------------------------- build_container --
+build_container() {
+  msg_info "Locating Debian ${var_version} template"
+  local template
+  template="$(pveam list local 2>/dev/null | awk -v v="debian-${var_version}-standard" '$0 ~ v {print $1}' | sort | tail -n1)"
+  if [[ -z "$template" ]]; then
+    pveam update >/dev/null
+    local remote
+    remote="$(pveam available --section system | awk -v v="debian-${var_version}-standard" '$0 ~ v {print $2}' | sort | tail -n1)"
+    [[ -n "$remote" ]] || { msg_error "No debian-${var_version}-standard template available."; exit 1; }
+    msg_info "Downloading ${remote}"
+    pveam download local "$remote" >/dev/null
+    template="local:vztmpl/${remote}"
+  fi
+  msg_ok "Template: ${template}"
+
+  msg_info "Creating LXC Container ${CT_ID}"
+  pct create "$CT_ID" "$template" \
+    -hostname "$HN" \
+    -tags "${var_tags:-}" \
+    -memory "$RAM_SIZE" \
+    -cores "$CORE_COUNT" \
+    -rootfs "${STORAGE}:${DISK_SIZE}" \
+    -net0 "name=eth0,bridge=${BRG},ip=dhcp" \
+    -features nesting=1 \
+    -unprivileged "${var_unprivileged:-1}" \
+    -onboot 1 >/dev/null
+  msg_ok "LXC Container ${CT_ID} was successfully created."
+
+  msg_info "Starting LXC Container"
+  pct start "$CT_ID"
+  local i
+  for i in $(seq 1 30); do
+    pct exec "$CT_ID" -- bash -c "ping -c1 -W1 github.com" >/dev/null 2>&1 && break
+    sleep 2
+  done
+  msg_ok "Started LXC Container"
+
+  # ship our install.func + install script into the container, upstream-style
+  export FUNCTIONS_FILE_PATH="$(curl -fsSL "${RAW}/misc/install.func")"
+  if [[ -z "$FUNCTIONS_FILE_PATH" || ${#FUNCTIONS_FILE_PATH} -lt 100 ]]; then
+    msg_error "Failed to download install functions from: ${RAW}/misc/install.func"
+    exit 1
+  fi
+  local install_script
+  install_script="$(curl -fsSL "${RAW}/install/${var_install}.sh")"
+  if [[ -z "$install_script" || ${#install_script} -lt 100 ]]; then
+    msg_error "Failed to download installer from: ${RAW}/install/${var_install}.sh"
+    exit 1
+  fi
+  export REPO BRANCH AUTO_UPDATE APP NSAPP
+  export VERBOSE="${VERBOSE:-no}"
+  lxc-attach -n "$CT_ID" -- bash -c "$install_script" || { msg_error "Installation inside the container failed."; exit 1; }
+
+  IP="$(pct exec "$CT_ID" -- hostname -I | awk '{print $1}')"
+}
+
+# ------------------------------------------------------------- description --
+description() {
+  pct set "$CT_ID" -description "# ${APP} LXC
+### https://github.com/${REPO}
+Branch: ${BRANCH} | Auto-update: ${AUTO_UPDATE}
+App port: 3000 | Update: re-run ct script inside the container or \`ptcg-update\`" >/dev/null 2>&1 || true
+  echo -e "${CONTAINERID}${DGN}CT ID: ${BGN}${CT_ID}${CL}"
+  echo -e "${HOSTNAME_ICON}${DGN}Hostname: ${BGN}${HN}${CL}"
+}

@@ -44,15 +44,15 @@ That's it for CI — the first push triggers the test workflow. See it under the
 On the Proxmox host, as root:
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/SpyderHunter03/Pokemon-Set-Tracker/dev/proxmox/create-lxc.sh)"
+PTCG_BRANCH=dev bash -c "$(curl -fsSL https://raw.githubusercontent.com/SpyderHunter03/Pokemon-Set-Tracker/dev/ct/pokemonsettracker.sh)"
 ```
 
-In the style of the Proxmox VE Helper-Scripts, this: downloads a Debian 12 template if needed, creates an unprivileged LXC (2 cores / 1 GB / 16 GB disk / DHCP — all overridable, see the header of `proxmox/create-lxc.sh`), installs Node and the app as a systemd service, and — because it's the dev branch — enables the **auto-update timer**: every 5 minutes the container checks git and redeploys if you've pushed. Push to dev, wait a few minutes, refresh your browser.
+This follows the community **Proxmox VE Helper-Scripts** structure exactly — `ct/pokemonsettracker.sh` + `install/pokemonsettracker-install.sh` + `misc/build.func`/`install.func` (vendored in this repo, since the upstream build.func only installs apps from the community-scripts repo). You get the familiar flow: header art, a whiptail **Default / Advanced** settings dialog (container ID, hostname, branch, disk/CPU/RAM, bridge, storage), Debian 12 template download, unprivileged LXC creation, and the app installed as a systemd service. Because it's the dev branch, the **auto-update timer** is enabled: every 5 minutes the container checks git and redeploys if you've pushed. Non-interactive? `PTCG_DEFAULTS=yes` skips the dialogs; `CT_ID`, `CT_STORAGE`, `CT_DISK_GB`, etc. override defaults.
 
 Then, once, inside the container (`pct enter <ctid>`):
 
 ```bash
-cd /opt/pokemon-tcg-tracker
+cd /opt/pokemon-set-tracker
 node scripts/build-data.js                              # card database
 npm install --no-save sharp && node scripts/build-hashes.js   # scanner index
 ```
@@ -61,14 +61,13 @@ Updates never touch this data: deploys are `git reset --hard`, and `data/` (acco
 
 ### 3. Spin up Prod (later, when you're ready for the world)
 
-Same one-liner with two changes — track `main`, no auto-update:
+Same script from `main` (the default branch it deploys) — no auto-update timer:
 
 ```bash
-PTCG_BRANCH=main \
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/SpyderHunter03/Pokemon-Set-Tracker/main/proxmox/create-lxc.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/SpyderHunter03/Pokemon-Set-Tracker/main/ct/pokemonsettracker.sh)"
 ```
 
-Deploying to Prod is then a deliberate two-step: merge `dev` → `main` on GitHub (CI runs again), then on the Proxmox host: `pct exec <prod-ctid> -- ptcg-update`. If you'd rather Prod also auto-deploy from main, create it with `AUTO_UPDATE=yes`.
+Deploying to Prod is then a deliberate two-step: merge `dev` → `main` on GitHub (CI runs again), then on the Proxmox host: `pct exec <prod-ctid> -- ptcg-update` — or, community-scripts style, re-run the ct one-liner **inside** the container to update it. If you'd rather Prod also auto-deploy from main, create it with `AUTO_UPDATE=yes`.
 
 For showing the world: put a reverse proxy with HTTPS in front (Caddy/Nginx Proxy Manager — both have helper scripts too). HTTPS also unlocks phone installation and live camera scanning.
 
@@ -100,10 +99,10 @@ Every push to dev/main also publishes a Docker image to GitHub's registry (`ghcr
 
 | Task | Command |
 |---|---|
-| App logs (inside LXC) | `journalctl -u pokemon-tcg-tracker -f` |
+| App logs (inside LXC) | `journalctl -u pokemon-set-tracker -f` |
 | Auto-update logs (dev) | `journalctl -u ptcg-update -f` |
-| Manual deploy | `ptcg-update` (inside) or `pct exec <ctid> -- ptcg-update` |
-| Restart app | `systemctl restart pokemon-tcg-tracker` |
+| Manual deploy | `ptcg-update` (inside), `pct exec <ctid> -- ptcg-update`, or re-run the ct one-liner inside the container |
+| Restart app | `systemctl restart pokemon-set-tracker` |
 | Pause dev auto-updates | `systemctl disable --now ptcg-update.timer` |
-| New sets released | inside: `cd /opt/pokemon-tcg-tracker && node scripts/build-data.js && node scripts/build-hashes.js` |
-| Back up everything | copy `/opt/pokemon-tcg-tracker/data` (accounts/collections); `public/cdn` is rebuildable |
+| New sets released | inside: `cd /opt/pokemon-set-tracker && node scripts/build-data.js && node scripts/build-hashes.js` |
+| Back up everything | copy `/opt/pokemon-set-tracker/data` (accounts/collections); `public/cdn` is rebuildable |
