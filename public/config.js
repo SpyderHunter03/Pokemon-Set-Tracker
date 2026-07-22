@@ -21,7 +21,8 @@ self.PTCG_CONFIG = {
   /* Serve card images from a CDN you control instead of this app.
    * Leave null to serve images from cdnBase like everything else.
    *
-   *   imageBase: 'https://cards-cdn.example.com'
+   *   imageBase: 'https://pub-xxxxxxxx.r2.dev'          (Cloudflare R2 public bucket)
+   *   imageBase: 'https://cards-cdn.example.com'        (any host you control)
    *
    * The CDN must mirror the same layout the downloader produces:
    *   <imageBase>/<lang>/images/<set>/<number>/<quality>.webp

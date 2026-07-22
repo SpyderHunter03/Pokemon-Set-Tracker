@@ -87,6 +87,30 @@ npx playwright install chromium
 node tests/run-tests.js
 ```
 
+## Publishing images to Cloudflare R2
+
+The app can serve card images from a Cloudflare R2 bucket instead of hosting them itself (`imageBase` in `public/config.js`). At typical size (full English database, both qualities ≈ 5–8 GB) this fits R2's always-free 10 GB tier, and R2 egress is free at any volume — the bill stays $0 no matter how popular the app gets.
+
+One-time setup (Cloudflare dashboard): **R2 → Create bucket** (e.g. `pokemon-cards`) → bucket **Settings → Public access** → enable the `r2.dev` subdomain (or attach a custom domain) → **Manage R2 API Tokens → Create token** with *Object Read & Write* scoped to the bucket. Note your Account ID (dashboard sidebar), the token's Access Key ID and Secret.
+
+Publish (from wherever the images live — your dev LXC):
+
+```bash
+cd /opt/pokemon-set-tracker
+R2_ACCOUNT_ID=<account-id> R2_ACCESS_KEY_ID=<key> R2_SECRET_ACCESS_KEY=<secret> \
+R2_BUCKET=pokemon-cards node scripts/publish-images.js
+```
+
+Zero dependencies (SigV4 is hand-rolled), idempotent — re-run any time after downloading new sets or uploading variant images; only new/changed files transfer. `--dry-run` previews, `--langs en` filters. Tip: keep the env vars in `/root/.r2.env` and run `env $(cat /root/.r2.env) node scripts/publish-images.js`.
+
+Then point the app at the bucket in `public/config.js` (commit this — it's your deployment's config):
+
+```js
+imageBase: 'https://pub-xxxxxxxx.r2.dev',
+```
+
+Optionally set `Environment=PTCG_BUILD_EXTRA_ARGS=--no-images` in the systemd unit if you later want app instances that don't store images locally at all (the master that runs `publish-images` still needs them).
+
 ## Also built: container images
 
 Every push to dev/main also publishes a Docker image to GitHub's registry (`ghcr.io/spyderhunter03/pokemon-set-tracker:dev` / `:latest`) via `.github/workflows/docker.yml`. The LXC route doesn't use them — they're there if you ever want to run the app on anything that speaks Docker instead.

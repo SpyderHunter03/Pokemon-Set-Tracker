@@ -58,11 +58,11 @@ function fail(msg) {
 }
 
 (async () => {
-  console.log('=== 1/6 mock TCGdex API ===');
+  console.log('=== 1/7 mock TCGdex API ===');
   start('node', ['tests/mock-tcgdex.js']);
   await waitForPort(3999).catch((e) => fail(e.message));
 
-  console.log('=== 2/6 start server (no card database yet) ===');
+  console.log('=== 2/7 start server (no card database yet) ===');
   fs.rmSync(path.join(ROOT, 'public', 'cdn'), { recursive: true, force: true });
   fs.rmSync(path.join(ROOT, '.test-data'), { recursive: true, force: true });
   start('node', ['server.js'], {
@@ -72,26 +72,47 @@ function fail(msg) {
   });
   await waitForPort(3111).catch((e) => fail(e.message));
 
-  console.log('=== 3/6 bootstrap suite (in-app download button + admin update) ===');
+  console.log('=== 3/7 bootstrap suite (in-app download button + admin update) ===');
   const bootstrap = spawnSync('node', ['tests/bootstrap.test.js'], { cwd: ROOT, stdio: 'inherit', env: process.env });
   if (bootstrap.status !== 0) fail('bootstrap suite failed');
 
-  console.log('=== 4/6 top up database via CLI (adds French; detects a custom variant scan) ===');
+  console.log('=== 4/7 top up database via CLI (adds French; detects a custom variant scan) ===');
   // simulate a user-supplied real 1st Edition scan for Pikachu (base1-58)
   const customScan = path.join(ROOT, 'public', 'cdn', 'en', 'images', 'base1', '58', 'firstEdition-low.webp');
   fs.mkdirSync(path.dirname(customScan), { recursive: true });
   fs.copyFileSync(path.join(__dirname, 'fixtures', 'base1-58.png'), customScan);
   run('node', ['scripts/build-data.js', '--api', 'http://localhost:3999/v2', '--langs', 'en,fr', '--quality', 'low']);
 
-  console.log('=== 5/6 rebuild scanner index ===');
+  console.log('=== 5/7 rebuild scanner index ===');
   run('node', ['scripts/build-hashes.js']);
 
-  console.log('=== 6/6 main browser suite ===');
+  console.log('=== 6/7 main browser suite ===');
   const suite = spawnSync('node', ['tests/smoke.test.js'], { cwd: ROOT, stdio: 'inherit', env: process.env });
+
+  console.log('=== 7/7 R2 image publisher (against mock S3) ===');
+  start('node', ['tests/mock-s3.js']);
+  await waitForPort(3998).catch((e) => fail(e.message));
+  const r2env = {
+    R2_ENDPOINT: 'http://localhost:3998',
+    R2_ACCESS_KEY_ID: 'testkey',
+    R2_SECRET_ACCESS_KEY: 'testsecret',
+    R2_BUCKET: 'cards',
+  };
+  const pub1 = spawnSync('node', ['scripts/publish-images.js'], { cwd: ROOT, env: { ...process.env, ...r2env }, encoding: 'utf8' });
+  const out1 = (pub1.stdout || '') + (pub1.stderr || '');
+  const uploaded = parseInt((out1.match(/Uploaded (\d+)/) || [])[1] || '0', 10);
+  const storeInfo = await (await fetch('http://localhost:3998/__store')).json();
+  const pub2 = spawnSync('node', ['scripts/publish-images.js'], { cwd: ROOT, env: { ...process.env, ...r2env }, encoding: 'utf8' });
+  const out2 = (pub2.stdout || '') + (pub2.stderr || '');
+  const check = (name, cond) => console.log((cond ? 'PASS' : 'FAIL') + ' — ' + name);
+  check('publisher uploads all local images', pub1.status === 0 && uploaded > 0 && storeInfo.count === uploaded);
+  check('publisher pagination + idempotent re-run', pub2.status === 0 && /Uploaded 0, skipped/.test(out2));
+  const publishOk = pub1.status === 0 && uploaded > 0 && storeInfo.count === uploaded && pub2.status === 0 && /Uploaded 0, skipped/.test(out2);
 
   cleanup();
   fs.rmSync(path.join(ROOT, '.test-data'), { recursive: true, force: true });
   if (suite.status !== 0) { console.error('\nBrowser suite failed.'); process.exit(1); }
+  if (!publishOk) { console.error('\nPublisher checks failed.'); process.exit(1); }
 
   console.log('\nAll stages completed.');
 })().catch((e) => fail(e.stack || e.message));
