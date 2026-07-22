@@ -14,7 +14,8 @@ A lightweight, self-hostable web app (PWA) for tracking which Pokémon cards you
   - **Search** — instant name search with rarity/type filters (built automatically from your data)
 - **Per-variant tracking** — each card's real variants come from the data (Normal, Holo, Reverse Holo, 1st Edition, W Promo), plus an "Other / Stamped" slot for prerelease/staff stamps and the like. Track quantities of each.
 - **Master set mode** — a toggle on each set page that counts every variant separately in the progress bar, for true master-set collectors.
-- **Variant looks** — printings are visually distinct: 1st Edition tiles carry the edition stamp, holo/reverse printings get a sheen. Got a real scan of a specific printing? Drop it in as `cdn/<lang>/images/<set>/<number>/<variant>-low.webp` (e.g. `firstEdition-low.webp`) and the app uses it instead (the downloader auto-detects these on its next run).
+- **Variant looks** — printings are visually distinct: 1st Edition tiles carry the edition stamp, holo/reverse printings get a sheen — until you replace them with real images (below).
+- **Custom printings & your own images (admin)** — open any card's details as the admin: **＋ Add printing** creates printings the base data doesn't know ("Cracked Ice Holo", staff stamps, whatever your checklist needs) as fully tracked tiles, and **⬆ Upload image** attaches your own photo/scan to the selected printing (converted to webp on the server, shown instead of any synthetic look). Files can also be dropped in manually as `cdn/<lang>/images/<set>/<number>/<variant>-low.webp` — the downloader auto-detects them.
 - **Sorting everywhere** — sets by newest/oldest/name; cards by number, name, or set release date (remembered per page).
 - **Card scanner** — at a shop? Open Scan, point your camera at a card (or take a photo), and the app matches it against your own card database — entirely on-device, no cloud service — and tells you whether you already have it.
 - **Multi-language** — download card data in any language TCGdex supports (`--langs en,ja,de,…`) and switch in-app. Your collection carries across languages (it's keyed by card ID, not name).
@@ -64,15 +65,19 @@ Env vars: `PORT` (default 3000), `DATA_DIR` (default `./data` — user accounts 
 
 Or with Docker: `docker compose up -d`.
 
-## Hosting the card database somewhere else (CDN)
+## Serving images from a CDN you control
 
-By default the app expects the database at `cdn/` next to the app files. To host it elsewhere, upload the generated `public/cdn/` folder to any static host and point `public/config.js` at it:
+Card *data* (a few tens of MB of JSON) and card *images* (hundreds of MB+) don't have to live together. Point `imageBase` in `public/config.js` at any host you control and the app links every card image there instead of serving it itself:
 
 ```js
-self.PTCG_CONFIG = { cdnBase: 'https://cards.example.com/cdn', defaultLanguage: 'en' };
+self.PTCG_CONFIG = { cdnBase: 'cdn', defaultLanguage: 'en', imageBase: 'https://cards-cdn.example.com' };
 ```
 
-A cross-origin host must send `Access-Control-Allow-Origin: *`. Card images never change — long cache headers are safe (the bundled server already sets them).
+The CDN just needs the same layout the downloader produces — sync your `public/cdn/<lang>/images` folders up to it (rsync, rclone, object storage, anything) and you're done. Workflow: keep one "master" machine that runs the image download and any admin image uploads, sync its `images/` folders to the CDN on whatever schedule you like, and run the app itself data-only (`node scripts/build-data.js --no-images`, or set `PTCG_BUILD_EXTRA_ARGS=--no-images` in the service environment so the in-app download button skips images too). Notes: the CDN host should send `Access-Control-Allow-Origin: *` and long cache headers (images are immutable); the card scanner's index has to be built on the machine that has the image files locally.
+
+## Hosting the whole card database elsewhere
+
+`cdnBase` can also be a full URL — host the entire generated `public/cdn/` folder (data + images) on any static host and point `cdnBase` at it. Same CORS requirement.
 
 ## Put it on your phone (as an app)
 
@@ -84,6 +89,16 @@ A cross-origin host must send `Access-Control-Allow-Origin: *`. Card images neve
 ## Using the scanner
 
 Line the card up with the on-screen frame and capture (or snap a photo). The app computes a perceptual fingerprint of the image and compares it against the fingerprints of every card in your database, showing the top matches with an ownership badge — tap one to add it to your collection on the spot. Tips: fill the frame with the card, avoid glare/sleeves' reflections, and expect the match list (rather than a single guess) to be the norm — reprints with identical artwork genuinely look alike.
+
+## Variant image API (share your library)
+
+Your card database is served openly (CORS `*`), so other apps — or friends running this tracker — can pull your variant images:
+
+- `GET /api/variant-images?lang=en` — JSON manifest of every variant image you've added (card, set, variant, URLs).
+- `GET /cdn/en/images/<set>/<number>/<variant>-<low|high>.webp` — the images themselves (long-cached, immutable).
+- The rest of the database is equally fetchable: `/cdn/languages.json`, `/cdn/en/index.json`, `/cdn/en/sets/<set>.json`, `/cdn/custom.json` (custom printing definitions).
+
+A note on sourcing: for a public API, share images of your own cards (or scans you made). Pictures saved from marketplaces like Cardmarket are fine as personal reference, but redistributing them publicly isn't yours to license.
 
 ## Cloud sync
 

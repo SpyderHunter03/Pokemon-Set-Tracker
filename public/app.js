@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.4.0';
+const APP_VERSION = '3.6.0';
 
 /* ============================================================
  * Storage helpers
@@ -18,9 +18,12 @@ function lsSet(key, val) { localStorage.setItem(key, JSON.stringify(val)); }
  * No third-party APIs are called at runtime.
  * ============================================================ */
 const CDN = ((self.PTCG_CONFIG && self.PTCG_CONFIG.cdnBase) || 'cdn').replace(/\/+$/, '');
+const IMAGE_BASE = ((self.PTCG_CONFIG && self.PTCG_CONFIG.imageBase) || '').replace(/\/+$/, '');
 let lang = lsGet('ptcg.lang') || (self.PTCG_CONFIG && self.PTCG_CONFIG.defaultLanguage) || 'en';
 
 const DB = () => `${CDN}/${lang}`;
+/** Images may live on a separately controlled CDN (config.imageBase). */
+const IMGDB = () => (IMAGE_BASE ? `${IMAGE_BASE}/${lang}` : DB());
 
 async function cdnGet(url) {
   let res;
@@ -78,12 +81,30 @@ let _searchCache = null;
 const _setDetailCache = new Map();
 let _scanIndexCache = null;
 let _languagesCache = null;
+let _customVariants = null; // { cardId: { variants: { key: label } } }
 
 function clearDataCaches() {
   _indexCache = null;
   _searchCache = null;
   _setDetailCache.clear();
   _scanIndexCache = null;
+  _customVariants = null;
+}
+
+/** Admin-defined printings (e.g. "Cracked Ice Holo") — global, language-independent. */
+async function getCustomVariants() {
+  if (_customVariants) return _customVariants;
+  try {
+    const data = await cdnGet(`${CDN}/custom.json`);
+    _customVariants = data.cards || {};
+  } catch {
+    _customVariants = {}; // none defined yet
+  }
+  return _customVariants;
+}
+
+function customVariantsOf(cardId) {
+  return (_customVariants && _customVariants[cardId] && _customVariants[cardId].variants) || {};
 }
 
 async function getIndex() {
@@ -186,12 +207,12 @@ function cardImg(card, quality = 'low', variant = null) {
   if (variant && card.variantImages && card.variantImages[variant]) {
     const avail = card.variantImages[variant];
     const q = avail.includes(quality) ? quality : avail[0];
-    return `${DB()}/${card.image}/${variant}-${q}.webp`;
+    return `${IMGDB()}/${card.image}/${variant}-${q}.webp`;
   }
   const qualities = (_indexCache && _indexCache.qualities) || ['low'];
   const q = quality === 'high' && qualities.includes('high') ? 'high' : 'low';
   if (!qualities.includes(q)) return null; // data-only install
-  return `${DB()}/${card.image}/${q}.webp`;
+  return `${IMGDB()}/${card.image}/${q}.webp`;
 }
 
 /** Synthetic look for a printing when no real variant scan exists:
@@ -203,6 +224,8 @@ function variantFxEl(card, variant) {
   }
   if (variant === 'holo') return h('div', { class: 'fx fx-holo', 'aria-hidden': 'true' });
   if (variant === 'reverse') return h('div', { class: 'fx fx-reverse', 'aria-hidden': 'true' });
+  const customLabel = customVariantsOf(card.id)[variant];
+  if (customLabel && /holo/i.test(customLabel)) return h('div', { class: 'fx fx-holo', 'aria-hidden': 'true' });
   return null;
 }
 
@@ -241,7 +264,7 @@ function sortSelect(options, current, onchange) {
 }
 
 function setLogo(set) {
-  return set.logo ? `${DB()}/${set.logo}` : null;
+  return set.logo ? `${IMGDB()}/${set.logo}` : null;
 }
 
 /* ============================================================
@@ -316,7 +339,9 @@ function setVariantQty(cardId, variant, qty) {
   updateStatsBanner();
 }
 
-/** The real printings of a card, from the data (no "other" — that lives in the detail view). */
+/** The real printings of a card: from the data, plus any admin-defined
+ * custom printings ("Cracked Ice Holo" etc.). No "other" — that lives in
+ * the detail view. */
 function realVariants(card) {
   const avail = [];
   const v = card && card.variants;
@@ -325,6 +350,9 @@ function realVariants(card) {
     if (v && v[key]) avail.push(key);
   }
   if (!avail.length) avail.push('normal');
+  for (const key of Object.keys(customVariantsOf(card.id))) {
+    if (!avail.includes(key)) avail.push(key);
+  }
   return avail;
 }
 
@@ -336,6 +364,8 @@ function availableVariants(card) {
 /** Display label for a variant of a specific card. A "normal" printing of a
  * card that also has a 1st Edition printing is what collectors call "Unlimited". */
 function variantLabel(card, vk) {
+  const custom = customVariantsOf(card.id)[vk];
+  if (custom) return custom;
   if (vk === 'normal') {
     return card && card.variants && card.variants.firstEdition ? 'Unlimited' : 'Normal';
   }
@@ -404,6 +434,14 @@ function authHeaders() {
   return auth ? { Authorization: 'Bearer ' + auth.token } : {};
 }
 
+let _meCache = null;
+async function ensureMe() {
+  if (!auth || !serverAvailable) return null;
+  if (_meCache && _meCache.username === auth.username) return _meCache;
+  try { _meCache = await apiCall('me'); } catch { _meCache = null; }
+  return _meCache;
+}
+
 async function apiCall(path, options = {}) {
   const res = await fetch('api/' + path, {
     ...options,
@@ -458,6 +496,7 @@ function scheduleSyncPush() {
 
 function logout() {
   auth = null;
+  _meCache = null;
   lsSet('ptcg.auth', null);
   syncState = 'off';
   updateAccountButton();
@@ -573,10 +612,13 @@ async function openCardModal(brief, { variant, onOwnershipChange } = {}) {
   cardModal.showModal();
   let card = brief, set = null;
   try {
+    await getCustomVariants();
     card = await getCard(brief.id);
     set = await getSet(setIdOf(brief.id));
   } catch { /* offline — show what we have */ }
   if (!card.variants && brief.variants) card.variants = brief.variants;
+  const me = await ensureMe();
+  const isAdmin = !!(me && me.admin);
 
   const rows = [];
   const kv = (k, v) => { if (v) rows.push(h('div', { class: 'kv' }, h('span', {}, k), h('span', {}, String(v)))); };
@@ -588,11 +630,12 @@ async function openCardModal(brief, { variant, onOwnershipChange } = {}) {
   kv('HP', card.hp);
   kv('Illustrator', card.illustrator);
 
-  const avail = availableVariants(card);
-  let active = variant && avail.includes(variant) ? variant : avail[0];
+  const avail = () => availableVariants(card);
+  let active = variant && avail().includes(variant) ? variant : avail()[0];
 
   const chipsWrap = h('div', { class: 'chips', style: 'margin:12px 0 4px; justify-content:center' });
   const counterWrap = h('div', {});
+  const adminWrap = h('div', {});
   const imgWrap = h('div', { class: 'card-img-wrap' });
 
   function renderModalImage() {
@@ -606,7 +649,7 @@ async function openCardModal(brief, { variant, onOwnershipChange } = {}) {
 
   function renderVariantUI() {
     renderModalImage(); // the picture reflects the selected printing
-    chipsWrap.replaceChildren(...avail.map((vk) => {
+    chipsWrap.replaceChildren(...avail().map((vk) => {
       const qty = variantQty(card.id, vk);
       return h('button', {
         type: 'button',
@@ -629,6 +672,57 @@ async function openCardModal(brief, { variant, onOwnershipChange } = {}) {
       ),
       h('div', { class: 'muted small', style: 'text-align:center' }, `copies of ${variantLabel(card, active)}`),
     );
+    renderAdminControls();
+  }
+
+  // ---- admin: add custom printings & upload your own variant images ----
+  function renderAdminControls() {
+    adminWrap.replaceChildren();
+    if (!isAdmin) return;
+    const fileInput = h('input', { type: 'file', accept: 'image/*', hidden: '' });
+    fileInput.addEventListener('change', async (e) => {
+      const f = e.target.files[0];
+      if (!f) return;
+      try {
+        const res = await fetch(`api/variant-image?cardId=${encodeURIComponent(card.id)}&variant=${encodeURIComponent(active)}&lang=${encodeURIComponent(lang)}`, {
+          method: 'POST',
+          headers: { ...authHeaders(), 'Content-Type': f.type || 'application/octet-stream' },
+          body: f,
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Upload failed');
+        toast(`Image saved for ${variantLabel(card, active)}`);
+        _setDetailCache.delete(setIdOf(card.id)); // pick up the new variantImages
+        card = await getCard(card.id);
+        renderVariantUI();
+        route(); // rebuild the grid behind the modal with the new image
+      } catch (err) {
+        toast(err.message);
+      }
+      e.target.value = '';
+    });
+    adminWrap.append(
+      h('div', { class: 'row', style: 'justify-content:center; margin-top:10px' },
+        h('button', { type: 'button', class: 'btn ghost small', onclick: async () => {
+          const label = prompt('Name of the printing (e.g. "Cracked Ice Holo"):');
+          if (!label || label.trim().length < 2) return;
+          try {
+            const res = await apiCall('custom-variant', { method: 'POST', body: JSON.stringify({ cardId: card.id, label: label.trim() }) });
+            _customVariants = null;
+            await getCustomVariants();
+            active = res.key;
+            toast(`Added printing: ${res.label}`);
+            renderVariantUI();
+            route(); // the new printing becomes its own tile in the grid behind
+          } catch (err) {
+            toast(err.message);
+          }
+        } }, '＋ Add printing'),
+        h('button', { type: 'button', class: 'btn ghost small', onclick: () => fileInput.click() }, `⬆ Upload ${variantLabel(card, active)} image`),
+        fileInput,
+      ),
+      h('p', { class: 'muted small', style: 'text-align:center; margin:6px 0 0' }, 'Admin: custom printings apply to this card; uploaded images replace the synthetic look.'),
+    );
   }
   renderVariantUI();
 
@@ -638,6 +732,7 @@ async function openCardModal(brief, { variant, onOwnershipChange } = {}) {
     ...rows,
     chipsWrap,
     counterWrap,
+    adminWrap,
     h('div', { class: 'row', style: 'margin-top:14px; justify-content:flex-end' },
       h('button', { class: 'btn ghost', onclick: () => cardModal.close() }, 'Close'),
     ),
@@ -846,6 +941,7 @@ async function renderSetPage(setId) {
   view.replaceChildren(spinner());
   let set;
   try {
+    await getCustomVariants();
     set = await getSet(setId);
   } catch (e) {
     view.replaceChildren(dbErrorView('Could not load this set.', e, () => renderSetPage(setId)));
@@ -1002,6 +1098,7 @@ async function renderPokemonPage(dexStr) {
     return;
   }
   await getIndex(); // ensures set ordering/names are available
+  await getCustomVariants();
   const sp = idx.species.find((s) => s.dex === dex);
   if (!sp) {
     view.replaceChildren(h('div', { class: 'center' }, 'No cards found for this Pokémon.'));
@@ -1052,6 +1149,7 @@ async function renderSearchPage(rawQuery) {
   let idx;
   try {
     idx = await getSearchIndex(); // provides real rarity/type lists from the data
+    await getCustomVariants();
   } catch (e) {
     view.replaceChildren(dbErrorView('Could not load the card database.', e, route));
     return;
@@ -1200,6 +1298,7 @@ async function renderScanPage() {
     let matches, idxRows;
     try {
       await getIndex(); // set names for the result list
+      await getCustomVariants();
       matches = await identifyCard(source, 5);
       idxRows = new Map((await getSearchIndex()).cards.map((row) => [row[0], row]));
     } catch (e) {

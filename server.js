@@ -128,8 +128,23 @@ function sendJSON(res, code, obj) {
   res.writeHead(code, {
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store',
+    'Access-Control-Allow-Origin': '*', // token auth, no cookies — safe to open reads
   });
   res.end(body);
+}
+
+function readRawBody(req, maxBytes = 10 * 1024 * 1024) {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > maxBytes) { reject(new Error('body too large')); req.destroy(); return; }
+      chunks.push(c);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
 }
 
 function readBody(req) {
@@ -184,12 +199,21 @@ function serveStatic(req, res, urlPath) {
     }
     const ext = path.extname(file).toLowerCase();
     const isShell = ext === '.html' || file.endsWith('sw.js') || file.endsWith('config.js');
-    const isCardImage = file.includes(path.join('cdn', 'images'));
-    res.writeHead(200, {
+    const inCdn = file.startsWith(path.join(PUBLIC_DIR, 'cdn'));
+    const isCardImage = inCdn && file.includes(`${path.sep}images${path.sep}`);
+    // card images never change → cache hard; cdn JSON (indexes/sets/custom)
+    // DOES change (builds, admin uploads) → always revalidate
+    const cacheControl = isShell ? 'no-cache'
+      : isCardImage ? 'public, max-age=2592000, immutable'
+      : inCdn ? 'no-cache'
+      : 'public, max-age=86400';
+    const headers = {
       'Content-Type': MIME[ext] || 'application/octet-stream',
-      'Cache-Control': isShell ? 'no-cache' : (isCardImage ? 'public, max-age=2592000, immutable' : 'public, max-age=86400'),
+      'Cache-Control': cacheControl,
       'Content-Length': stat.size,
-    });
+    };
+    if (inCdn) headers['Access-Control-Allow-Origin'] = '*'; // card database is openly readable
+    res.writeHead(200, headers);
     fs.createReadStream(file).pipe(res);
   });
 }
@@ -228,6 +252,8 @@ function startBuild(opts = {}) {
   if (opts.langs) args.push('--langs', opts.langs);
   if (opts.quality) args.push('--quality', opts.quality);
   if (process.env.PTCG_SOURCE_API) args.push('--api', process.env.PTCG_SOURCE_API); // used by tests
+  // e.g. PTCG_BUILD_EXTRA_ARGS="--no-images" when images live on an external CDN (config.imageBase)
+  if (process.env.PTCG_BUILD_EXTRA_ARGS) args.push(...process.env.PTCG_BUILD_EXTRA_ARGS.split(/\s+/).filter(Boolean));
   build = { running: true, phase: 'data', startedAt: Date.now(), error: null, hashesOk: null, log: [] };
   const child = spawn(process.execPath, args, { cwd: __dirname, stdio: ['ignore', 'pipe', 'pipe'] });
   child.stdout.on('data', (d) => d.toString().split('\n').forEach(pushLog));
@@ -260,11 +286,58 @@ function runHashes() {
   }
 }
 
+// ---------- custom printings & variant image library ----------
+
+const CUSTOM_FILE = path.join(CDN_DIR, 'custom.json');
+const CARD_ID_RE = /^[a-zA-Z0-9.-]{1,64}$/;
+const VARIANT_KEY_RE = /^[a-zA-Z0-9_-]{1,24}$/;
+const LANG_RE = /^[a-z-]{2,7}$/;
+
+function slugifyVariant(label) {
+  return label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 24);
+}
+
+function setIdOfCard(cardId) {
+  const i = cardId.lastIndexOf('-');
+  return i > 0 ? cardId.slice(0, i) : cardId;
+}
+function localIdOfCard(cardId) {
+  const i = cardId.lastIndexOf('-');
+  return i > 0 ? cardId.slice(i + 1) : cardId;
+}
+
+/** List every variant image on disk (from the per-set JSON files) for the API. */
+function variantImageManifest(lang) {
+  const langDir = path.join(CDN_DIR, lang);
+  const setsDir = path.join(langDir, 'sets');
+  const images = [];
+  let setFiles = [];
+  try { setFiles = fs.readdirSync(setsDir).filter((f) => f.endsWith('.json')); } catch { return images; }
+  for (const f of setFiles) {
+    const set = readJSON(path.join(setsDir, f), null);
+    if (!set || !Array.isArray(set.cards)) continue;
+    for (const c of set.cards) {
+      if (!c.variantImages) continue;
+      for (const [vk, qualities] of Object.entries(c.variantImages)) {
+        images.push({
+          card: c.id,
+          name: c.name,
+          set: set.id,
+          variant: vk,
+          qualities,
+          urls: Object.fromEntries(qualities.map((q) => [q, `/cdn/${lang}/images/${set.id}/${localIdOfCard(c.id)}/${vk}-${q}.webp`])),
+        });
+      }
+    }
+  }
+  return images;
+}
+
 // ---------- api routes ----------
 
 const USERNAME_RE = /^[a-zA-Z0-9_]{3,30}$/;
 
-async function handleApi(req, res, pathname, ip) {
+async function handleApi(req, res, pathname, ip, url) {
   if (pathname === '/api/health' && req.method === 'GET') {
     return sendJSON(res, 200, { ok: true, auth: true, version: 2 });
   }
@@ -295,6 +368,12 @@ async function handleApi(req, res, pathname, ip) {
     }
     startBuild({ langs, quality });
     return sendJSON(res, 200, { ok: true, started: true });
+  }
+
+  // public, CORS-open image API: every user-added variant image with URLs
+  if (pathname === '/api/variant-images' && req.method === 'GET') {
+    const lang = LANG_RE.test(url.searchParams.get('lang') || '') ? url.searchParams.get('lang') : 'en';
+    return sendJSON(res, 200, { lang, images: variantImageManifest(lang) });
   }
 
   if (pathname === '/api/register' && req.method === 'POST') {
@@ -341,6 +420,64 @@ async function handleApi(req, res, pathname, ip) {
 
   if (pathname === '/api/me' && req.method === 'GET') {
     return sendJSON(res, 200, { username: user.display, admin: isAdminUser(user, loadUsers()) });
+  }
+
+  // ---- admin: define a custom printing (e.g. "Cracked Ice Holo") for a card ----
+  if (pathname === '/api/custom-variant' && req.method === 'POST') {
+    if (!isAdminUser(user, loadUsers())) return sendJSON(res, 403, { error: 'Administrator account required' });
+    const body = await readBody(req);
+    const cardId = typeof body.cardId === 'string' && CARD_ID_RE.test(body.cardId) ? body.cardId : null;
+    const label = typeof body.label === 'string' ? body.label.trim().slice(0, 40) : '';
+    if (!cardId || label.length < 2) return sendJSON(res, 400, { error: 'cardId and a printing name (2+ characters) are required' });
+    const key = slugifyVariant(label);
+    if (!VARIANT_KEY_RE.test(key)) return sendJSON(res, 400, { error: 'That name produces an invalid key' });
+    const custom = readJSON(CUSTOM_FILE, { cards: {} });
+    if (!custom.cards[cardId]) custom.cards[cardId] = { variants: {} };
+    custom.cards[cardId].variants[key] = label;
+    writeJSONAtomic(CUSTOM_FILE, custom);
+    return sendJSON(res, 200, { ok: true, cardId, key, label });
+  }
+
+  // ---- admin: upload your own image for a specific printing of a card ----
+  if (pathname === '/api/variant-image' && req.method === 'POST') {
+    if (!isAdminUser(user, loadUsers())) return sendJSON(res, 403, { error: 'Administrator account required' });
+    const cardId = url.searchParams.get('cardId') || '';
+    const variant = url.searchParams.get('variant') || '';
+    const lang = LANG_RE.test(url.searchParams.get('lang') || '') ? url.searchParams.get('lang') : 'en';
+    if (!CARD_ID_RE.test(cardId) || !VARIANT_KEY_RE.test(variant)) {
+      return sendJSON(res, 400, { error: 'Valid cardId and variant query parameters are required' });
+    }
+    let sharp;
+    try { sharp = require('sharp'); } catch {
+      return sendJSON(res, 501, { error: 'Image processing needs the sharp package on the server: npm install --no-save sharp (the in-app database download installs it automatically)' });
+    }
+    const setId = setIdOfCard(cardId);
+    const localId = localIdOfCard(cardId);
+    const setFile = path.join(CDN_DIR, lang, 'sets', setId + '.json');
+    const set = readJSON(setFile, null);
+    const card = set && Array.isArray(set.cards) ? set.cards.find((c) => c.id === cardId) : null;
+    if (!card) return sendJSON(res, 404, { error: `Card ${cardId} not found in the ${lang} database` });
+    const raw = await readRawBody(req);
+    if (!raw.length) return sendJSON(res, 400, { error: 'Send the image file as the request body' });
+    const dir = path.join(CDN_DIR, lang, 'images', setId, localId);
+    fs.mkdirSync(dir, { recursive: true });
+    try {
+      await sharp(raw).resize({ width: 745, withoutEnlargement: true }).webp({ quality: 88 }).toFile(path.join(dir, `${variant}-high.webp`));
+      await sharp(raw).resize({ width: 245, withoutEnlargement: true }).webp({ quality: 82 }).toFile(path.join(dir, `${variant}-low.webp`));
+    } catch (e) {
+      return sendJSON(res, 400, { error: 'Could not process that image: ' + e.message });
+    }
+    if (!card.variantImages) card.variantImages = {};
+    card.variantImages[variant] = ['low', 'high'];
+    if (!card.image) card.image = `images/${setId}/${localId}`; // imageless card gains a base path for variant art
+    writeJSONAtomic(setFile, set);
+    return sendJSON(res, 200, {
+      ok: true,
+      urls: {
+        low: `/cdn/${lang}/images/${setId}/${localId}/${variant}-low.webp`,
+        high: `/cdn/${lang}/images/${setId}/${localId}/${variant}-high.webp`,
+      },
+    });
   }
 
   if (pathname === '/api/collection' && req.method === 'GET') {
@@ -392,7 +529,7 @@ const server = http.createServer(async (req, res) => {
   const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || '?';
   try {
     if (url.pathname.startsWith('/api/')) {
-      await handleApi(req, res, url.pathname, ip);
+      await handleApi(req, res, url.pathname, ip, url);
     } else if (req.method === 'GET' || req.method === 'HEAD') {
       serveStatic(req, res, url.pathname);
     } else {

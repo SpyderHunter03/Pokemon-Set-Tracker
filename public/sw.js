@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — service worker (offline support) */
 importScripts('config.js');
 
-const SHELL_CACHE = 'ptcg-shell-v7';
+const SHELL_CACHE = 'ptcg-shell-v9';
 const DATA_CACHE = 'ptcg-data-v2';
 const IMG_CACHE = 'ptcg-img-v1';
 
@@ -21,6 +21,10 @@ const CDN_URL = new URL(
   (((self.PTCG_CONFIG && self.PTCG_CONFIG.cdnBase) || 'cdn').replace(/\/+$/, '')) + '/',
   self.registration.scope
 ).href;
+// Optional separately controlled image CDN (config.imageBase)
+const IMAGE_URL = (self.PTCG_CONFIG && self.PTCG_CONFIG.imageBase)
+  ? new URL(self.PTCG_CONFIG.imageBase.replace(/\/+$/, '') + '/', self.registration.scope).href
+  : null;
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(SHELL_CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
@@ -48,6 +52,23 @@ self.addEventListener('fetch', (e) => {
 
   // Never cache the sync API — always live.
   if (url.pathname.includes('/api/')) return;
+
+  // external image CDN: cache first (card images never change)
+  if (IMAGE_URL && e.request.url.startsWith(IMAGE_URL)) {
+    e.respondWith(
+      caches.match(e.request).then((hit) =>
+        hit ||
+        fetch(e.request).then((res) => {
+          if (res.ok) {
+            const copy = res.clone();
+            caches.open(IMG_CACHE).then((c) => { c.put(e.request, copy); trimCache(IMG_CACHE, 4000); });
+          }
+          return res;
+        })
+      )
+    );
+    return;
+  }
 
   if (e.request.url.startsWith(CDN_URL)) {
     // Card images & set logos: cache first (they never change).

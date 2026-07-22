@@ -41,12 +41,12 @@ const { chromium } = require('playwright');
   // ---- set page: one tile per printing ----
   await page.click('.set-card:has-text("Base Set")');
   await page.waitForSelector('.tcg-card');
-  check('set page shows 7 printing tiles for 5 cards', (await page.locator('.tcg-card').count()) === 7);
+  check('set page shows 8 printing tiles (incl. custom Cracked Ice Holo)', (await page.locator('.tcg-card').count()) === 8);
   check('progress counts unique cards', (await page.textContent('.page-head .muted')).trim() === '1 / 102');
 
   const badges = await page.locator('.tcg-card .variant-badge').allTextContents();
-  check('variant labels incl. Unlimited vs 1st Edition',
-    JSON.stringify(badges.slice(0, 4)) === JSON.stringify(['Holo', '1st Edition', 'Unlimited', '1st Edition']));
+  check('variant labels incl. Unlimited, 1st Edition, custom printing',
+    JSON.stringify(badges.slice(0, 4)) === JSON.stringify(['Holo', '1st Edition', 'Cracked Ice Holo', 'Unlimited']));
 
   check('imageless cards show clean placeholders', (await page.locator('.tcg-card .noimg').count()) === 2);
   check('high-only card got an image', (await page.locator('.tcg-card[data-card-id="base1-97"] img').count()) === 1);
@@ -66,12 +66,13 @@ const { chromium } = require('playwright');
   await page.click('.tcg-card >> nth=0 >> .info-btn');
   await page.waitForSelector('#card-modal[open] .chips .chip');
   const chipTexts = await page.locator('#card-modal .chips .chip').allTextContents();
-  check('modal chips show printings + other', chipTexts.length === 3 && chipTexts[0].startsWith('Holo') && chipTexts[2].startsWith('Other'));
+  check('modal chips show printings + custom + other',
+    chipTexts.length === 4 && chipTexts[0].startsWith('Holo') && chipTexts[2].startsWith('Cracked Ice') && chipTexts[3].startsWith('Other'));
   check('modal shows set/number/rarity', (await page.textContent('#card-modal-body')).includes('4 / 102'));
   await page.click('#card-modal .qty-row button:last-child'); // + on active (Holo)
   c = await coll();
   check('modal + increments active printing', c['base1-4'].holo === 2);
-  await page.click('#card-modal .btn.ghost');
+  await page.click('#card-modal button:has-text("Close")');
   check('qty badge ×2 on holo tile', (await page.textContent('.tcg-card >> nth=0 >> .qty-badge')).trim() === '×2');
 
   // multi-copy tile: tap opens details instead of clearing
@@ -79,19 +80,21 @@ const { chromium } = require('playwright');
   await page.waitForSelector('#card-modal[open]');
   c = await coll();
   check('tap on multi-copy printing opens details, keeps data', c['base1-4'].holo === 2);
-  await page.click('#card-modal .btn.ghost');
+  await page.click('#card-modal button:has-text("Close")');
 
   // owned/missing filters act per printing
   await page.click('.chip:has-text("Owned")');
   check('owned filter shows 3 printings', (await page.locator('.tcg-card').count()) === 3);
   await page.click('.chip:has-text("Missing")');
-  check('missing filter shows 4 printings', (await page.locator('.tcg-card').count()) === 4);
+  check('missing filter shows 5 printings', (await page.locator('.tcg-card').count()) === 5);
   await page.click('.chip:has-text("All")');
 
   // ---- synthetic variant looks + real variant scans ----
   check('holo printing gets holo sheen', (await page.locator('.tcg-card >> nth=0 >> .fx-holo').count()) === 1);
   check('1st Edition printing gets the stamp', (await page.locator('.tcg-card >> nth=1 >> .fx-stamp').count()) === 1);
-  check('unlimited printing has neither', (await page.locator('.tcg-card >> nth=2 >> .fx').count()) === 0);
+  check('unlimited printing has neither', (await page.locator('.tcg-card[data-card-id="base1-58"][data-variant="normal"] >> .fx').count()) === 0);
+  const customT = page.locator('.tcg-card[data-variant="cracked-ice-holo"]');
+  check('custom printing survives database rebuild with its image', (await customT.locator('img').getAttribute('src')).includes('cracked-ice-holo-low.webp'));
   const pikaFirstEd = page.locator('.tcg-card[data-card-id="base1-58"][data-variant="firstEdition"]');
   check('real variant scan used when present', (await pikaFirstEd.locator('img').getAttribute('src')).includes('firstEdition-low.webp'));
   check('real variant scan suppresses synthetic stamp', (await pikaFirstEd.locator('.fx-stamp').count()) === 0);
@@ -102,7 +105,7 @@ const { chromium } = require('playwright');
   check('modal shows variant scan for 1st Edition', (await page.locator('#card-modal .card-img-wrap img').getAttribute('src')).includes('firstEdition'));
   await page.click('#card-modal .chips .chip:has-text("Unlimited")');
   check('modal swaps to base image for Unlimited', !(await page.locator('#card-modal .card-img-wrap img').getAttribute('src')).includes('firstEdition'));
-  await page.click('#card-modal .btn.ghost');
+  await page.click('#card-modal button:has-text("Close")');
 
   // ---- sorting ----
   await page.selectOption('.chips select', 'name');
@@ -117,7 +120,7 @@ const { chromium } = require('playwright');
 
   // master set mode
   await page.click('.chip:has-text("Master set")');
-  check('master set counts printings', (await page.textContent('.page-head .muted')).trim() === '3 / 7 variants');
+  check('master set counts printings incl. custom', (await page.textContent('.page-head .muted')).trim() === '3 / 8 variants');
   await page.click('.chip:has-text("Master set")');
 
   // ---- Pokémon view ----
@@ -129,8 +132,8 @@ const { chromium } = require('playwright');
 
   await page.click('.set-card:has-text("Charizard")');
   await page.waitForSelector('.tcg-card');
-  check('charizard page: 3 printings across 2 sets, newest first',
-    (await page.locator('.tcg-card').count()) === 3 &&
+  check('charizard page: 4 printings across 2 sets, newest first',
+    (await page.locator('.tcg-card').count()) === 4 &&
     (await page.locator('.tcg-card >> nth=0').getAttribute('data-card-id')) === 'swsh3-20');
   check('pokemon page progress', (await page.textContent('.page-head .muted')).trim() === '1 / 2 owned');
   await page.selectOption('.chips select', 'oldest');
@@ -157,7 +160,7 @@ const { chromium } = require('playwright');
   await page.fill('#global-search-input', 'char');
   await page.press('#global-search-input', 'Enter');
   await page.waitForSelector('.card-grid .tcg-card');
-  check('global search shows all Charizard printings', (await page.locator('.card-grid .tcg-card').count()) === 3);
+  check('global search shows all Charizard printings', (await page.locator('.card-grid .tcg-card').count()) === 4);
   check('rarity dropdown from real data', (await page.locator('select >> nth=0 >> option').allTextContents()).includes('Ultra Rare'));
 
   // ---- scanner ----
@@ -206,6 +209,23 @@ const { chromium } = require('playwright');
   // the account modal is still open from registration — admin area renders async
   await page.waitForTimeout(800);
   check('non-admin sees no Administration section', (await page.locator('#admin-area button').count()) === 0);
+
+  // ---- external image CDN (config.imageBase) ----
+  await context.addInitScript(() => {
+    const cfg = { cdnBase: 'cdn', defaultLanguage: 'en', imageBase: 'http://localhost:3999/imgcdn' };
+    Object.defineProperty(self, 'PTCG_CONFIG', { get: () => cfg, set: () => {} });
+  });
+  await page.goto('http://localhost:3111/?extcdn=1#/set/base1'); // query change forces a real document load
+  await page.waitForSelector('.tcg-card img');
+  const extSrc = await page.locator('.tcg-card img >> nth=0').getAttribute('src');
+  check('images come from the external CDN when imageBase is set', extSrc.startsWith('http://localhost:3999/imgcdn/en/images/'));
+  await page.waitForFunction(() => {
+    const img = document.querySelector('.tcg-card img');
+    return img && img.complete && img.naturalWidth > 0;
+  });
+  check('external CDN images actually load', true);
+  const dataReq = await page.evaluate(async () => (await fetch('cdn/en/index.json')).ok);
+  check('card data still served locally alongside external images', dataReq === true);
 
   console.log(errors.length ? 'JS ERRORS:\n' + errors.join('\n') : 'No JS errors, zero external requests.');
   await browser.close();
