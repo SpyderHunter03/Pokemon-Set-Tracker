@@ -15,6 +15,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { spawn } = require('child_process');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -193,13 +194,107 @@ function serveStatic(req, res, urlPath) {
   });
 }
 
+// ---------- card database builder (runs scripts/build-data.js on demand) ----------
+
+const CDN_DIR = path.join(PUBLIC_DIR, 'cdn');
+const PROGRESS_FILE = path.join(CDN_DIR, '.progress.json');
+let build = { running: false, phase: null, startedAt: 0, error: null, hashesOk: null, log: [] };
+
+function dbExists() {
+  try {
+    return fs.readdirSync(CDN_DIR, { withFileTypes: true })
+      .some((d) => d.isDirectory() && fs.existsSync(path.join(CDN_DIR, d.name, 'index.json')));
+  } catch { return false; }
+}
+
+/** The first registered account is the administrator. */
+function isAdminUser(user, users) {
+  if (user.admin === true) return true;
+  if (Object.values(users).some((u) => u.admin === true)) return false;
+  // accounts created before the admin flag existed: earliest registration wins
+  const earliest = Object.values(users).sort((a, b) => new Date(a.created) - new Date(b.created))[0];
+  return !!earliest && earliest.id === user.id;
+}
+
+function pushLog(line) {
+  const text = String(line).trim();
+  if (!text) return;
+  build.log.push(text.slice(0, 200));
+  if (build.log.length > 30) build.log.splice(0, build.log.length - 30);
+}
+
+function startBuild(opts = {}) {
+  const args = [path.join(__dirname, 'scripts', 'build-data.js')];
+  if (opts.langs) args.push('--langs', opts.langs);
+  if (opts.quality) args.push('--quality', opts.quality);
+  if (process.env.PTCG_SOURCE_API) args.push('--api', process.env.PTCG_SOURCE_API); // used by tests
+  build = { running: true, phase: 'data', startedAt: Date.now(), error: null, hashesOk: null, log: [] };
+  const child = spawn(process.execPath, args, { cwd: __dirname, stdio: ['ignore', 'pipe', 'pipe'] });
+  child.stdout.on('data', (d) => d.toString().split('\n').forEach(pushLog));
+  child.stderr.on('data', (d) => d.toString().split('\n').forEach(pushLog));
+  child.on('error', (e) => { build.running = false; build.phase = null; build.error = 'Could not start downloader: ' + e.message; });
+  child.on('exit', (code) => {
+    if (code === 0) runHashes();
+    else { build.running = false; build.phase = null; build.error = `Card downloader exited with code ${code}`; }
+  });
+}
+
+/** After the data build: best-effort scanner index (needs the optional sharp package). */
+function runHashes() {
+  build.phase = 'hashes';
+  const finish = (ok) => { build.running = false; build.phase = null; build.hashesOk = ok; };
+  const runScript = () => {
+    const child = spawn(process.execPath, [path.join(__dirname, 'scripts', 'build-hashes.js')], { cwd: __dirname, stdio: ['ignore', 'pipe', 'pipe'] });
+    child.stdout.on('data', (d) => d.toString().split('\n').forEach(pushLog));
+    child.stderr.on('data', (d) => d.toString().split('\n').forEach(pushLog));
+    child.on('error', () => finish(false));
+    child.on('exit', (code) => finish(code === 0));
+  };
+  try {
+    require.resolve('sharp');
+    runScript();
+  } catch {
+    const npm = spawn(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['install', '--no-save', 'sharp'], { cwd: __dirname, stdio: 'ignore' });
+    npm.on('error', () => finish(false));
+    npm.on('exit', (code) => (code === 0 ? runScript() : finish(false)));
+  }
+}
+
 // ---------- api routes ----------
 
 const USERNAME_RE = /^[a-zA-Z0-9_]{3,30}$/;
 
 async function handleApi(req, res, pathname, ip) {
   if (pathname === '/api/health' && req.method === 'GET') {
-    return sendJSON(res, 200, { ok: true, auth: true, version: 1 });
+    return sendJSON(res, 200, { ok: true, auth: true, version: 2 });
+  }
+
+  if (pathname === '/api/build-status' && req.method === 'GET') {
+    return sendJSON(res, 200, {
+      running: build.running,
+      phase: build.phase,
+      error: build.error,
+      hashesOk: build.hashesOk,
+      dbExists: dbExists(),
+      progress: readJSON(PROGRESS_FILE, null),
+      log: build.log.slice(-5),
+    });
+  }
+
+  if (pathname === '/api/build-data' && req.method === 'POST') {
+    if (build.running) return sendJSON(res, 409, { error: 'A download is already running' });
+    const body = await readBody(req);
+    const langs = typeof body.langs === 'string' && /^[a-z-]{2,7}(,[a-z-]{2,7})*$/.test(body.langs) ? body.langs : '';
+    const quality = ['low', 'high', 'both'].includes(body.quality) ? body.quality : '';
+    if (dbExists()) {
+      // database already present → only the administrator may re-run/update it
+      const admin = authUser(req);
+      if (!admin || !isAdminUser(admin, loadUsers())) {
+        return sendJSON(res, 403, { error: 'Administrator account required to update the card database' });
+      }
+    }
+    startBuild({ langs, quality });
+    return sendJSON(res, 200, { ok: true, started: true });
   }
 
   if (pathname === '/api/register' && req.method === 'POST') {
@@ -217,6 +312,7 @@ async function handleApi(req, res, pathname, ip) {
       salt,
       hash: hashPassword(password, salt),
       created: new Date().toISOString(),
+      admin: Object.keys(users).length === 0, // first account = administrator
     };
     users[key] = user;
     saveUsers(users);
@@ -244,7 +340,7 @@ async function handleApi(req, res, pathname, ip) {
   const collFile = path.join(COLLECTIONS_DIR, user.id + '.json');
 
   if (pathname === '/api/me' && req.method === 'GET') {
-    return sendJSON(res, 200, { username: user.display });
+    return sendJSON(res, 200, { username: user.display, admin: isAdminUser(user, loadUsers()) });
   }
 
   if (pathname === '/api/collection' && req.method === 'GET') {

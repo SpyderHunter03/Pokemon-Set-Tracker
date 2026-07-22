@@ -24,7 +24,18 @@ A lightweight, self-hostable web app (PWA) for tracking which Pokémon cards you
 
 Requires Node.js 18+. The server has **zero dependencies**; only the optional scanner index needs one package.
 
-### 1. Build the card database (one time)
+### 1. Run the app
+
+```bash
+node server.js
+# open http://localhost:3000
+```
+
+### 2. Download the card database — from the app
+
+On first visit the main page shows a **Download card database** button: press it and a progress bar tracks the download (sets become browsable as they finish; the scanner index is built automatically at the end). Later, the **first registered account** gets an **Administration** section in the 👤 menu with an **Update card database** button that picks up newly released sets.
+
+Prefer the command line (needed for extra languages / high-res images)? The same downloader is scriptable:
 
 ```bash
 node scripts/build-data.js                  # English, all sets, low-res images
@@ -43,21 +54,9 @@ Resumable: re-run any time — it skips what's already downloaded and picks up n
 
 **Size expectations (rough):** JSON data is tens of MB per language; low-res images run several hundred MB to ~1 GB per language for the full database; high-res is several GB. `--sets` keeps it small.
 
-### 2. Build the scan index (optional — powers the scanner)
+### Scanner index (automatic)
 
-```bash
-npm install          # installs sharp, the one optional dependency
-node scripts/build-hashes.js
-```
-
-This fingerprints every downloaded card image (a few minutes for the full database). Re-run it after downloading new sets.
-
-### 3. Run the app
-
-```bash
-node server.js
-# open http://localhost:3000
-```
+The in-app download builds the scanner fingerprints automatically (it installs `sharp`, the one optional dependency, on the fly). Manual equivalent: `npm install --no-save sharp && node scripts/build-hashes.js`.
 
 Env vars: `PORT` (default 3000), `DATA_DIR` (default `./data` — user accounts & synced collections live there as JSON files; back up that folder and you've backed up everything).
 

@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.2.0';
+const APP_VERSION = '3.3.0';
 
 /* ============================================================
  * Storage helpers
@@ -331,13 +331,19 @@ let auth = lsGet('ptcg.auth'); // { token, username }
 let syncTimer = null;
 let syncState = 'off'; // off | idle | syncing | error
 
-async function detectServer() {
-  try {
-    const res = await fetch('api/health', { cache: 'no-store' });
-    const data = await res.json();
-    serverAvailable = !!data.ok;
-  } catch { serverAvailable = false; }
-  updateAccountButton();
+let _serverCheckPromise = null;
+function detectServer() {
+  if (!_serverCheckPromise) {
+    _serverCheckPromise = (async () => {
+      try {
+        const res = await fetch('api/health', { cache: 'no-store' });
+        const data = await res.json();
+        serverAvailable = !!data.ok;
+      } catch { serverAvailable = false; }
+      updateAccountButton();
+    })();
+  }
+  return _serverCheckPromise;
 }
 
 function authHeaders() {
@@ -573,6 +579,105 @@ async function openCardModal(brief, { variant, onOwnershipChange } = {}) {
 }
 
 /* ============================================================
+ * Card database download (button on main page + admin re-run)
+ * ============================================================ */
+let buildPollTimer = null;
+
+function stopBuildPoll() {
+  clearInterval(buildPollTimer);
+  buildPollTimer = null;
+}
+
+async function getBuildStatus() {
+  try {
+    const res = await fetch('api/build-status', { cache: 'no-store' });
+    return res.ok ? await res.json() : null;
+  } catch { return null; }
+}
+
+async function startDatabaseBuild() {
+  return apiCall('build-data', { method: 'POST', body: JSON.stringify({}) });
+}
+
+/** Live progress element; polls until the build finishes, then calls onDone. */
+function buildProgressView(onDone) {
+  const barFill = h('div', {});
+  const bar = h('div', { class: 'progress', style: 'height:10px; margin:12px 0 8px' }, barFill);
+  const line1 = h('div', { class: 'muted', style: 'text-align:center' }, 'Starting download…');
+  const line2 = h('div', { class: 'muted small', style: 'text-align:center' }, '');
+  const wrap = h('div', { class: 'build-progress' }, bar, line1, line2);
+
+  async function tick() {
+    const status = await getBuildStatus();
+    if (!status) return;
+    const p = status.progress || {};
+    if (status.running) {
+      const pct = p.setTotal ? Math.round(((p.setsDone || 0) / p.setTotal) * 100) : 0;
+      barFill.style.width = pct + '%';
+      if (status.phase === 'hashes') {
+        line1.textContent = 'Building the card scanner index…';
+        line2.textContent = 'almost done';
+      } else {
+        line1.textContent = `Downloading sets: ${p.setsDone || 0} / ${p.setTotal || '…'}${p.langCount > 1 ? `  (language ${(p.langIndex || 0) + 1}/${p.langCount})` : ''}`;
+        line2.textContent = `${(p.imagesDownloaded || 0).toLocaleString()} images downloaded${p.setName ? ` · now: ${p.setName}` : ''}`;
+      }
+    } else {
+      stopBuildPoll();
+      if (status.error || (p && p.error)) {
+        line1.textContent = 'Download failed: ' + (status.error || p.error);
+        line2.textContent = 'It is safe to retry — the download resumes where it stopped.';
+      } else {
+        barFill.style.width = '100%';
+        line1.textContent = 'Card database ready!';
+        line2.textContent = status.hashesOk === false ? 'Scanner index skipped (sharp not available) — everything else works.' : '';
+        clearDataCaches();
+        if (onDone) onDone();
+      }
+    }
+  }
+  stopBuildPoll();
+  buildPollTimer = setInterval(tick, 2000);
+  tick();
+  return wrap;
+}
+
+/** Shown on the main page when the app has no card database yet. */
+async function renderBootstrap() {
+  const status = await getBuildStatus();
+  const panel = h('div', { class: 'center', style: 'max-width:460px; margin:40px auto' });
+
+  const showProgress = () => {
+    panel.replaceChildren(
+      h('h2', {}, 'Building your card database'),
+      buildProgressView(() => { toast('Card database ready'); renderHome(); }),
+      h('p', { class: 'muted small', style: 'margin-top:14px' }, 'Sets appear as they finish — you can start browsing before the download completes.'),
+      h('button', { class: 'btn ghost small', onclick: () => renderHome() }, 'Browse what’s ready'),
+    );
+  };
+
+  if (status && status.running) {
+    showProgress();
+  } else {
+    panel.replaceChildren(
+      h('h2', {}, 'Welcome! Let’s get your cards'),
+      h('p', { class: 'muted' }, 'This tracker hosts its own card database. One download pulls every set and card image to this server — after that, no third-party services are ever contacted.'),
+      h('p', { class: 'muted small' }, 'The full database is a few hundred MB of images and can take a while. It downloads in the background and resumes if interrupted.'),
+      h('button', { class: 'btn', style: 'margin-top:8px', onclick: async (e) => {
+        e.target.disabled = true;
+        try {
+          await startDatabaseBuild();
+          showProgress();
+        } catch (err) {
+          e.target.disabled = false;
+          toast(err.message);
+        }
+      } }, '⬇️ Download card database'),
+    );
+  }
+  view.replaceChildren(panel);
+}
+
+/* ============================================================
  * Pages — Sets home
  * ============================================================ */
 async function renderHome() {
@@ -581,8 +686,23 @@ async function renderHome() {
   try {
     sets = await getSets();
   } catch (e) {
-    view.replaceChildren(dbErrorView('Could not load the card database.', e, renderHome));
+    await detectServer(); // make sure we know whether a server is present
+    if (e.notFound && serverAvailable) {
+      renderBootstrap(); // no database yet — offer the in-app download
+    } else {
+      view.replaceChildren(dbErrorView('Could not load the card database.', e, renderHome));
+    }
     return;
+  }
+
+  // a download may still be running (first build or admin update) — show it
+  let runningBanner = null;
+  if (serverAvailable) {
+    const status = await getBuildStatus();
+    if (status && status.running) {
+      runningBanner = h('div', { class: 'stat', style: 'margin-bottom:14px; text-align:left; padding:10px 14px' },
+        buildProgressView(() => { toast('Card database updated'); clearDataCaches(); renderHome(); }));
+    }
   }
 
   const ordered = [...sets].reverse(); // newest first
@@ -630,7 +750,7 @@ async function renderHome() {
   }
   renderSetCards('');
 
-  view.replaceChildren(banner, h('div', { class: 'set-filter' }, filterInput), grid);
+  view.replaceChildren(...(runningBanner ? [runningBanner] : []), banner, h('div', { class: 'set-filter' }, filterInput), grid);
 }
 
 function updateStatsBanner() {
@@ -1164,10 +1284,54 @@ async function renderLanguageArea() {
   );
 }
 
+/** Administration section (first registered account): update the card database. */
+async function renderAdminArea() {
+  const area = document.getElementById('admin-area');
+  area.replaceChildren();
+  if (!serverAvailable || !auth) return;
+  let me;
+  try { me = await apiCall('me'); } catch { return; }
+  if (!me.admin) return;
+
+  const content = h('div', {});
+  area.append(h('hr'), h('h3', {}, 'Administration'), content);
+
+  async function renderControls() {
+    const status = await getBuildStatus();
+    if (status && status.running) {
+      content.replaceChildren(
+        h('p', { class: 'muted small' }, 'Card database update in progress:'),
+        buildProgressView(() => { toast('Card database updated'); renderControls(); }),
+      );
+      return;
+    }
+    content.replaceChildren(
+      h('p', { class: 'muted small' }, 'Re-runs the card downloader: picks up newly released sets and missing images, then refreshes the scanner index. Existing files are skipped, so updates are quick.'),
+      h('div', { class: 'row' },
+        h('button', { class: 'btn small', onclick: async (e) => {
+          e.target.disabled = true;
+          try {
+            await startDatabaseBuild();
+            renderControls();
+          } catch (err) {
+            e.target.disabled = false;
+            toast(err.message);
+          }
+        } }, '🔄 Update card database'),
+      ),
+      status && status.progress && status.progress.finishedAt
+        ? h('p', { class: 'muted small', style: 'margin-top:8px' }, 'Last completed: ' + new Date(status.progress.finishedAt).toLocaleString())
+        : null,
+    );
+  }
+  renderControls();
+}
+
 function renderAccountModal() {
   const statusEl = document.getElementById('account-status');
   const formsEl = document.getElementById('account-forms');
   renderLanguageArea();
+  renderAdminArea();
 
   if (!serverAvailable) {
     statusEl.replaceChildren(h('p', { class: 'muted' },
@@ -1279,6 +1443,7 @@ function importCollection(file) {
 function route() {
   const hash = location.hash.slice(1) || '/';
   stopScanner(); // release the camera when leaving the scan page
+  stopBuildPoll(); // pages restart their own progress polling if needed
   const setMatch = hash.match(/^\/set\/(.+)$/);
   const searchMatch = hash.match(/^\/search\/(.*)$/);
   const pokeMatch = hash.match(/^\/pokemon\/(\d+)$/);

@@ -171,6 +171,11 @@ const { chromium } = require('playwright');
     remote.collection && remote.collection['base1-4'] && remote.collection['base1-4'].holo === 2 &&
     remote.collection['base1-4'].firstEdition === 1 && remote.collection['base1-58'].normal === 2);
 
+  // this user is NOT the first account (bootstrap test registered the admin);
+  // the account modal is still open from registration — admin area renders async
+  await page.waitForTimeout(800);
+  check('non-admin sees no Administration section', (await page.locator('#admin-area button').count()) === 0);
+
   console.log(errors.length ? 'JS ERRORS:\n' + errors.join('\n') : 'No JS errors, zero external requests.');
   await browser.close();
   if (failCount) console.log(failCount + ' check(s) FAILED');

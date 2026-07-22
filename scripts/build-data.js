@@ -110,6 +110,29 @@ function writeJSON(file, obj) {
 
 let imagesDownloaded = 0, imagesSkipped = 0, imageFailures = 0, cardFailures = 0;
 
+// ---------- progress file (read by the app/server for the download UI) ----------
+const PROGRESS_FILE = path.join(OUT, '.progress.json');
+const progressState = {
+  startedAt: new Date().toISOString(),
+  langs: LANGS,
+  langIndex: 0,
+  langCount: LANGS.length,
+  lang: null,
+  setsDone: 0,
+  setTotal: 0,
+  setName: null,
+  cardsEstimate: 0,
+  done: false,
+  error: null,
+};
+function writeProgress(extra = {}) {
+  Object.assign(progressState, extra, {
+    imagesDownloaded, imagesSkipped, imageFailures,
+    updatedAt: new Date().toISOString(),
+  });
+  try { writeJSON(PROGRESS_FILE, progressState); } catch { /* disk hiccup — progress is cosmetic */ }
+}
+
 async function downloadFile(remoteUrl, dest) {
   if (fs.existsSync(dest)) { imagesSkipped++; return; }
   try {
@@ -162,9 +185,16 @@ async function buildLanguage(lang) {
     console.warn('Unknown set ids ignored: ' + ONLY_SETS.filter((id) => !found.has(id)).join(', '));
   }
   console.log(`Sets to process: ${sets.length} of ${allSets.length}`);
+  writeProgress({
+    lang,
+    setTotal: sets.length,
+    setsDone: 0,
+    cardsEstimate: sets.reduce((a, s) => a + ((s.cardCount && s.cardCount.total) || 0), 0),
+  });
 
   for (let si = 0; si < sets.length; si++) {
     const brief = sets[si];
+    writeProgress({ setName: brief.name });
     const setFile = path.join(langOut, 'sets', brief.id + '.json');
     let setData;
 
@@ -223,7 +253,8 @@ async function buildLanguage(lang) {
         await downloadFile(setData.remoteLogo + '.png', path.join(langOut, 'images', setData.id, 'logo.png'));
       }
       const withImages = setData.cards.filter((c) => c.remoteImage);
-      await pool(withImages, CONCURRENCY, async (c) => {
+      await pool(withImages, CONCURRENCY, async (c, ci) => {
+        if (ci % 10 === 0) writeProgress();
         const dir = path.join(langOut, 'images', setData.id, localIdOf(c.id));
         for (const q of QUALITIES) {
           await downloadFile(`${c.remoteImage}/${q}.webp`, path.join(dir, `${q}.webp`));
@@ -248,10 +279,22 @@ async function buildLanguage(lang) {
       if (corrected) writeJSON(setFile, setData);
       process.stdout.write(`    images: ${imagesDownloaded} downloaded, ${imagesSkipped} already present${corrected ? `, ${corrected} card(s) marked imageless` : ''}\n`);
     }
+
+    // publish indexes after every set so the app becomes usable while a long
+    // first download is still running
+    buildIndexes(lang, langOut, allSets);
+    writeProgress({ setsDone: si + 1 });
   }
 
-  // ---------- build index + search index from whatever is on disk ----------
-  console.log('Building index files…');
+  // ---------- final index build ----------
+  const counts = buildIndexes(lang, langOut, allSets);
+  console.log(`${lang}: ${counts.sets} sets, ${counts.cards} cards.`);
+}
+
+/** Rebuild index.json + search-index.json from whatever set files are on disk.
+ * Called after EVERY set during a download (cheap), so the app becomes usable
+ * set-by-set while a long first download is still running. */
+function buildIndexes(lang, langOut, allSets) {
   const indexSets = [];
   const searchRows = [];
   for (const s of allSets) {
@@ -288,7 +331,7 @@ async function buildLanguage(lang) {
     sets: indexSets,
   });
   writeJSON(path.join(langOut, 'search-index.json'), { cards: searchRows });
-  console.log(`${lang}: ${indexSets.length} sets, ${searchRows.length} cards.`);
+  return { sets: indexSets.length, cards: searchRows.length };
 }
 
 // ---------- main ----------
@@ -300,8 +343,9 @@ async function buildLanguage(lang) {
 
   migrateFlatLayout();
 
-  for (const lang of LANGS) {
-    await buildLanguage(lang);
+  for (let li = 0; li < LANGS.length; li++) {
+    writeProgress({ langIndex: li });
+    await buildLanguage(LANGS[li]);
   }
 
   // languages.json lists every language folder present in the output
@@ -318,7 +362,9 @@ async function buildLanguage(lang) {
   if (imageFailures) console.log(`Images unavailable at source: ${imageFailures}`);
   console.log('Re-run this script any time — it resumes and picks up new sets.');
   console.log('For the in-app card scanner, also run: node scripts/build-hashes.js  (needs: npm install sharp)');
+  writeProgress({ done: true, finishedAt: new Date().toISOString() });
 })().catch((e) => {
   console.error('\nFailed: ' + e.message);
+  writeProgress({ error: e.message });
   process.exit(1);
 });

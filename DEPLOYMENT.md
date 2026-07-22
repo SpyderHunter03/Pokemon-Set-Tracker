@@ -49,13 +49,7 @@ PTCG_BRANCH=dev bash -c "$(curl -fsSL https://raw.githubusercontent.com/SpyderHu
 
 This follows the community **Proxmox VE Helper-Scripts** structure exactly — `ct/pokemonsettracker.sh` + `install/pokemonsettracker-install.sh` + `misc/build.func`/`install.func` (vendored in this repo, since the upstream build.func only installs apps from the community-scripts repo). You get the familiar flow: header art, a whiptail **Default / Advanced** settings dialog (container ID, hostname, branch, disk/CPU/RAM, bridge, storage), Debian 12 template download, unprivileged LXC creation, and the app installed as a systemd service. Because it's the dev branch, the **auto-update timer** is enabled: every 5 minutes the container checks git and redeploys if you've pushed. Non-interactive? `PTCG_DEFAULTS=yes` skips the dialogs; `CT_ID`, `CT_STORAGE`, `CT_DISK_GB`, etc. override defaults.
 
-Then, once, inside the container (`pct enter <ctid>`):
-
-```bash
-cd /opt/pokemon-set-tracker
-node scripts/build-data.js                              # card database
-npm install --no-save sharp && node scripts/build-hashes.js   # scanner index
-```
+Then open `http://<container-ip>:3000` and press **Download card database** — the app pulls the full database in the background with a progress bar and builds the scanner index when done. (The first account you register becomes the administrator and gets an **Update card database** button in the 👤 menu for new set releases. CLI equivalent for extra languages/high-res: `node scripts/build-data.js --langs en,ja --quality both` inside the container.)
 
 Updates never touch this data: deploys are `git reset --hard`, and `data/` (accounts, collections) + `public/cdn/` (card database) are gitignored, so they survive every deploy.
 
@@ -104,5 +98,5 @@ Every push to dev/main also publishes a Docker image to GitHub's registry (`ghcr
 | Manual deploy | `ptcg-update` (inside), `pct exec <ctid> -- ptcg-update`, or re-run the ct one-liner inside the container |
 | Restart app | `systemctl restart pokemon-set-tracker` |
 | Pause dev auto-updates | `systemctl disable --now ptcg-update.timer` |
-| New sets released | inside: `cd /opt/pokemon-set-tracker && node scripts/build-data.js && node scripts/build-hashes.js` |
+| New sets released | in-app: 👤 → Administration → **Update card database** (or the CLI inside the container) |
 | Back up everything | copy `/opt/pokemon-set-tracker/data` (accounts/collections); `public/cdn` is rebuildable |

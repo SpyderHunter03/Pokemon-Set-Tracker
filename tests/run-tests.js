@@ -58,28 +58,36 @@ function fail(msg) {
 }
 
 (async () => {
-  console.log('=== 1/5 mock TCGdex API ===');
+  console.log('=== 1/6 mock TCGdex API ===');
   start('node', ['tests/mock-tcgdex.js']);
   await waitForPort(3999).catch((e) => fail(e.message));
 
-  console.log('=== 2/5 build card database from mock ===');
+  console.log('=== 2/6 start server (no card database yet) ===');
   fs.rmSync(path.join(ROOT, 'public', 'cdn'), { recursive: true, force: true });
-  run('node', ['scripts/build-data.js', '--api', 'http://localhost:3999/v2', '--langs', 'en,fr', '--quality', 'low']);
-
-  console.log('=== 3/5 build scanner index ===');
-  run('node', ['scripts/build-hashes.js']);
-
-  console.log('=== 4/5 start server ===');
-  start('node', ['server.js'], { PORT: '3111', DATA_DIR: path.join(ROOT, '.test-data') });
+  fs.rmSync(path.join(ROOT, '.test-data'), { recursive: true, force: true });
+  start('node', ['server.js'], {
+    PORT: '3111',
+    DATA_DIR: path.join(ROOT, '.test-data'),
+    PTCG_SOURCE_API: 'http://localhost:3999/v2',
+  });
   await waitForPort(3111).catch((e) => fail(e.message));
 
-  console.log('=== 5/5 browser suite ===');
+  console.log('=== 3/6 bootstrap suite (in-app download button + admin update) ===');
+  const bootstrap = spawnSync('node', ['tests/bootstrap.test.js'], { cwd: ROOT, stdio: 'inherit', env: process.env });
+  if (bootstrap.status !== 0) fail('bootstrap suite failed');
+
+  console.log('=== 4/6 top up database via CLI (adds French for language tests) ===');
+  run('node', ['scripts/build-data.js', '--api', 'http://localhost:3999/v2', '--langs', 'en,fr', '--quality', 'low']);
+
+  console.log('=== 5/6 rebuild scanner index ===');
+  run('node', ['scripts/build-hashes.js']);
+
+  console.log('=== 6/6 main browser suite ===');
   const suite = spawnSync('node', ['tests/smoke.test.js'], { cwd: ROOT, stdio: 'inherit', env: process.env });
 
   cleanup();
   fs.rmSync(path.join(ROOT, '.test-data'), { recursive: true, force: true });
   if (suite.status !== 0) { console.error('\nBrowser suite failed.'); process.exit(1); }
 
-  // suite prints PASS/FAIL lines; treat any FAIL as failure even with exit 0
   console.log('\nAll stages completed.');
 })().catch((e) => fail(e.stack || e.message));
