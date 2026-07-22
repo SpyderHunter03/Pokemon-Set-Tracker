@@ -76,7 +76,11 @@ function fail(msg) {
   const bootstrap = spawnSync('node', ['tests/bootstrap.test.js'], { cwd: ROOT, stdio: 'inherit', env: process.env });
   if (bootstrap.status !== 0) fail('bootstrap suite failed');
 
-  console.log('=== 4/6 top up database via CLI (adds French for language tests) ===');
+  console.log('=== 4/6 top up database via CLI (adds French; detects a custom variant scan) ===');
+  // simulate a user-supplied real 1st Edition scan for Pikachu (base1-58)
+  const customScan = path.join(ROOT, 'public', 'cdn', 'en', 'images', 'base1', '58', 'firstEdition-low.webp');
+  fs.mkdirSync(path.dirname(customScan), { recursive: true });
+  fs.copyFileSync(path.join(__dirname, 'fixtures', 'base1-58.png'), customScan);
   run('node', ['scripts/build-data.js', '--api', 'http://localhost:3999/v2', '--langs', 'en,fr', '--quality', 'low']);
 
   console.log('=== 5/6 rebuild scanner index ===');

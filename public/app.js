@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.3.0';
+const APP_VERSION = '3.4.0';
 
 /* ============================================================
  * Storage helpers
@@ -164,26 +164,80 @@ function briefFromRow(row) {
   return { id, name, localId: localIdOf(id), image: hasImg ? `images/${setIdOf(id)}/${localIdOf(id)}` : null, variants };
 }
 
-async function searchCards({ name, rarity, type, page = 1, perPage = 100 }) {
+async function searchCards({ name, rarity, type, sort, page = 1, perPage = 100 }) {
   const idx = await getSearchIndex();
+  await getIndex(); // set order needed for release-date sorting
   const q = (name || '').toLowerCase();
-  const matches = [];
+  let matches = [];
   for (const row of idx.cards) {
     const [, cardName, cardRarity, typesCsv] = row;
     if (q && !cardName.toLowerCase().includes(q)) continue;
     if (rarity && cardRarity !== rarity) continue;
     if (type && !typesCsv.split(',').includes(type)) continue;
-    matches.push(briefFromRow(row));
+    matches.push(row);
   }
-  return matches.slice((page - 1) * perPage, page * perPage);
+  if (sort) matches = sortCards(matches, sort, (row) => row[0], (row) => row[1]);
+  return matches.slice((page - 1) * perPage, page * perPage).map(briefFromRow);
 }
 
-function cardImg(card, quality = 'low') {
+function cardImg(card, quality = 'low', variant = null) {
   if (!card.image) return null;
+  // a real per-variant scan (user-supplied, detected by build-data) wins
+  if (variant && card.variantImages && card.variantImages[variant]) {
+    const avail = card.variantImages[variant];
+    const q = avail.includes(quality) ? quality : avail[0];
+    return `${DB()}/${card.image}/${variant}-${q}.webp`;
+  }
   const qualities = (_indexCache && _indexCache.qualities) || ['low'];
   const q = quality === 'high' && qualities.includes('high') ? 'high' : 'low';
   if (!qualities.includes(q)) return null; // data-only install
   return `${DB()}/${card.image}/${q}.webp`;
+}
+
+/** Synthetic look for a printing when no real variant scan exists:
+ * 1st Edition gets the stamp overlay; holo/reverse get a sheen. */
+function variantFxEl(card, variant) {
+  if (card.variantImages && card.variantImages[variant]) return null; // real scan
+  if (variant === 'firstEdition') {
+    return h('div', { class: 'fx fx-stamp', 'aria-hidden': 'true' }, h('span', {}, '1'));
+  }
+  if (variant === 'holo') return h('div', { class: 'fx fx-holo', 'aria-hidden': 'true' });
+  if (variant === 'reverse') return h('div', { class: 'fx fx-reverse', 'aria-hidden': 'true' });
+  return null;
+}
+
+/** Sorting helpers — set release order comes from the index (oldest → newest). */
+function setOrderMap() {
+  return new Map(((_indexCache && _indexCache.sets) || []).map((s, i) => [s.id, i]));
+}
+
+function numericLocalId(id) {
+  const n = parseInt(localIdOf(id), 10);
+  return Number.isNaN(n) ? Infinity : n;
+}
+
+function sortCards(rows, mode, getId, getName) {
+  const order = setOrderMap();
+  const bySet = (a, b, dir) => {
+    const d = ((order.get(setIdOf(getId(a))) ?? 0) - (order.get(setIdOf(getId(b))) ?? 0)) * dir;
+    return d !== 0 ? d : numericLocalId(getId(a)) - numericLocalId(getId(b));
+  };
+  const cmp = {
+    name: (a, b) => getName(a).localeCompare(getName(b)) || numericLocalId(getId(a)) - numericLocalId(getId(b)),
+    number: (a, b) => numericLocalId(getId(a)) - numericLocalId(getId(b)) || String(localIdOf(getId(a))).localeCompare(String(localIdOf(getId(b)))),
+    newest: (a, b) => bySet(a, b, -1),
+    oldest: (a, b) => bySet(a, b, 1),
+  }[mode];
+  return cmp ? [...rows].sort(cmp) : rows;
+}
+
+function sortSelect(options, current, onchange) {
+  return h('select', { class: 'chip', 'aria-label': 'Sort', onchange: (e) => onchange(e.target.value) },
+    ...options.map(([val, label]) => {
+      const o = h('option', { value: val }, 'Sort: ' + label);
+      if (val === current) o.setAttribute('selected', '');
+      return o;
+    }));
 }
 
 function setLogo(set) {
@@ -454,7 +508,6 @@ function placeholderContent(card) {
 
 /** One tile = one printing (card × variant). */
 function cardTile(card, variant, { onOwnershipChange } = {}) {
-  const img = cardImg(card);
   const tile = h('div', {
     class: 'tcg-card',
     role: 'button',
@@ -469,10 +522,13 @@ function cardTile(card, variant, { onOwnershipChange } = {}) {
   });
   tile.dataset.cardId = card.id;
   tile.dataset.variant = variant;
-  if (img) {
-    const imgEl = h('img', { src: img, alt: card.name, loading: 'lazy' });
+  const variantSrc = cardImg(card, 'low', variant);
+  if (variantSrc) {
+    const imgEl = h('img', { src: variantSrc, alt: card.name, loading: 'lazy' });
     imgEl.addEventListener('error', () => imgEl.replaceWith(placeholderContent(card)));
     tile.append(imgEl);
+    const fx = variantFxEl(card, variant);
+    if (fx) tile.append(fx);
   } else {
     tile.append(placeholderContent(card));
   }
@@ -537,8 +593,19 @@ async function openCardModal(brief, { variant, onOwnershipChange } = {}) {
 
   const chipsWrap = h('div', { class: 'chips', style: 'margin:12px 0 4px; justify-content:center' });
   const counterWrap = h('div', {});
+  const imgWrap = h('div', { class: 'card-img-wrap' });
+
+  function renderModalImage() {
+    imgWrap.replaceChildren();
+    const src = cardImg(card, 'high', active) || cardImg(card, 'low', active);
+    if (!src) return;
+    imgWrap.append(h('img', { class: 'card-img', src, alt: card.name }));
+    const fx = variantFxEl(card, active);
+    if (fx) imgWrap.append(fx);
+  }
 
   function renderVariantUI() {
+    renderModalImage(); // the picture reflects the selected printing
     chipsWrap.replaceChildren(...avail.map((vk) => {
       const qty = variantQty(card.id, vk);
       return h('button', {
@@ -565,10 +632,9 @@ async function openCardModal(brief, { variant, onOwnershipChange } = {}) {
   }
   renderVariantUI();
 
-  const img = cardImg(card, 'high') || cardImg(card, 'low');
   body.replaceChildren(
     h('h2', {}, card.name),
-    img ? h('img', { class: 'card-img', src: img, alt: card.name }) : null,
+    imgWrap,
     ...rows,
     chipsWrap,
     counterWrap,
@@ -705,7 +771,13 @@ async function renderHome() {
     }
   }
 
-  const ordered = [...sets].reverse(); // newest first
+  let setSort = lsGet('ptcg.sort.sets') || 'newest';
+  const orderedSets = () => {
+    if (setSort === 'name') return [...sets].sort((a, b) => a.name.localeCompare(b.name));
+    if (setSort === 'oldest') return [...sets]; // index order = release order
+    return [...sets].reverse(); // newest first
+  };
+  let ordered = orderedSets();
   const counts = ownedCountsBySet();
 
   const totalOwned = Object.keys(collection).filter(ownedAny).length;
@@ -750,7 +822,16 @@ async function renderHome() {
   }
   renderSetCards('');
 
-  view.replaceChildren(...(runningBanner ? [runningBanner] : []), banner, h('div', { class: 'set-filter' }, filterInput), grid);
+  const sortCtl = sortSelect(
+    [['newest', 'Newest first'], ['oldest', 'Oldest first'], ['name', 'Name A–Z']],
+    setSort,
+    (v) => { setSort = v; lsSet('ptcg.sort.sets', v); ordered = orderedSets(); renderSetCards(filterInput.value.trim().toLowerCase()); },
+  );
+
+  view.replaceChildren(...(runningBanner ? [runningBanner] : []), banner,
+    h('div', { class: 'set-filter' }, filterInput),
+    h('div', { class: 'chips' }, sortCtl),
+    grid);
 }
 
 function updateStatsBanner() {
@@ -776,6 +857,7 @@ async function renderSetPage(setId) {
   let filter = 'all';
   let master = false;
   let query = '';
+  let cardSort = lsGet('ptcg.sort.cards') || 'number';
 
   const progressLabel = h('span', { class: 'muted' });
   const progressBar = h('div', {});
@@ -806,7 +888,8 @@ async function renderSetPage(setId) {
   function renderGrid() {
     grid.replaceChildren();
     const q = query.toLowerCase();
-    for (const c of cards) {
+    const sorted = sortCards(cards, cardSort, (c) => c.id, (c) => c.name);
+    for (const c of sorted) {
       if (q && !c.name.toLowerCase().includes(q) && String(c.localId) !== q) continue;
       for (const vk of realVariants(c)) { // each printing is its own tile
         const owned = variantQty(c.id, vk) > 0;
@@ -830,6 +913,8 @@ async function renderSetPage(setId) {
       chip('Owned', filter === 'owned', () => { filter = 'owned'; renderChips(); renderGrid(); }),
       chip('Missing', filter === 'missing', () => { filter = 'missing'; renderChips(); renderGrid(); }),
       chip('Master set', master, () => { master = !master; renderChips(); updateProgress(); }),
+      sortSelect([['number', 'Card number'], ['name', 'Name A–Z']], cardSort,
+        (v) => { cardSort = v; lsSet('ptcg.sort.cards', v); renderGrid(); }),
     );
   }
 
@@ -929,21 +1014,29 @@ async function renderPokemonPage(dexStr) {
   }
 
   const grid = h('div', { class: 'card-grid' });
-  // newest sets first, matching the sets page ordering
-  const setsOrder = new Map((_indexCache ? _indexCache.sets : []).map((s, i) => [s.id, i]));
-  const rows = [...sp.cards].sort((a, b) => (setsOrder.get(setIdOf(b[0])) ?? 0) - (setsOrder.get(setIdOf(a[0])) ?? 0));
-  for (const row of rows) {
-    const c = briefFromRow(row);
-    for (const vk of realVariants(c)) {
-      grid.append(cardTile(c, vk, { onOwnershipChange: updateProgress }));
+  let pokeSort = lsGet('ptcg.sort.pokemon') || 'newest';
+
+  function renderGrid() {
+    grid.replaceChildren();
+    const rows = sortCards(sp.cards, pokeSort, (row) => row[0], (row) => row[1]);
+    for (const row of rows) {
+      const c = briefFromRow(row);
+      for (const vk of realVariants(c)) {
+        grid.append(cardTile(c, vk, { onOwnershipChange: updateProgress }));
+      }
     }
   }
+  renderGrid();
 
   view.replaceChildren(
     h('a', { class: 'back-link', href: '#/pokemon' }, '← All Pokémon'),
     h('div', { class: 'page-head' },
       h('h1', {}, `#${String(sp.dex).padStart(3, '0')} ${sp.name}`),
       progressLabel,
+    ),
+    h('div', { class: 'chips' },
+      sortSelect([['newest', 'Newest set'], ['oldest', 'Oldest set'], ['name', 'Name A–Z'], ['number', 'Card number']], pokeSort,
+        (v) => { pokeSort = v; lsSet('ptcg.sort.pokemon', v); renderGrid(); }),
     ),
     grid,
   );
@@ -964,6 +1057,7 @@ async function renderSearchPage(rawQuery) {
     return;
   }
   let rarity = '', type = '', page = 1;
+  let searchSort = lsGet('ptcg.sort.search') || 'newest';
   const results = h('div', { class: 'card-grid' });
   const status = h('div', { class: 'center' });
   const moreBtn = h('button', { class: 'btn ghost load-more', onclick: () => load(false) }, 'Load more');
@@ -978,7 +1072,7 @@ async function renderSearchPage(rawQuery) {
     status.replaceChildren(spinner());
     moreBtn.hidden = true;
     try {
-      const cards = await searchCards({ name: query, rarity, type, page, perPage: 100 });
+      const cards = await searchCards({ name: query, rarity, type, sort: searchSort, page, perPage: 100 });
       status.replaceChildren();
       if (!cards.length && page === 1) {
         status.textContent = 'No cards found.';
@@ -999,6 +1093,8 @@ async function renderSearchPage(rawQuery) {
     h('div', { class: 'chips' },
       select('Rarity', idx.rarities, (v) => { rarity = v; load(true); }),
       select('Type', idx.types, (v) => { type = v; load(true); }),
+      sortSelect([['newest', 'Newest set'], ['oldest', 'Oldest set'], ['name', 'Name A–Z'], ['number', 'Card number']], searchSort,
+        (v) => { searchSort = v; lsSet('ptcg.sort.search', v); load(true); }),
     ),
     results,
     status,

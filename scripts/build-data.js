@@ -269,12 +269,25 @@ async function buildLanguage(lang) {
       });
       // make each card's image field reflect what actually exists on disk,
       // so cards without obtainable images get a clean placeholder in the app
+      const VARIANT_KEYS = ['normal', 'holo', 'reverse', 'firstEdition', 'wPromo', 'other'];
       let corrected = 0;
       for (const c of setData.cards) {
         const dir = path.join(langOut, 'images', setData.id, localIdOf(c.id));
         const anyFile = ['low', 'high'].some((q) => fs.existsSync(path.join(dir, q + '.webp')));
         const want = anyFile ? `images/${setData.id}/${localIdOf(c.id)}` : null;
         if (c.image !== want) { c.image = want; corrected++; }
+        // user-supplied per-variant scans: images/<set>/<num>/<variant>-low.webp
+        // (e.g. a real 1st Edition scan) — detected here, preferred by the app
+        const vimgs = {};
+        for (const vk of VARIANT_KEYS) {
+          const qs = ['low', 'high'].filter((q) => fs.existsSync(path.join(dir, `${vk}-${q}.webp`)));
+          if (qs.length) vimgs[vk] = qs;
+        }
+        const wantV = Object.keys(vimgs).length ? vimgs : undefined;
+        if (JSON.stringify(c.variantImages) !== JSON.stringify(wantV)) {
+          if (wantV) c.variantImages = wantV; else delete c.variantImages;
+          corrected++;
+        }
       }
       if (corrected) writeJSON(setFile, setData);
       process.stdout.write(`    images: ${imagesDownloaded} downloaded, ${imagesSkipped} already present${corrected ? `, ${corrected} card(s) marked imageless` : ''}\n`);

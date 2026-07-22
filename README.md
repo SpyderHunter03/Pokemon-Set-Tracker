@@ -14,6 +14,8 @@ A lightweight, self-hostable web app (PWA) for tracking which Pokémon cards you
   - **Search** — instant name search with rarity/type filters (built automatically from your data)
 - **Per-variant tracking** — each card's real variants come from the data (Normal, Holo, Reverse Holo, 1st Edition, W Promo), plus an "Other / Stamped" slot for prerelease/staff stamps and the like. Track quantities of each.
 - **Master set mode** — a toggle on each set page that counts every variant separately in the progress bar, for true master-set collectors.
+- **Variant looks** — printings are visually distinct: 1st Edition tiles carry the edition stamp, holo/reverse printings get a sheen. Got a real scan of a specific printing? Drop it in as `cdn/<lang>/images/<set>/<number>/<variant>-low.webp` (e.g. `firstEdition-low.webp`) and the app uses it instead (the downloader auto-detects these on its next run).
+- **Sorting everywhere** — sets by newest/oldest/name; cards by number, name, or set release date (remembered per page).
 - **Card scanner** — at a shop? Open Scan, point your camera at a card (or take a photo), and the app matches it against your own card database — entirely on-device, no cloud service — and tells you whether you already have it.
 - **Multi-language** — download card data in any language TCGdex supports (`--langs en,ja,de,…`) and switch in-app. Your collection carries across languages (it's keyed by card ID, not name).
 - **One-tap tracking** — tap a card to mark it owned/missing; cards with multiple variants/copies open details instead so a stray tap never wipes your data.

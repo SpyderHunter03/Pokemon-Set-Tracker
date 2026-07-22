@@ -32,6 +32,12 @@ const { chromium } = require('playwright');
   check('home shows sets', (await page.locator('.set-card').count()) === 2);
   check('stats count migrated card', (await page.textContent('#stat-owned')).trim() === '1');
 
+  // home sorting: newest first by default, switchable to name
+  check('sets newest first by default', (await page.locator('.set-card .name >> nth=0').textContent()).includes('Darkness'));
+  await page.selectOption('.chips select', 'name');
+  check('sets sortable by name', (await page.locator('.set-card .name >> nth=0').textContent()).includes('Base Set'));
+  await page.selectOption('.chips select', 'newest');
+
   // ---- set page: one tile per printing ----
   await page.click('.set-card:has-text("Base Set")');
   await page.waitForSelector('.tcg-card');
@@ -82,6 +88,28 @@ const { chromium } = require('playwright');
   check('missing filter shows 4 printings', (await page.locator('.tcg-card').count()) === 4);
   await page.click('.chip:has-text("All")');
 
+  // ---- synthetic variant looks + real variant scans ----
+  check('holo printing gets holo sheen', (await page.locator('.tcg-card >> nth=0 >> .fx-holo').count()) === 1);
+  check('1st Edition printing gets the stamp', (await page.locator('.tcg-card >> nth=1 >> .fx-stamp').count()) === 1);
+  check('unlimited printing has neither', (await page.locator('.tcg-card >> nth=2 >> .fx').count()) === 0);
+  const pikaFirstEd = page.locator('.tcg-card[data-card-id="base1-58"][data-variant="firstEdition"]');
+  check('real variant scan used when present', (await pikaFirstEd.locator('img').getAttribute('src')).includes('firstEdition-low.webp'));
+  check('real variant scan suppresses synthetic stamp', (await pikaFirstEd.locator('.fx-stamp').count()) === 0);
+
+  // modal image follows the selected printing
+  await pikaFirstEd.locator('.info-btn').click();
+  await page.waitForSelector('#card-modal[open] .card-img-wrap img');
+  check('modal shows variant scan for 1st Edition', (await page.locator('#card-modal .card-img-wrap img').getAttribute('src')).includes('firstEdition'));
+  await page.click('#card-modal .chips .chip:has-text("Unlimited")');
+  check('modal swaps to base image for Unlimited', !(await page.locator('#card-modal .card-img-wrap img').getAttribute('src')).includes('firstEdition'));
+  await page.click('#card-modal .btn.ghost');
+
+  // ---- sorting ----
+  await page.selectOption('.chips select', 'name');
+  check('set page sorts by name', (await page.locator('.tcg-card >> nth=0').getAttribute('data-card-id')) === 'base1-98');
+  await page.selectOption('.chips select', 'number');
+  check('set page sorts by number', (await page.locator('.tcg-card >> nth=0').getAttribute('data-card-id')) === 'base1-4');
+
   // in-set search shows all printings of the match
   await page.fill('.set-filter input', 'pika');
   check('in-set search shows both Pikachu printings', (await page.locator('.tcg-card').count()) === 2);
@@ -105,6 +133,9 @@ const { chromium } = require('playwright');
     (await page.locator('.tcg-card').count()) === 3 &&
     (await page.locator('.tcg-card >> nth=0').getAttribute('data-card-id')) === 'swsh3-20');
   check('pokemon page progress', (await page.textContent('.page-head .muted')).trim() === '1 / 2 owned');
+  await page.selectOption('.chips select', 'oldest');
+  check('pokemon page sorts oldest-set first', (await page.locator('.tcg-card >> nth=0').getAttribute('data-card-id')) === 'base1-4');
+  await page.selectOption('.chips select', 'newest');
 
   // ---- language switching ----
   await page.click('#account-btn');

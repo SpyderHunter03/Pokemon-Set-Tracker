@@ -538,6 +538,70 @@ body { padding-bottom: calc(64px + env(safe-area-inset-bottom)); }
 
 .v-controls .v-qty { min-width: 26px; text-align: center; font-weight: 800; font-size: 16px; }
 
+/* ---------- synthetic variant looks (used when no real variant scan exists) ---------- */
+.fx { position: absolute; inset: 0; pointer-events: none; border-radius: inherit; }
+
+/* 1st Edition stamp — sits left of center, just below the artwork, WotC style */
+.fx-stamp {
+  inset: auto;
+  left: 7%;
+  top: 51%;
+  width: 17%;
+  aspect-ratio: 1;
+  background: radial-gradient(circle at 35% 30%, #3a3a3a, #0c0c0c 70%);
+  border: 1.5px solid rgba(255, 255, 255, .55);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .5);
+  opacity: .92;
+}
+
+.fx-stamp span {
+  color: #fff;
+  font-family: Georgia, 'Times New Roman', serif;
+  font-weight: 700;
+  font-size: 11px;
+  line-height: 1;
+  transform: translateY(-2%);
+}
+
+.modal .fx-stamp span { font-size: 26px; }
+
+.tcg-card.missing .fx-stamp { opacity: .45; }
+
+/* Holo — prismatic sheen over the artwork area */
+.fx-holo {
+  background:
+    linear-gradient(115deg,
+      rgba(255, 0, 128, 0) 20%, rgba(255, 0, 128, .18) 32%,
+      rgba(0, 229, 255, .18) 44%, rgba(120, 255, 100, .16) 56%,
+      rgba(255, 230, 0, .16) 68%, rgba(255, 0, 128, 0) 82%);
+  clip-path: inset(11% 9% 46% 9%); /* ≈ the artwork window */
+  mix-blend-mode: screen;
+}
+
+/* Reverse Holo — sheen over the card body (opposite angle from holo, so the
+   two printings read differently at a glance; artwork band left clearer) */
+.fx-reverse {
+  background:
+    linear-gradient(245deg,
+      rgba(140, 0, 255, 0) 12%, rgba(140, 0, 255, .17) 28%,
+      rgba(0, 180, 255, .17) 44%, rgba(0, 255, 170, .15) 58%,
+      rgba(255, 200, 0, .15) 72%, rgba(140, 0, 255, 0) 88%);
+  clip-path: polygon(0 0, 100% 0, 100% 11%, 9% 11%, 9% 54%, 100% 54%, 100% 100%, 0 100%, 0 0);
+  mix-blend-mode: screen;
+}
+
+.tcg-card.missing .fx-holo,
+.tcg-card.missing .fx-reverse { opacity: .35; }
+
+/* modal image wrapper so overlays can position over the big picture */
+.card-img-wrap { position: relative; border-radius: 12px; overflow: hidden; margin-bottom: 12px; }
+
+.card-img-wrap .card-img { margin-bottom: 0; }
+
 /* ---------- pokémon list ---------- */
 .poke-thumb { object-fit: cover; border-radius: 6px; width: 46px; height: 64px; }
 
