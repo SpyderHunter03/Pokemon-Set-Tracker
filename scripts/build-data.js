@@ -26,6 +26,11 @@
  *   --force              re-download data even if present
  *   --concurrency <n>    parallel requests        (default: 8)
  *   --api <url>          source API base          (default: https://api.tcgdex.net/v2)
+ *   --exclude-series <ids>  series to skip entirely (default: tcgp — the
+ *                        "Pokémon TCG Pocket" mobile game, which is not part
+ *                        of the physical trading card game). Previously
+ *                        downloaded data for excluded series is deleted.
+ *                        Pass  --exclude-series none  to include everything.
  *
  * After downloading images, run  node scripts/build-hashes.js  to build the
  * scan index used by the in-app card scanner (requires: npm install sharp).
@@ -52,6 +57,8 @@ const QUALITIES = QUALITY === 'both' ? ['low', 'high'] : [QUALITY];
 const NO_IMAGES = flag('no-images');
 const FORCE = flag('force');
 const CONCURRENCY = Math.max(1, parseInt(opt('concurrency', '8'), 10) || 8);
+const EXCLUDE_SERIES = opt('exclude-series', 'tcgp').split(',')
+  .map((s) => s.trim()).filter((s) => s && s !== 'none');
 
 const LANG_NAMES = {
   en: 'English', fr: 'Français', de: 'Deutsch', es: 'Español', it: 'Italiano',
@@ -179,10 +186,37 @@ async function buildLanguage(lang) {
   console.log(`\n===== Language: ${lang} =====`);
 
   const allSets = await getJSON(langApi + '/sets');
-  const sets = ONLY_SETS ? allSets.filter((s) => ONLY_SETS.includes(s.id)) : allSets;
+
+  // Series exclusion (default: tcgp — the TCG Pocket mobile game). The /sets
+  // listing doesn't carry series info, so resolve each excluded series to its
+  // set ids, drop them from this build, and purge any previously downloaded
+  // data so they disappear from the rebuilt indexes too.
+  const excludedIds = new Set();
+  for (const serieId of EXCLUDE_SERIES) {
+    try {
+      const serie = await getJSON(`${langApi}/series/${encodeURIComponent(serieId)}`);
+      for (const s of serie.sets || []) excludedIds.add(s.id);
+      if ((serie.sets || []).length) {
+        console.log(`Excluding ${serie.sets.length} set(s) from "${serie.name || serieId}" (--exclude-series)`);
+      }
+    } catch { /* series unknown in this language — nothing to exclude */ }
+  }
+  let purged = 0;
+  for (const id of excludedIds) {
+    const dataFile = path.join(langOut, 'sets', id + '.json');
+    const imgDir = path.join(langOut, 'images', id);
+    const had = fs.existsSync(dataFile) || fs.existsSync(imgDir);
+    if (fs.existsSync(dataFile)) fs.rmSync(dataFile);
+    if (fs.existsSync(imgDir)) fs.rmSync(imgDir, { recursive: true, force: true });
+    if (had) purged++;
+  }
+  if (purged) console.log(`  ✓ deleted ${purged} previously downloaded excluded set(s)`);
+
+  const keptSets = allSets.filter((s) => !excludedIds.has(s.id));
+  const sets = ONLY_SETS ? keptSets.filter((s) => ONLY_SETS.includes(s.id)) : keptSets;
   if (ONLY_SETS && sets.length !== ONLY_SETS.length) {
     const found = new Set(sets.map((s) => s.id));
-    console.warn('Unknown set ids ignored: ' + ONLY_SETS.filter((id) => !found.has(id)).join(', '));
+    console.warn('Unknown or excluded set ids ignored: ' + ONLY_SETS.filter((id) => !found.has(id)).join(', '));
   }
   console.log(`Sets to process: ${sets.length} of ${allSets.length}`);
   writeProgress({
@@ -298,22 +332,22 @@ async function buildLanguage(lang) {
 
     // publish indexes after every set so the app becomes usable while a long
     // first download is still running
-    buildIndexes(lang, langOut, allSets);
+    buildIndexes(lang, langOut, keptSets);
     writeProgress({ setsDone: si + 1 });
   }
 
   // ---------- final index build ----------
-  const counts = buildIndexes(lang, langOut, allSets);
+  const counts = buildIndexes(lang, langOut, keptSets);
   console.log(`${lang}: ${counts.sets} sets, ${counts.cards} cards.`);
 }
 
 /** Rebuild index.json + search-index.json from whatever set files are on disk.
  * Called after EVERY set during a download (cheap), so the app becomes usable
  * set-by-set while a long first download is still running. */
-function buildIndexes(lang, langOut, allSets) {
+function buildIndexes(lang, langOut, keptSets) {
   const indexSets = [];
   const searchRows = [];
-  for (const s of allSets) {
+  for (const s of keptSets) {
     const setFile = path.join(langOut, 'sets', s.id + '.json');
     if (!fs.existsSync(setFile)) continue;
     const data = JSON.parse(fs.readFileSync(setFile, 'utf8'));

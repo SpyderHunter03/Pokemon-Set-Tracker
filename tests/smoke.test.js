@@ -38,6 +38,8 @@ const { chromium } = require('playwright');
   const migrated = await coll();
   check('v1 → v2 migration', migrated && migrated['base1-58'] && migrated['base1-58'].normal === 2);
   check('home shows sets', (await page.locator('.set-card').count()) === 2);
+  check('TCG Pocket sets excluded from the database',
+    !(await page.locator('.set-card').allTextContents()).join(' ').includes('Genetic Apex'));
   check('stats count migrated card', (await page.textContent('#stat-owned')).trim() === '1');
 
   // home sorting: newest first by default, switchable to name
@@ -255,6 +257,26 @@ const { chromium } = require('playwright');
   await page.goto('http://localhost:3111/?fallback=1#/');
   await page.waitForSelector('.set-card');
   check('unreachable remote CDN falls back to the local database', (await page.locator('.set-card').count()) >= 1);
+
+  // ---- spinning-pokeball image loader ----
+  {
+    const slowCtx = await browser.newContext({ serviceWorkers: 'block' });
+    const slowPage = await slowCtx.newPage();
+    await slowPage.route('**/*.webp', async (route) => {
+      await new Promise((r) => setTimeout(r, 600)); // simulate a slow CDN
+      await route.continue();
+    });
+    await slowPage.goto('http://localhost:3111/#/set/base1');
+    await slowPage.waitForSelector('.tcg-card img');
+    check('pokeball spinner shows while card images load',
+      (await slowPage.locator('.tcg-card.img-loading').count()) > 0);
+    await slowPage.waitForFunction(() => {
+      const t = document.querySelector('.tcg-card');
+      return t && !t.classList.contains('img-loading');
+    });
+    check('pokeball spinner clears once the image arrives', true);
+    await slowCtx.close();
+  }
 
   console.log(errors.length ? 'JS ERRORS:\n' + errors.join('\n') : 'No JS errors, zero external requests.');
   await browser.close();

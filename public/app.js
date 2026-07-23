@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.9.0';
+const APP_VERSION = '3.10.0';
 
 /* ============================================================
  * Storage helpers
@@ -559,6 +559,16 @@ function toast(msg) {
 
 function spinner() { return h('div', { class: 'spinner' }); }
 
+/* Spinning-pokeball loader: shown on `host` (via CSS ::after) until the
+ * image finishes loading — or fails, in which case other handlers take over. */
+function trackImageLoad(imgEl, host) {
+  if (imgEl.complete) return; // already in the browser cache — no flash
+  host.classList.add('img-loading');
+  const done = () => host.classList.remove('img-loading');
+  imgEl.addEventListener('load', done, { once: true });
+  imgEl.addEventListener('error', done, { once: true });
+}
+
 /* ============================================================
  * Card grid rendering (shared by set, search, pokémon, scan pages)
  * ============================================================ */
@@ -587,6 +597,7 @@ function cardTile(card, variant, { onOwnershipChange } = {}) {
     const imgEl = h('img', { src: variantSrc, alt: card.name, loading: 'lazy' });
     imgEl.addEventListener('error', () => imgEl.replaceWith(placeholderContent(card)));
     tile.append(imgEl);
+    trackImageLoad(imgEl, tile);
     const fx = variantFxEl(card, variant);
     if (fx) tile.append(fx);
   } else {
@@ -663,7 +674,9 @@ async function openCardModal(brief, { variant, onOwnershipChange } = {}) {
     imgWrap.replaceChildren();
     const src = cardImg(card, 'high', active) || cardImg(card, 'low', active);
     if (!src) return;
-    imgWrap.append(h('img', { class: 'card-img', src, alt: card.name }));
+    const modalImg = h('img', { class: 'card-img', src, alt: card.name });
+    imgWrap.append(modalImg);
+    trackImageLoad(modalImg, imgWrap);
     const fx = variantFxEl(card, active);
     if (fx) imgWrap.append(fx);
   }

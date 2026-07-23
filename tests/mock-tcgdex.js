@@ -10,6 +10,8 @@ function makeLang(lang) {
   const SETS = [
     { id: 'base1', name: tr('Base Set', 'Set de Base'), logo: ASSET('base1/logo'), cardCount: { total: 102, official: 102 } },
     { id: 'swsh3', name: tr('Darkness Ablaze', 'Ténèbres Embrasées'), cardCount: { total: 201, official: 189 } },
+    // TCG Pocket (mobile game) set — must be EXCLUDED by the downloader
+    { id: 'A1', name: 'Genetic Apex', cardCount: { total: 286, official: 226 } },
   ];
   const SET_DETAILS = {
     base1: {
@@ -31,6 +33,14 @@ function makeLang(lang) {
         { id: 'swsh3-20', localId: '20', name: tr('Charizard VMAX', 'Dracaufeu VMAX'), image: ASSET('swsh3/20') },
       ],
     },
+    A1: {
+      id: 'A1', name: 'Genetic Apex', releaseDate: '2024-10-30',
+      cardCount: { total: 286, official: 226 },
+      cards: [{ id: 'A1-1', localId: '1', name: 'Bulbasaur', image: ASSET('A1/1') }],
+    },
+  };
+  const SERIES = {
+    tcgp: { id: 'tcgp', name: 'Pokémon TCG Pocket', sets: [{ id: 'A1', name: 'Genetic Apex' }] },
   };
   const CARDS = {
     'base1-4': { id: 'base1-4', localId: '4', name: tr('Charizard', 'Dracaufeu'), rarity: 'Rare Holo', category: 'Pokemon', dexId: [6], types: ['Fire'], hp: 120, illustrator: 'Mitsuhiro Arita', variants: { normal: false, reverse: false, holo: true, firstEdition: true }, image: ASSET('base1/4') },
@@ -41,7 +51,7 @@ function makeLang(lang) {
     'swsh3-136': { id: 'swsh3-136', localId: '136', name: tr('Furret', 'Fouinar'), rarity: 'Uncommon', category: 'Pokemon', dexId: [162], types: ['Colorless'], hp: 110, illustrator: 'Kagemaru Himeno', variants: { normal: true, reverse: true, holo: false }, image: ASSET('swsh3/136') },
     'swsh3-20': { id: 'swsh3-20', localId: '20', name: tr('Charizard VMAX', 'Dracaufeu VMAX'), rarity: 'Ultra Rare', category: 'Pokemon', dexId: [6], types: ['Fire'], hp: 330, variants: { normal: false, holo: true }, image: ASSET('swsh3/20') },
   };
-  return { SETS, SET_DETAILS, CARDS };
+  return { SETS, SET_DETAILS, CARDS, SERIES };
 }
 
 const LANGS = { en: makeLang('en'), fr: makeLang('fr') };
@@ -55,6 +65,8 @@ http.createServer((req, res) => {
   if (m) {
     const L = LANGS[m[1]], sub = m[2];
     if (sub === '/sets') return json(L.SETS);
+    const serieM = sub.match(/^\/series\/(.+)$/);
+    if (serieM) return L.SERIES[serieM[1]] ? json(L.SERIES[serieM[1]]) : (res.writeHead(404), res.end());
     const setM = sub.match(/^\/sets\/(.+)$/);
     if (setM) return L.SET_DETAILS[setM[1]] ? json(L.SET_DETAILS[setM[1]]) : (res.writeHead(404), res.end());
     const cardM = sub.match(/^\/cards\/(.+)$/);

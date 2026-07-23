@@ -471,6 +471,37 @@ select.chip { appearance: none; padding-right: 22px; }
 
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* --- spinning-pokeball loader, shown while a card picture loads --- */
+.img-loading::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 2px solid #16181f;
+  /* pokeball: red top half, black band, white bottom half, center button */
+  background:
+    radial-gradient(circle, #fff 0 5px, #16181f 5px 8px, transparent 8px),
+    linear-gradient(to bottom, #e3350d 0 44%, #16181f 44% 56%, #f2f2f2 56% 100%);
+  animation: pokeball-spin .9s linear infinite;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, .4);
+  z-index: 3;
+  pointer-events: none;
+}
+/* the modal image has no height until it loads — reserve a card-shaped area */
+.card-img-wrap.img-loading { aspect-ratio: 63 / 88; }
+.card-img-wrap.img-loading::after {
+  width: 64px;
+  height: 64px;
+  border-width: 3px;
+  background:
+    radial-gradient(circle, #fff 0 9px, #16181f 9px 14px, transparent 14px),
+    linear-gradient(to bottom, #e3350d 0 44%, #16181f 44% 56%, #f2f2f2 56% 100%);
+}
+@keyframes pokeball-spin { to { transform: rotate(360deg); } }
+
 /* ---------- bottom navigation ---------- */
 .bottomnav {
   position: fixed;
