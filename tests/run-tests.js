@@ -123,7 +123,22 @@ function fail(msg) {
   check('publisher uploads all local files', pub1.status === 0 && uploaded > 0 && storeInfo.count === uploaded);
   check('publisher includes card data, not just images', storeInfo.hasDataIndex === true && storeInfo.hasSetData === true);
   check('publisher pagination + idempotent re-run', pub2.status === 0 && /Uploaded 0, skipped/.test(out2));
-  const publishOk = pub1.status === 0 && uploaded > 0 && storeInfo.count === uploaded && pub2.status === 0 && /Uploaded 0, skipped/.test(out2);
+
+  // --prune: seed a remote-only object (a "removed" set), verify default run
+  // keeps it but hints, --prune with --langs is refused, --prune deletes it
+  await fetch('http://localhost:3998/__seed?key=en/images/A1/1/low.webp', { method: 'POST' });
+  const pub3 = spawnSync('node', ['scripts/publish-images.js'], { cwd: ROOT, env: { ...process.env, ...r2env }, encoding: 'utf8' });
+  const out3 = (pub3.stdout || '') + (pub3.stderr || '');
+  const storeMid = await (await fetch('http://localhost:3998/__store')).json();
+  const pubGuard = spawnSync('node', ['scripts/publish-images.js', '--prune', '--langs', 'en'], { cwd: ROOT, env: { ...process.env, ...r2env }, encoding: 'utf8' });
+  const pub4 = spawnSync('node', ['scripts/publish-images.js', '--prune'], { cwd: ROOT, env: { ...process.env, ...r2env }, encoding: 'utf8' });
+  const out4 = (pub4.stdout || '') + (pub4.stderr || '');
+  const storeAfter = await (await fetch('http://localhost:3998/__store')).json();
+  check('publisher keeps remote-only files by default (with a hint)', pub3.status === 0 && /--prune to delete/.test(out3) && storeMid.count === uploaded + 1);
+  check('publisher refuses --prune with a partial sync', pubGuard.status === 1);
+  check('publisher --prune deletes stale remote objects', pub4.status === 0 && /deleted 1/.test(out4) && storeAfter.count === uploaded);
+  const publishOk = pub1.status === 0 && uploaded > 0 && storeInfo.count === uploaded && pub2.status === 0 && /Uploaded 0, skipped/.test(out2) &&
+    pub3.status === 0 && pubGuard.status === 1 && pub4.status === 0 && /deleted 1/.test(out4) && storeAfter.count === uploaded;
 
   cleanup();
   fs.rmSync(path.join(ROOT, '.test-data'), { recursive: true, force: true });

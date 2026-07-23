@@ -1,5 +1,6 @@
 /* Minimal in-memory S3-compatible mock (enough for publish-images.js tests):
- * PUT /bucket/key, GET /bucket?list-type=2 (with pagination), GET /__store. */
+ * PUT /bucket/key, DELETE /bucket/key, GET /bucket?list-type=2 (with
+ * pagination), GET /__store, POST /__seed (inject a key for prune tests). */
 const http = require('http');
 const crypto = require('crypto');
 
@@ -20,6 +21,12 @@ http.createServer((req, res) => {
     }));
   }
 
+  if (req.method === 'POST' && url.pathname === '/__seed') {
+    const k = url.searchParams.get('key') || 'stale/object.webp';
+    store.set(k, { md5: crypto.createHash('md5').update(k).digest('hex'), size: k.length });
+    res.writeHead(200); return res.end();
+  }
+
   if (!req.headers.authorization || !req.headers.authorization.startsWith('AWS4-HMAC-SHA256')) {
     res.writeHead(403); return res.end('<Error>missing sigv4 auth</Error>');
   }
@@ -37,6 +44,11 @@ http.createServer((req, res) => {
       res.end();
     });
     return;
+  }
+
+  if (req.method === 'DELETE' && bucket && key) {
+    const had = store.delete(key);
+    res.writeHead(had ? 204 : 404); return res.end();
   }
 
   if (req.method === 'GET' && bucket && !key && url.searchParams.get('list-type') === '2') {

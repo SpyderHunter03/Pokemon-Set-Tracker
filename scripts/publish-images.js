@@ -9,9 +9,12 @@
  * point config.js `cdnBase` at the bucket's public URL and fresh installs
  * boot straight from the CDN with no local download. Idempotent:
  * unchanged files (same MD5) are skipped, so re-running after new
- * downloads or admin uploads/printings only transfers what's new. Never
- * deletes anything remote. Images upload with immutable cache headers;
- * data JSON uploads with short cache (60s) so updates propagate fast.
+ * downloads or admin uploads/printings only transfers what's new. By
+ * default nothing remote is ever deleted; pass --prune to also delete
+ * remote objects that no longer exist locally (e.g. sets removed by
+ * build-data's series exclusion). Images upload with immutable cache
+ * headers; data JSON uploads with short cache (60s) so updates propagate
+ * fast.
  *
  * Setup (Cloudflare dashboard):
  *   R2 → Create bucket → Settings → enable public access (r2.dev or a
@@ -28,7 +31,10 @@
  *                 also how tests point this at a mock)
  *   --langs en,fr publish only these languages (default: all found)
  *   --images-only skip data files (the pre-v3.7 behaviour)
- *   --dry-run     show what would upload, do nothing
+ *   --prune       delete remote objects that don't exist locally.
+ *                 Refused together with --langs/--images-only (a partial
+ *                 local view would wrongly delete everything outside it).
+ *   --dry-run     show what would upload/delete, do nothing
  *   --concurrency N   parallel uploads (default 8)
  */
 'use strict';
@@ -51,6 +57,13 @@ const DRY = flag('dry-run');
 const CONCURRENCY = Math.max(1, parseInt(opt('concurrency', '8'), 10) || 8);
 const ONLY_LANGS = opt('langs', '') ? opt('langs', '').split(',').map((s) => s.trim()).filter(Boolean) : null;
 const IMAGES_ONLY = flag('images-only');
+const PRUNE = flag('prune');
+
+if (PRUNE && (ONLY_LANGS || IMAGES_ONLY)) {
+  console.error('--prune requires a full sync: it deletes every remote object missing locally,\n' +
+    'so combining it with --langs or --images-only would delete everything outside that subset.');
+  process.exit(1);
+}
 
 if (!ENDPOINT || !ACCESS_KEY || !SECRET_KEY || !BUCKET) {
   console.error(`Missing configuration. Required environment variables:
@@ -208,9 +221,20 @@ async function pool(items, size, worker) {
   }
   console.log(`To upload (new or changed): ${toUpload.length}`);
 
+  const localSet = new Set(keys);
+  const stale = [...remote.keys()].filter((k) => !localSet.has(k));
+  if (PRUNE) console.log(`To delete (remote only): ${stale.length}`);
+  else if (stale.length && !ONLY_LANGS && !IMAGES_ONLY) {
+    console.log(`Note: ${stale.length} remote object(s) no longer exist locally — re-run with --prune to delete them.`);
+  }
+
   if (DRY) {
     toUpload.slice(0, 20).forEach((k) => console.log('  would upload: ' + k));
     if (toUpload.length > 20) console.log(`  … and ${toUpload.length - 20} more`);
+    if (PRUNE) {
+      stale.slice(0, 20).forEach((k) => console.log('  would delete: ' + k));
+      if (stale.length > 20) console.log(`  … and ${stale.length - 20} more`);
+    }
     return;
   }
 
@@ -236,8 +260,25 @@ async function pool(items, size, worker) {
     }
   });
 
-  console.log(`Done. Uploaded ${done}, skipped ${keys.length - toUpload.length} unchanged${failed ? `, FAILED ${failed}` : ''}.`);
-  if (failed) process.exit(1);
+  let deleted = 0, deleteFailed = 0;
+  if (PRUNE && stale.length) {
+    await pool(stale, CONCURRENCY, async (key) => {
+      try {
+        const res = await signedFetch('DELETE', key);
+        if (!res.ok && res.status !== 404) throw new Error('HTTP ' + res.status);
+        deleted++;
+        if (deleted % 250 === 0) console.log(`  deleted ${deleted}/${stale.length}…`);
+      } catch (e) {
+        deleteFailed++;
+        console.warn(`  ! delete failed: ${key} (${e.message})`);
+      }
+    });
+  }
+
+  console.log(`Done. Uploaded ${done}, skipped ${keys.length - toUpload.length} unchanged` +
+    (PRUNE ? `, deleted ${deleted}` : '') +
+    (failed || deleteFailed ? `, FAILED ${failed + deleteFailed}` : '') + '.');
+  if (failed || deleteFailed) process.exit(1);
 })().catch((e) => {
   console.error('Failed: ' + e.message);
   process.exit(1);
