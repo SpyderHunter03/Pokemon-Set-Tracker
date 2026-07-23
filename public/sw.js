@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — service worker (offline support) */
 importScripts('config.js');
 
-const SHELL_CACHE = 'ptcg-shell-v13';
+const SHELL_CACHE = 'ptcg-shell-v14';
 const DATA_CACHE = 'ptcg-data-v2';
 const IMG_CACHE = 'ptcg-img-v1';
 
@@ -25,6 +25,10 @@ const CDN_URL = new URL(
 const IMAGE_URL = (self.PTCG_CONFIG && self.PTCG_CONFIG.imageBase)
   ? new URL(self.PTCG_CONFIG.imageBase.replace(/\/+$/, '') + '/', self.registration.scope).href
   : null;
+// Locally mirrored database: even when config points at a remote CDN, the
+// admin may have downloaded a local copy — same-origin cdn/ requests get the
+// same cache treatment as the configured CDN.
+const LOCAL_CDN_URL = new URL('cdn/', self.registration.scope).href;
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(SHELL_CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
@@ -70,7 +74,7 @@ self.addEventListener('fetch', (e) => {
     return;
   }
 
-  if (e.request.url.startsWith(CDN_URL)) {
+  if (e.request.url.startsWith(CDN_URL) || e.request.url.startsWith(LOCAL_CDN_URL)) {
     // Card images & set logos: cache first (they never change).
     if (url.pathname.includes('/images/')) {
       e.respondWith(

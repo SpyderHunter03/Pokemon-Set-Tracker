@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.10.0';
+const APP_VERSION = '3.11.0';
 
 /* ============================================================
  * Storage helpers
@@ -17,9 +17,23 @@ function lsSet(key, val) { localStorage.setItem(key, JSON.stringify(val)); }
  * location configured in config.js (same server or your own CDN).
  * No third-party APIs are called at runtime.
  * ============================================================ */
-let CDN = ((self.PTCG_CONFIG && self.PTCG_CONFIG.cdnBase) || 'cdn').replace(/\/+$/, '');
+const CONFIG_CDN = ((self.PTCG_CONFIG && self.PTCG_CONFIG.cdnBase) || 'cdn').replace(/\/+$/, '');
+let CDN = CONFIG_CDN;
 const IMAGE_BASE = ((self.PTCG_CONFIG && self.PTCG_CONFIG.imageBase) || '').replace(/\/+$/, '');
 const isRemoteCdn = () => /^https?:\/\//i.test(CDN);
+const isConfigRemoteCdn = () => /^https?:\/\//i.test(CONFIG_CDN);
+
+/** Server-side app config: read-only central mode + offline-mirror state.
+ * When the admin has downloaded the database locally, the server tells us to
+ * pull data/images from this install instead of the configured CDN. */
+let appConfig = {};
+async function loadAppConfig() {
+  try {
+    const res = await fetch('api/app-config', { cache: 'no-store' });
+    if (res.ok) appConfig = await res.json();
+  } catch { /* static hosting — no server config */ }
+  CDN = (appConfig.imageSource === 'local' && appConfig.localDbExists) ? 'cdn' : CONFIG_CDN;
+}
 let lang = lsGet('ptcg.lang') || (self.PTCG_CONFIG && self.PTCG_CONFIG.defaultLanguage) || 'en';
 
 const DB = () => `${CDN}/${lang}`;
@@ -712,7 +726,9 @@ async function openCardModal(brief, { variant, onOwnershipChange } = {}) {
   // ---- admin: add custom printings & upload your own variant images ----
   function renderAdminControls() {
     adminWrap.replaceChildren();
-    if (!isAdmin) return;
+    // needs admin, a writable server, and the LOCAL database active (edits
+    // would be invisible while data is read from a remote CDN)
+    if (!isAdmin || appConfig.readonly || isRemoteCdn()) return;
     const fileInput = h('input', { type: 'file', accept: 'image/*', hidden: '' });
     fileInput.addEventListener('change', async (e) => {
       const f = e.target.files[0];
@@ -1525,9 +1541,64 @@ async function renderAdminArea() {
   const content = h('div', {});
   area.append(h('hr'), h('h3', {}, 'Administration'), content);
 
-  if (isRemoteCdn()) {
+  if (appConfig.readonly) {
     content.replaceChildren(h('p', { class: 'muted small' },
-      'This instance reads its card database from a CDN (', CDN, '). Update the database on the master instance and re-publish — nothing to manage here.'));
+      'This server runs in read-only mode (PTCG_READONLY): the card database is managed centrally and cannot be changed from the app.'));
+    return;
+  }
+
+  if (isConfigRemoteCdn()) {
+    // Reads from a public CDN — offer a local copy for offline use.
+    const renderMirror = async () => {
+      const status = await getBuildStatus();
+      const local = appConfig.imageSource === 'local' && appConfig.localDbExists;
+      if (status && status.running) {
+        content.replaceChildren(
+          h('p', { class: 'muted small' }, 'Downloading the card database to this server:'),
+          buildProgressView(async () => {
+            await loadAppConfig();
+            clearDataCaches();
+            toast('Local copy ready — images now load from this server');
+            renderMirror();
+          }),
+        );
+        return;
+      }
+      content.replaceChildren(
+        h('p', { class: 'muted small' },
+          'This install reads the card database from ', h('code', {}, CONFIG_CDN), '. ',
+          local
+            ? 'A local copy is active: data and images are served from this server (no internet needed).'
+            : appConfig.localDbExists
+              ? 'A local copy exists but the online CDN is currently in use.'
+              : 'Download a local copy to use this install without internet access and to add your own printing photos.'),
+        appConfig.mirroredAt
+          ? h('p', { class: 'muted small' }, 'Local copy last updated: ' + new Date(appConfig.mirroredAt).toLocaleString())
+          : null,
+        h('div', { class: 'row' },
+          h('button', { class: 'btn small', onclick: async (e) => {
+            e.target.disabled = true;
+            try {
+              await apiCall('mirror', { method: 'POST', body: JSON.stringify({ remote: CONFIG_CDN }) });
+              renderMirror();
+            } catch (err) { e.target.disabled = false; toast(err.message); }
+          } }, appConfig.localDbExists ? '🔄 Update local copy' : '⬇️ Download database for offline use'),
+          appConfig.localDbExists
+            ? h('button', { class: 'btn ghost small', onclick: async (e) => {
+                e.target.disabled = true;
+                try {
+                  await apiCall('image-source', { method: 'POST', body: JSON.stringify({ source: local ? 'remote' : 'local' }) });
+                  await loadAppConfig();
+                  clearDataCaches();
+                  toast(local ? 'Switched to the online CDN' : 'Switched to the local copy');
+                  renderMirror();
+                } catch (err) { e.target.disabled = false; toast(err.message); }
+              } }, local ? '🌐 Use online CDN' : '💾 Use local copy')
+            : null,
+        ),
+      );
+    };
+    renderMirror();
     return;
   }
 
@@ -1732,4 +1803,4 @@ if ('serviceWorker' in navigator) {
 detectServer().then(() => {
   if (auth && serverAvailable) pullAndMerge().catch(() => {});
 });
-route();
+loadAppConfig().then(route);

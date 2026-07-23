@@ -72,11 +72,11 @@ function fail(msg) {
 }
 
 (async () => {
-  console.log('=== 1/7 mock TCGdex API ===');
+  console.log('=== 1/8 mock TCGdex API ===');
   start('node', ['tests/mock-tcgdex.js']);
   await waitForPort(3999).catch((e) => fail(e.message));
 
-  console.log('=== 2/7 start server (no card database yet) ===');
+  console.log('=== 2/8 start server (no card database yet) ===');
   pinTestConfig();
   fs.rmSync(path.join(ROOT, 'public', 'cdn'), { recursive: true, force: true });
   fs.rmSync(path.join(ROOT, '.test-data'), { recursive: true, force: true });
@@ -87,24 +87,74 @@ function fail(msg) {
   });
   await waitForPort(3111).catch((e) => fail(e.message));
 
-  console.log('=== 3/7 bootstrap suite (in-app download button + admin update) ===');
+  console.log('=== 3/8 bootstrap suite (in-app download button + admin update) ===');
   const bootstrap = spawnSync('node', ['tests/bootstrap.test.js'], { cwd: ROOT, stdio: 'inherit', env: process.env });
   if (bootstrap.status !== 0) fail('bootstrap suite failed');
 
-  console.log('=== 4/7 top up database via CLI (adds French; detects a custom variant scan) ===');
+  console.log('=== 4/8 top up database via CLI (adds French; detects a custom variant scan) ===');
   // simulate a user-supplied real 1st Edition scan for Pikachu (base1-58)
   const customScan = path.join(ROOT, 'public', 'cdn', 'en', 'images', 'base1', '58', 'firstEdition-low.webp');
   fs.mkdirSync(path.dirname(customScan), { recursive: true });
   fs.copyFileSync(path.join(__dirname, 'fixtures', 'base1-58.png'), customScan);
   run('node', ['scripts/build-data.js', '--api', 'http://localhost:3999/v2', '--langs', 'en,fr', '--quality', 'low']);
 
-  console.log('=== 5/7 rebuild scanner index ===');
+  console.log('=== 5/8 rebuild scanner index ===');
   run('node', ['scripts/build-hashes.js']);
 
-  console.log('=== 6/7 main browser suite ===');
+  console.log('=== 6/8 main browser suite ===');
   const suite = spawnSync('node', ['tests/smoke.test.js'], { cwd: ROOT, stdio: 'inherit', env: process.env });
 
-  console.log('=== 7/7 R2 image publisher (against mock S3) ===');
+  const check = (name, cond) => { console.log((cond ? 'PASS' : 'FAIL') + ' — ' + name); if (!cond) stageFails++; };
+  let stageFails = 0;
+  const jfetch = async (url, opts) => fetch(url, opts).then((r) => r.json());
+
+  console.log('=== 7/8 variant importer + read-only mode + offline mirror ===');
+  // ---- tcgcsv variant importer against a mock ----
+  start('node', ['tests/mock-tcgcsv.js']);
+  await waitForPort(3997).catch((e) => fail(e.message));
+  const imp = spawnSync('node', ['scripts/import-variants.js', '--api', 'http://localhost:3997/tcgplayer'], { cwd: ROOT, encoding: 'utf8' });
+  const customNow = JSON.parse(fs.readFileSync(path.join(ROOT, 'public', 'cdn', 'custom.json'), 'utf8'));
+  const vOf = (id) => (customNow.cards[id] || {}).variants || {};
+  check('importer adds descriptor printings (incl. leading-zero numbers)',
+    imp.status === 0 && vOf('base1-58')['red-cheeks'] === 'Red Cheeks' && vOf('swsh3-20')['cracked-ice-holo'] === 'Cracked Ice Holo');
+  check('importer skips standard printings', !Object.keys(vOf('base1-58')).some((k) => /1st|first|holo$|normal/.test(k)));
+  check('importer preserves admin-added printings', vOf('base1-4')['cracked-ice-holo'] === 'Cracked Ice Holo');
+
+  // ---- read-only (central) server mode ----
+  fs.rmSync(path.join(ROOT, '.test-data-ro'), { recursive: true, force: true });
+  start('node', ['server.js'], { PORT: '3113', DATA_DIR: path.join(ROOT, '.test-data-ro'), PTCG_READONLY: '1' });
+  await waitForPort(3113).catch((e) => fail(e.message));
+  const roReg = await jfetch('http://localhost:3113/api/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'roadmin', password: 'password123' }) });
+  const roAuth = { 'Content-Type': 'application/json', Authorization: 'Bearer ' + roReg.token };
+  const roCfg = await jfetch('http://localhost:3113/api/app-config');
+  const roBuild = (await fetch('http://localhost:3113/api/build-data', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).status;
+  const roMirror = (await fetch('http://localhost:3113/api/mirror', { method: 'POST', headers: roAuth, body: JSON.stringify({ remote: 'http://localhost:3111/cdn' }) })).status;
+  const roCustom = (await fetch('http://localhost:3113/api/custom-variant', { method: 'POST', headers: roAuth, body: JSON.stringify({ cardId: 'base1-4', label: 'Nope Holo' }) })).status;
+  const roUpload = (await fetch('http://localhost:3113/api/variant-image?cardId=base1-4&variant=holo', { method: 'POST', headers: roAuth, body: 'x' })).status;
+  check('read-only server reports itself in app-config', roCfg.readonly === true);
+  check('read-only blocks every database write (build/mirror/printing/upload)',
+    roBuild === 403 && roMirror === 403 && roCustom === 403 && roUpload === 403);
+
+  // ---- offline mirror: fresh install copies a remote database locally ----
+  fs.rmSync(path.join(ROOT, '.test-data-mirror'), { recursive: true, force: true });
+  start('node', ['server.js'], { PORT: '3114', DATA_DIR: path.join(ROOT, '.test-data-mirror') });
+  await waitForPort(3114).catch((e) => fail(e.message));
+  const mReg = await jfetch('http://localhost:3114/api/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'mirroradmin', password: 'password123' }) });
+  const mStart = await jfetch('http://localhost:3114/api/mirror', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + mReg.token }, body: JSON.stringify({ remote: 'http://localhost:3111/cdn' }) });
+  let mDone = null;
+  for (let i = 0; i < 240 && !mDone; i++) {
+    const st = await jfetch('http://localhost:3114/api/build-status');
+    if (!st.running) mDone = st;
+    else await new Promise((r) => setTimeout(r, 500));
+  }
+  const mCfg = await jfetch('http://localhost:3114/api/app-config');
+  check('mirror runs to completion without errors',
+    mStart.started === true && mDone && !mDone.error && mDone.progress && mDone.progress.done === true);
+  check('mirror skips files that already exist locally',
+    mDone && mDone.progress.imagesSkipped > 0 && mDone.progress.imageFailures === 0);
+  check('mirror switches the install to the local copy', mCfg.imageSource === 'local' && mCfg.localDbExists === true);
+
+  console.log('=== 8/8 R2 image publisher (against mock S3) ===');
   start('node', ['tests/mock-s3.js']);
   await waitForPort(3998).catch((e) => fail(e.message));
   const r2env = {
@@ -119,7 +169,6 @@ function fail(msg) {
   const storeInfo = await (await fetch('http://localhost:3998/__store')).json();
   const pub2 = spawnSync('node', ['scripts/publish-images.js'], { cwd: ROOT, env: { ...process.env, ...r2env }, encoding: 'utf8' });
   const out2 = (pub2.stdout || '') + (pub2.stderr || '');
-  const check = (name, cond) => console.log((cond ? 'PASS' : 'FAIL') + ' — ' + name);
   check('publisher uploads all local files', pub1.status === 0 && uploaded > 0 && storeInfo.count === uploaded);
   check('publisher includes card data, not just images', storeInfo.hasDataIndex === true && storeInfo.hasSetData === true);
   check('publisher pagination + idempotent re-run', pub2.status === 0 && /Uploaded 0, skipped/.test(out2));
@@ -141,9 +190,12 @@ function fail(msg) {
     pub3.status === 0 && pubGuard.status === 1 && pub4.status === 0 && /deleted 1/.test(out4) && storeAfter.count === uploaded;
 
   cleanup();
-  fs.rmSync(path.join(ROOT, '.test-data'), { recursive: true, force: true });
+  for (const d of ['.test-data', '.test-data-ro', '.test-data-mirror']) {
+    fs.rmSync(path.join(ROOT, d), { recursive: true, force: true });
+  }
   if (suite.status !== 0) { console.error('\nBrowser suite failed.'); process.exit(1); }
   if (!publishOk) { console.error('\nPublisher checks failed.'); process.exit(1); }
+  if (stageFails) { console.error(`\n${stageFails} importer/read-only/mirror check(s) failed.`); process.exit(1); }
 
   console.log('\nAll stages completed.');
 })().catch((e) => fail(e.stack || e.message));

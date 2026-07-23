@@ -8,6 +8,10 @@
  *
  * Usage:  node server.js          (then open http://localhost:3000)
  * Env:    PORT=3000  DATA_DIR=./data
+ *         PTCG_READONLY=1  central-server mode: every endpoint that could
+ *         change the card database (downloads, custom printings, image
+ *         uploads, mirroring) returns 403 — enforced here, not just hidden
+ *         in the UI. Self-hosted installs leave this unset.
  */
 'use strict';
 
@@ -26,6 +30,8 @@ const COLLECTIONS_DIR = path.join(DATA_DIR, 'collections');
 const SECRET_FILE = path.join(DATA_DIR, 'secret.key');
 const TOKEN_TTL_MS = 1000 * 60 * 60 * 24 * 90; // 90 days
 const MAX_BODY = 8 * 1024 * 1024; // 8 MB — a full collection is far smaller
+const READONLY = process.env.PTCG_READONLY === '1';
+const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
 
 // ---------- storage helpers ----------
 
@@ -286,6 +292,160 @@ function runHashes() {
   }
 }
 
+// ---------- offline mirror (copy a remote card database to this server) ----------
+/* Self-hosted installs boot against the public CDN. The administrator can
+ * download the whole database (data + images) locally, after which the app
+ * pulls images from this server instead — no internet needed. Existing local
+ * files are never overwritten, so admin-uploaded photos survive re-mirrors
+ * and a re-run only fetches what's new. */
+
+const loadSettings = () => readJSON(SETTINGS_FILE, {});
+const saveSettings = (s) => writeJSONAtomic(SETTINGS_FILE, s);
+
+function startMirror(remoteBase) {
+  build = { running: true, phase: 'mirror', startedAt: Date.now(), error: null, hashesOk: null, log: [] };
+  pushLog('Mirroring card database from ' + remoteBase);
+  runMirror(remoteBase.replace(/\/+$/, ''))
+    .then(() => {
+      const s = loadSettings();
+      s.imageSource = 'local';
+      s.mirroredFrom = remoteBase;
+      s.mirroredAt = new Date().toISOString();
+      saveSettings(s);
+      build.running = false; build.phase = null; build.hashesOk = true;
+      pushLog('Local copy complete — images now served from this server');
+    })
+    .catch((e) => {
+      build.running = false; build.phase = null;
+      build.error = 'Mirror failed: ' + e.message + ' (safe to retry — it resumes where it stopped)';
+    });
+}
+
+async function runMirror(base) {
+  const progress = {
+    startedAt: new Date().toISOString(), mirror: true,
+    langIndex: 0, langCount: 1, lang: null, setsDone: 0, setTotal: 0, setName: null,
+    cardsEstimate: 0, imagesDownloaded: 0, imagesSkipped: 0, imageFailures: 0,
+    done: false, error: null,
+  };
+  const writeProgress = (extra = {}) => {
+    Object.assign(progress, extra, { updatedAt: new Date().toISOString() });
+    try { writeJSONAtomic(PROGRESS_FILE, progress); } catch { /* cosmetic */ }
+  };
+  const get = async (rel, asJson) => {
+    const res = await fetch(base + '/' + rel);
+    if (!res.ok) { const e = new Error(`HTTP ${res.status} for ${rel}`); e.status = res.status; throw e; }
+    return asJson ? res.json() : Buffer.from(await res.arrayBuffer());
+  };
+  const save = (rel, buf) => {
+    const f = path.join(CDN_DIR, rel);
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    fs.writeFileSync(f, buf);
+  };
+  const copyIfMissing = async (rel) => {
+    if (fs.existsSync(path.join(CDN_DIR, rel))) { progress.imagesSkipped++; return; }
+    try {
+      save(rel, await get(rel, false));
+      progress.imagesDownloaded++;
+    } catch (e) {
+      if (e.status !== 404) { progress.imageFailures++; pushLog('! ' + rel + ': ' + e.message); }
+    }
+  };
+
+  // language list (single-language remotes may not publish languages.json)
+  let langs = ['en'];
+  try {
+    const lj = await get('languages.json', true);
+    save('languages.json', Buffer.from(JSON.stringify(lj)));
+    const codes = (lj.languages || []).map((l) => l.code || l).filter(Boolean);
+    if (codes.length) langs = codes;
+  } catch { /* default en */ }
+
+  // custom printings: remote first, local definitions win on conflict
+  try {
+    const remoteCustom = await get('custom.json', true);
+    const localCustom = readJSON(CUSTOM_FILE, { cards: {} });
+    const merged = { cards: {} };
+    for (const [id, entry] of Object.entries(remoteCustom.cards || {})) {
+      merged.cards[id] = { variants: { ...(entry.variants || {}) } };
+    }
+    for (const [id, entry] of Object.entries(localCustom.cards || {})) {
+      merged.cards[id] = { variants: { ...((merged.cards[id] || {}).variants || {}), ...(entry.variants || {}) } };
+    }
+    writeJSONAtomic(CUSTOM_FILE, merged);
+  } catch { /* remote has no custom printings */ }
+
+  for (let li = 0; li < langs.length; li++) {
+    const lang = langs[li];
+    const index = await get(`${lang}/index.json`, true);
+    save(`${lang}/index.json`, Buffer.from(JSON.stringify(index)));
+    const qualities = Array.isArray(index.qualities) && index.qualities.length ? index.qualities : ['low'];
+    writeProgress({ lang, langIndex: li, langCount: langs.length, setsDone: 0, setTotal: (index.sets || []).length });
+    for (const f of ['search-index.json', 'scan-index.json']) {
+      try { save(`${lang}/${f}`, await get(`${lang}/${f}`, false)); } catch { /* optional */ }
+    }
+    const sets = index.sets || [];
+    for (let si = 0; si < sets.length; si++) {
+      const brief = sets[si];
+      writeProgress({ setName: brief.name });
+      const raw = await get(`${lang}/sets/${brief.id}.json`, false);
+      save(`${lang}/sets/${brief.id}.json`, raw);
+      const set = JSON.parse(raw.toString('utf8'));
+      if (brief.logo) await copyIfMissing(`${lang}/images/${set.id}/logo.png`);
+      const files = [];
+      for (const c of set.cards || []) {
+        const num = localIdOfCard(c.id);
+        if (c.image) for (const q of qualities) files.push(`${lang}/images/${set.id}/${num}/${q}.webp`);
+        if (c.variantImages) {
+          for (const [vk, qs] of Object.entries(c.variantImages)) {
+            for (const q of qs) files.push(`${lang}/images/${set.id}/${num}/${vk}-${q}.webp`);
+          }
+        }
+      }
+      let next = 0;
+      await Promise.all(Array.from({ length: Math.min(8, files.length || 1) }, async () => {
+        while (next < files.length) {
+          const i = next++;
+          await copyIfMissing(files[i]);
+          if (i % 25 === 0) writeProgress();
+        }
+      }));
+      mergeLocalVariantImages(path.join(CDN_DIR, lang, 'sets', set.id + '.json'), lang);
+      writeProgress({ setsDone: si + 1 });
+    }
+  }
+  writeProgress({ done: true, finishedAt: new Date().toISOString() });
+}
+
+/** Re-attach locally uploaded variant scans to a freshly mirrored set file, so
+ * a re-mirror never loses photos the admin added on this install. */
+function mergeLocalVariantImages(setFile, lang) {
+  const set = readJSON(setFile, null);
+  if (!set || !Array.isArray(set.cards)) return;
+  let changed = false;
+  for (const c of set.cards) {
+    const dir = path.join(CDN_DIR, lang, 'images', set.id, localIdOfCard(c.id));
+    let entries = [];
+    try { entries = fs.readdirSync(dir); } catch { continue; }
+    const vimgs = {};
+    for (const f of entries) {
+      const m = f.match(/^([a-zA-Z0-9_-]+)-(low|high)\.webp$/);
+      if (m) (vimgs[m[1]] = vimgs[m[1]] || []).push(m[2]);
+    }
+    for (const k of Object.keys(vimgs)) {
+      vimgs[k].sort();
+      const cur = (c.variantImages && c.variantImages[k]) || [];
+      if (JSON.stringify(cur) !== JSON.stringify(vimgs[k])) {
+        c.variantImages = c.variantImages || {};
+        c.variantImages[k] = vimgs[k];
+        if (!c.image) c.image = `images/${set.id}/${localIdOfCard(c.id)}`;
+        changed = true;
+      }
+    }
+  }
+  if (changed) writeJSONAtomic(setFile, set);
+}
+
 // ---------- custom printings & variant image library ----------
 
 const CUSTOM_FILE = path.join(CDN_DIR, 'custom.json');
@@ -339,7 +499,18 @@ const USERNAME_RE = /^[a-zA-Z0-9_]{3,30}$/;
 
 async function handleApi(req, res, pathname, ip, url) {
   if (pathname === '/api/health' && req.method === 'GET') {
-    return sendJSON(res, 200, { ok: true, auth: true, version: 2 });
+    return sendJSON(res, 200, { ok: true, auth: true, version: 2, readonly: READONLY });
+  }
+
+  // where should the app load card data/images from? (offline mirror support)
+  if (pathname === '/api/app-config' && req.method === 'GET') {
+    const s = loadSettings();
+    return sendJSON(res, 200, {
+      readonly: READONLY,
+      imageSource: s.imageSource === 'local' ? 'local' : 'remote',
+      localDbExists: dbExists(),
+      mirroredAt: s.mirroredAt || null,
+    });
   }
 
   if (pathname === '/api/build-status' && req.method === 'GET') {
@@ -355,6 +526,7 @@ async function handleApi(req, res, pathname, ip, url) {
   }
 
   if (pathname === '/api/build-data' && req.method === 'POST') {
+    if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
     if (build.running) return sendJSON(res, 409, { error: 'A download is already running' });
     const body = await readBody(req);
     const langs = typeof body.langs === 'string' && /^[a-z-]{2,7}(,[a-z-]{2,7})*$/.test(body.langs) ? body.langs : '';
@@ -422,8 +594,34 @@ async function handleApi(req, res, pathname, ip, url) {
     return sendJSON(res, 200, { username: user.display, admin: isAdminUser(user, loadUsers()) });
   }
 
+  // ---- admin: mirror a remote card database onto this server (offline use) ----
+  if (pathname === '/api/mirror' && req.method === 'POST') {
+    if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
+    if (!isAdminUser(user, loadUsers())) return sendJSON(res, 403, { error: 'Administrator account required' });
+    if (build.running) return sendJSON(res, 409, { error: 'A download is already running' });
+    const body = await readBody(req);
+    const remote = typeof body.remote === 'string' && /^https?:\/\/[^\s]{4,300}$/i.test(body.remote) ? body.remote : null;
+    if (!remote) return sendJSON(res, 400, { error: 'remote must be the card database URL (https://…)' });
+    startMirror(remote);
+    return sendJSON(res, 200, { ok: true, started: true });
+  }
+
+  // ---- admin: choose where the app pulls images/data from ----
+  if (pathname === '/api/image-source' && req.method === 'POST') {
+    if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
+    if (!isAdminUser(user, loadUsers())) return sendJSON(res, 403, { error: 'Administrator account required' });
+    const body = await readBody(req);
+    if (!['local', 'remote'].includes(body.source)) return sendJSON(res, 400, { error: 'source must be "local" or "remote"' });
+    if (body.source === 'local' && !dbExists()) return sendJSON(res, 400, { error: 'No local copy exists yet — download the database first' });
+    const s = loadSettings();
+    s.imageSource = body.source;
+    saveSettings(s);
+    return sendJSON(res, 200, { ok: true, imageSource: body.source });
+  }
+
   // ---- admin: define a custom printing (e.g. "Cracked Ice Holo") for a card ----
   if (pathname === '/api/custom-variant' && req.method === 'POST') {
+    if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
     if (!isAdminUser(user, loadUsers())) return sendJSON(res, 403, { error: 'Administrator account required' });
     const body = await readBody(req);
     const cardId = typeof body.cardId === 'string' && CARD_ID_RE.test(body.cardId) ? body.cardId : null;
@@ -440,6 +638,7 @@ async function handleApi(req, res, pathname, ip, url) {
 
   // ---- admin: upload your own image for a specific printing of a card ----
   if (pathname === '/api/variant-image' && req.method === 'POST') {
+    if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
     if (!isAdminUser(user, loadUsers())) return sendJSON(res, 403, { error: 'Administrator account required' });
     const cardId = url.searchParams.get('cardId') || '';
     const variant = url.searchParams.get('variant') || '';
