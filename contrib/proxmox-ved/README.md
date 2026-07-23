@@ -20,20 +20,31 @@ at the repo root, which deploy from git branches).
 2. Fork `community-scripts/ProxmoxVED`, create a branch `feat/pokemon-set-tracker`,
    and copy these files into the fork at their canonical paths:
 
-   | from (this folder)                        | to (ProxmoxVED fork)                  |
-   |-------------------------------------------|---------------------------------------|
-   | `ct/pokemon-set-tracker.sh`               | `ct/pokemon-set-tracker.sh`           |
-   | `ct/headers/pokemon-set-tracker`          | `ct/headers/pokemon-set-tracker`      |
-   | `install/pokemon-set-tracker-install.sh`  | `install/pokemon-set-tracker-install.sh` |
+   | from (this folder)                       | to (ProxmoxVED fork)                     |
+   |-------------------------------------------|------------------------------------------|
+   | `ct/pokemonsettracker.sh`                 | `ct/pokemonsettracker.sh`                |
+   | `ct/headers/pokemonsettracker`            | `ct/headers/pokemonsettracker`           |
+   | `install/pokemonsettracker-install.sh`    | `install/pokemonsettracker-install.sh`   |
+
+   **Filenames must match their NSAPP derivation** — `APP` lowercased with
+   spaces stripped (`"Pokemon Set Tracker"` → `pokemonsettracker`). Their
+   build.func fetches `install/<NSAPP>-install.sh` by that name; anything
+   else 404s (silently — an empty install script runs as a no-op).
 
 3. Test from the fork on a real Proxmox host:
 
    ```bash
-   bash -c "$(curl -fsSL https://raw.githubusercontent.com/<your-fork>/ProxmoxVED/feat/pokemon-set-tracker/ct/pokemon-set-tracker.sh)"
+   COMMUNITY_SCRIPTS_URL=https://raw.githubusercontent.com/<your-fork>/ProxmoxVED/feat/pokemon-set-tracker \
+   bash -c "$(curl -fsSL https://raw.githubusercontent.com/<your-fork>/ProxmoxVED/feat/pokemon-set-tracker/ct/pokemonsettracker.sh)"
    ```
 
-   (their `dev_mode="trace,keep"` env helps debugging; re-run the same script
-   inside the container to test the update path)
+   **`COMMUNITY_SCRIPTS_URL` is required when testing from a fork** — their
+   build.func fetches the install script and helper libraries from that base
+   URL, which defaults to upstream ProxmoxVED `main` (where a new app's
+   files don't exist yet). Their `dev_mode="trace,keep"` env helps
+   debugging; re-run the same command (with the same env var) inside the
+   container to test the update path. Once merged upstream, no env var is
+   needed — the defaults are correct.
 
 4. Open the PR against `community-scripts/ProxmoxVED` — new scripts go there,
    never to ProxmoxVE directly. After review, maintainers promote accepted
