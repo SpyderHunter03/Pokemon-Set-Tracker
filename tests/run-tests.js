@@ -21,6 +21,20 @@ const fs = require('fs');
 const ROOT = path.join(__dirname, '..');
 const children = [];
 
+// The committed public/config.js points cdnBase at the project's hosted CDN.
+// Tests must run against the local fixture database, so pin a local config
+// for the duration of the suite and restore the real one afterwards.
+const CONFIG_PATH = path.join(ROOT, 'public', 'config.js');
+const realConfig = fs.readFileSync(CONFIG_PATH, 'utf8');
+function pinTestConfig() {
+  fs.writeFileSync(CONFIG_PATH,
+    "self.PTCG_CONFIG = { cdnBase: 'cdn', defaultLanguage: 'en', imageBase: null };\n");
+}
+function restoreConfig() {
+  try { fs.writeFileSync(CONFIG_PATH, realConfig); } catch { /* best effort */ }
+}
+process.on('exit', restoreConfig);
+
 function start(cmd, args, env = {}) {
   const child = spawn(cmd, args, { cwd: ROOT, env: { ...process.env, ...env }, stdio: 'inherit' });
   children.push(child);
@@ -63,6 +77,7 @@ function fail(msg) {
   await waitForPort(3999).catch((e) => fail(e.message));
 
   console.log('=== 2/7 start server (no card database yet) ===');
+  pinTestConfig();
   fs.rmSync(path.join(ROOT, 'public', 'cdn'), { recursive: true, force: true });
   fs.rmSync(path.join(ROOT, '.test-data'), { recursive: true, force: true });
   start('node', ['server.js'], {

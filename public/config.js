@@ -14,22 +14,31 @@
  * hosts do, or let you configure it.
  */
 self.PTCG_CONFIG = {
-  /* Where the app loads its card DATABASE (data + images) from.
-   * 'cdn' = local, self-contained (first visit offers the in-app download).
-   * A full URL = a CDN you publish to with scripts/publish-images.js —
-   * fresh installs boot instantly with no download, and the bootstrap/
-   * admin-update UI hides itself (update on the master, re-publish).
-   * If the remote CDN is unreachable, the app falls back to a local
-   * database when one exists.
+  /* Where the app loads its card DATABASE — data AND images — from.
+   * This is the setting you change to point at a CDN; imageBase below
+   * is only for advanced split setups.
    *
-   *   cdnBase: 'https://pub-xxxxxxxx.r2.dev'   (Cloudflare R2 public bucket)
+   * The default is the project's hosted database (Cloudflare R2), so a
+   * fresh install boots instantly with no download and the bootstrap/
+   * admin-update UI hides itself. If the CDN is unreachable, the app
+   * falls back to a local database when one exists.
+   *
+   * Set it to 'cdn' to run fully self-contained instead: the app serves
+   * its own database (first visit offers the in-app download, and admins
+   * can rebuild it), built by scripts/build-data.js and optionally
+   * published to your own bucket with scripts/publish-images.js.
+   *
+   *   cdnBase: 'cdn'                            (self-hosted database)
+   *   cdnBase: 'https://pub-xxxxxxxx.r2.dev'    (your own R2 bucket)
    */
-  cdnBase: 'cdn',
+  cdnBase: 'https://pub-828f8f41b9f543f88ccae1f6ff84c2c5.r2.dev',
   /* Language shown on first launch (user can switch in-app if more
    * languages were downloaded with --langs). */
   defaultLanguage: 'en',
-  /* Serve card images from a CDN you control instead of this app.
-   * Leave null to serve images from cdnBase like everything else.
+  /* ADVANCED — usually leave this null. Images already come from
+   * cdnBase along with everything else; imageBase exists only for a
+   * split setup where card DATA stays at cdnBase but images are served
+   * from a different host.
    *
    *   imageBase: 'https://pub-xxxxxxxx.r2.dev'          (Cloudflare R2 public bucket)
    *   imageBase: 'https://cards-cdn.example.com'        (any host you control)
