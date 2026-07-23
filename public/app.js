@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.6.0';
+const APP_VERSION = '3.7.0';
 
 /* ============================================================
  * Storage helpers
@@ -17,8 +17,9 @@ function lsSet(key, val) { localStorage.setItem(key, JSON.stringify(val)); }
  * location configured in config.js (same server or your own CDN).
  * No third-party APIs are called at runtime.
  * ============================================================ */
-const CDN = ((self.PTCG_CONFIG && self.PTCG_CONFIG.cdnBase) || 'cdn').replace(/\/+$/, '');
+let CDN = ((self.PTCG_CONFIG && self.PTCG_CONFIG.cdnBase) || 'cdn').replace(/\/+$/, '');
 const IMAGE_BASE = ((self.PTCG_CONFIG && self.PTCG_CONFIG.imageBase) || '').replace(/\/+$/, '');
+const isRemoteCdn = () => /^https?:\/\//i.test(CDN);
 let lang = lsGet('ptcg.lang') || (self.PTCG_CONFIG && self.PTCG_CONFIG.defaultLanguage) || 'en';
 
 const DB = () => `${CDN}/${lang}`;
@@ -108,7 +109,30 @@ function customVariantsOf(cardId) {
 }
 
 async function getIndex() {
-  if (!_indexCache) _indexCache = await cdnGet(`${DB()}/index.json`);
+  if (_indexCache) return _indexCache;
+  try {
+    _indexCache = await cdnGet(`${DB()}/index.json`);
+  } catch (e) {
+    // configured remote CDN unreachable or missing this language — fall back
+    // to a locally built database when one exists (self-hosting still works)
+    if (isRemoteCdn()) {
+      const remote = CDN;
+      try {
+        const res = await fetch(`cdn/${lang}/index.json`);
+        if (!res.ok) throw e;
+        const local = await res.json();
+        CDN = 'cdn';
+        clearDataCaches();
+        _indexCache = local;
+        toast('Card CDN unreachable — using the local database');
+      } catch {
+        CDN = remote;
+        throw e;
+      }
+    } else {
+      throw e;
+    }
+  }
   return _indexCache;
 }
 
@@ -848,8 +872,8 @@ async function renderHome() {
     sets = await getSets();
   } catch (e) {
     await detectServer(); // make sure we know whether a server is present
-    if (e.notFound && serverAvailable) {
-      renderBootstrap(); // no database yet — offer the in-app download
+    if (e.notFound && serverAvailable && !isRemoteCdn()) {
+      renderBootstrap(); // no local database yet — offer the in-app download
     } else {
       view.replaceChildren(dbErrorView('Could not load the card database.', e, renderHome));
     }
@@ -1490,6 +1514,12 @@ async function renderAdminArea() {
 
   const content = h('div', {});
   area.append(h('hr'), h('h3', {}, 'Administration'), content);
+
+  if (isRemoteCdn()) {
+    content.replaceChildren(h('p', { class: 'muted small' },
+      'This instance reads its card database from a CDN (', CDN, '). Update the database on the master instance and re-publish — nothing to manage here.'));
+    return;
+  }
 
   async function renderControls() {
     const status = await getBuildStatus();

@@ -8,7 +8,15 @@ const { chromium } = require('playwright');
   const page = await context.newPage();
   const errors = [];
   page.on('pageerror', (e) => errors.push('PAGE ERROR: ' + e.message));
-  page.on('console', (m) => { if (m.type() === 'error' && !m.text().includes('base1/98')) errors.push('CONSOLE: ' + m.text()); });
+  // ignored console errors: base1/98 (intentional broken image), ERR_FAILED
+  // (requests aborted by test navigation), /nonexistent/ (intentional
+  // dead-CDN fallback scenario — the app handles it and falls back)
+  page.on('console', (m) => {
+    const t = m.text();
+    if (m.type() === 'error' && !t.includes('base1/98') && !t.includes('net::ERR_FAILED') && !t.includes('/nonexistent/')) {
+      errors.push('CONSOLE: ' + t);
+    }
+  });
   page.on('request', (r) => {
     const u = new URL(r.url());
     if (u.hostname !== 'localhost') errors.push('EXTERNAL REQUEST: ' + r.url());
@@ -213,7 +221,7 @@ const { chromium } = require('playwright');
   // ---- external image CDN (config.imageBase) ----
   await context.addInitScript(() => {
     const cfg = { cdnBase: 'cdn', defaultLanguage: 'en', imageBase: 'http://localhost:3999/imgcdn' };
-    Object.defineProperty(self, 'PTCG_CONFIG', { get: () => cfg, set: () => {} });
+    Object.defineProperty(self, 'PTCG_CONFIG', { configurable: true, get: () => cfg, set: () => {} });
   });
   await page.goto('http://localhost:3111/?extcdn=1#/set/base1'); // query change forces a real document load
   await page.waitForSelector('.tcg-card img');
@@ -226,6 +234,27 @@ const { chromium } = require('playwright');
   check('external CDN images actually load', true);
   const dataReq = await page.evaluate(async () => (await fetch('cdn/en/index.json')).ok);
   check('card data still served locally alongside external images', dataReq === true);
+
+  // ---- full-remote card database (cdnBase = external URL) ----
+  await context.addInitScript(() => {
+    const cfg = { cdnBase: 'http://localhost:3999/imgcdn', defaultLanguage: 'en', imageBase: null };
+    Object.defineProperty(self, 'PTCG_CONFIG', { configurable: true, get: () => cfg, set: () => {} });
+  });
+  await page.goto('http://localhost:3111/?remotecdn=1#/');
+  await page.waitForSelector('.set-card');
+  const remoteIndexFetched = await page.evaluate(() =>
+    performance.getEntriesByType('resource').some((r) => r.name.includes('localhost:3999/imgcdn/en/index.json')));
+  check('sets load from the remote card database', remoteIndexFetched === true);
+  check('no download button when database is remote', (await page.locator('button:has-text("Download card database")').count()) === 0);
+
+  // ---- remote CDN unreachable → automatic local fallback ----
+  await context.addInitScript(() => {
+    const cfg = { cdnBase: 'http://localhost:3999/nonexistent', defaultLanguage: 'en', imageBase: null };
+    Object.defineProperty(self, 'PTCG_CONFIG', { configurable: true, get: () => cfg, set: () => {} });
+  });
+  await page.goto('http://localhost:3111/?fallback=1#/');
+  await page.waitForSelector('.set-card');
+  check('unreachable remote CDN falls back to the local database', (await page.locator('.set-card').count()) >= 1);
 
   console.log(errors.length ? 'JS ERRORS:\n' + errors.join('\n') : 'No JS errors, zero external requests.');
   await browser.close();

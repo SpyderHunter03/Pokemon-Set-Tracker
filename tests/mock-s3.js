@@ -12,7 +12,12 @@ http.createServer((req, res) => {
 
   if (url.pathname === '/__store') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ count: store.size, keys: [...store.keys()].slice(0, 5) }));
+    return res.end(JSON.stringify({
+      count: store.size,
+      hasDataIndex: [...store.keys()].some((k) => k.endsWith('/index.json')),
+      hasSetData: [...store.keys()].some((k) => k.includes('/sets/')),
+      keys: [...store.keys()].slice(0, 5),
+    }));
   }
 
   if (!req.headers.authorization || !req.headers.authorization.startsWith('AWS4-HMAC-SHA256')) {

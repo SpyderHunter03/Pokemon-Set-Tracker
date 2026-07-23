@@ -1,14 +1,17 @@
 #!/usr/bin/env node
 /**
- * Image publisher — syncs your card images to Cloudflare R2 (or any
- * S3-compatible bucket). Zero dependencies: SigV4 signing is done with
- * Node's crypto.
+ * CDN publisher — syncs your card database (data + images) to Cloudflare
+ * R2 (or any S3-compatible bucket). Zero dependencies: SigV4 signing is
+ * done with Node's crypto.
  *
- * Uploads everything under public/cdn/<lang>/images/ as keys
- * "<lang>/images/..." — exactly the layout the app expects from
- * config.js `imageBase`. Idempotent: unchanged files (same MD5) are
- * skipped, so re-running after new downloads or admin uploads only
- * transfers what's new. Never deletes anything remote.
+ * Uploads everything under public/cdn/ (images, per-set data, indexes,
+ * custom printings, languages) in exactly the layout the app expects —
+ * point config.js `cdnBase` at the bucket's public URL and fresh installs
+ * boot straight from the CDN with no local download. Idempotent:
+ * unchanged files (same MD5) are skipped, so re-running after new
+ * downloads or admin uploads/printings only transfers what's new. Never
+ * deletes anything remote. Images upload with immutable cache headers;
+ * data JSON uploads with short cache (60s) so updates propagate fast.
  *
  * Setup (Cloudflare dashboard):
  *   R2 → Create bucket → Settings → enable public access (r2.dev or a
@@ -24,6 +27,7 @@
  *                 https://<R2_ACCOUNT_ID>.r2.cloudflarestorage.com;
  *                 also how tests point this at a mock)
  *   --langs en,fr publish only these languages (default: all found)
+ *   --images-only skip data files (the pre-v3.7 behaviour)
  *   --dry-run     show what would upload, do nothing
  *   --concurrency N   parallel uploads (default 8)
  */
@@ -46,6 +50,7 @@ const ENDPOINT = (process.env.R2_ENDPOINT || (ACCOUNT ? `https://${ACCOUNT}.r2.c
 const DRY = flag('dry-run');
 const CONCURRENCY = Math.max(1, parseInt(opt('concurrency', '8'), 10) || 8);
 const ONLY_LANGS = opt('langs', '') ? opt('langs', '').split(',').map((s) => s.trim()).filter(Boolean) : null;
+const IMAGES_ONLY = flag('images-only');
 
 if (!ENDPOINT || !ACCESS_KEY || !SECRET_KEY || !BUCKET) {
   console.error(`Missing configuration. Required environment variables:
@@ -143,7 +148,7 @@ function walk(dir, base, out) {
   return out;
 }
 
-function localImages() {
+function localFiles() {
   const files = [];
   let langs = [];
   try {
@@ -154,11 +159,23 @@ function localImages() {
   }
   for (const lang of langs) {
     if (ONLY_LANGS && !ONLY_LANGS.includes(lang)) continue;
-    const imgDir = path.join(CDN_DIR, lang, 'images');
-    walk(imgDir, `${lang}/images/`, files);
+    walk(path.join(CDN_DIR, lang, 'images'), `${lang}/images/`, files);
+    if (!IMAGES_ONLY) {
+      walk(path.join(CDN_DIR, lang, 'sets'), `${lang}/sets/`, files);
+      for (const f of ['index.json', 'search-index.json', 'scan-index.json']) {
+        if (fs.existsSync(path.join(CDN_DIR, lang, f))) files.push(`${lang}/${f}`);
+      }
+    }
+  }
+  if (!IMAGES_ONLY) {
+    for (const f of ['languages.json', 'custom.json']) {
+      if (fs.existsSync(path.join(CDN_DIR, f))) files.push(f);
+    }
   }
   return files;
 }
+
+const isImageKey = (key) => key.includes('/images/');
 
 const CONTENT_TYPES = { '.webp': 'image/webp', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg' };
 
@@ -177,8 +194,8 @@ async function pool(items, size, worker) {
 
 (async () => {
   console.log(`Endpoint: ${ENDPOINT}  bucket: ${BUCKET}`);
-  const keys = localImages();
-  console.log(`Local images: ${keys.length}`);
+  const keys = localFiles();
+  console.log(`Local files: ${keys.length}${IMAGES_ONLY ? ' (images only)' : ' (data + images)'}`);
   console.log('Fetching remote inventory…');
   const remote = await listRemote();
   console.log(`Remote objects: ${remote.size}`);
@@ -205,8 +222,9 @@ async function pool(items, size, worker) {
       const res = await signedFetch('PUT', key, {
         body,
         headers: {
-          'content-type': CONTENT_TYPES[ext] || 'application/octet-stream',
-          'cache-control': 'public, max-age=31536000, immutable',
+          'content-type': ext === '.json' ? 'application/json' : (CONTENT_TYPES[ext] || 'application/octet-stream'),
+          // images never change; data JSON must propagate quickly
+          'cache-control': isImageKey(key) ? 'public, max-age=31536000, immutable' : 'public, max-age=60',
         },
       });
       if (!res.ok) throw new Error('HTTP ' + res.status);

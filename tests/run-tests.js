@@ -105,7 +105,8 @@ function fail(msg) {
   const pub2 = spawnSync('node', ['scripts/publish-images.js'], { cwd: ROOT, env: { ...process.env, ...r2env }, encoding: 'utf8' });
   const out2 = (pub2.stdout || '') + (pub2.stderr || '');
   const check = (name, cond) => console.log((cond ? 'PASS' : 'FAIL') + ' — ' + name);
-  check('publisher uploads all local images', pub1.status === 0 && uploaded > 0 && storeInfo.count === uploaded);
+  check('publisher uploads all local files', pub1.status === 0 && uploaded > 0 && storeInfo.count === uploaded);
+  check('publisher includes card data, not just images', storeInfo.hasDataIndex === true && storeInfo.hasSetData === true);
   check('publisher pagination + idempotent re-run', pub2.status === 0 && /Uploaded 0, skipped/.test(out2));
   const publishOk = pub1.status === 0 && uploaded > 0 && storeInfo.count === uploaded && pub2.status === 0 && /Uploaded 0, skipped/.test(out2);
 

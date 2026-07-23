@@ -14,6 +14,16 @@
  * hosts do, or let you configure it.
  */
 self.PTCG_CONFIG = {
+  /* Where the app loads its card DATABASE (data + images) from.
+   * 'cdn' = local, self-contained (first visit offers the in-app download).
+   * A full URL = a CDN you publish to with scripts/publish-images.js —
+   * fresh installs boot instantly with no download, and the bootstrap/
+   * admin-update UI hides itself (update on the master, re-publish).
+   * If the remote CDN is unreachable, the app falls back to a local
+   * database when one exists.
+   *
+   *   cdnBase: 'https://pub-xxxxxxxx.r2.dev'   (Cloudflare R2 public bucket)
+   */
   cdnBase: 'cdn',
   /* Language shown on first launch (user can switch in-app if more
    * languages were downloaded with --langs). */

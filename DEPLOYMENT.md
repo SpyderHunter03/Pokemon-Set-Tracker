@@ -87,13 +87,25 @@ npx playwright install chromium
 node tests/run-tests.js
 ```
 
-## Publishing images to Cloudflare R2
+## The card database on Cloudflare R2
 
-The app can serve card images from a Cloudflare R2 bucket instead of hosting them itself (`imageBase` in `public/config.js`). At typical size (full English database, both qualities ≈ 5–8 GB) this fits R2's always-free 10 GB tier, and R2 egress is free at any volume — the bill stays $0 no matter how popular the app gets.
+The whole card database — data AND images — can live in a Cloudflare R2 bucket. Point `cdnBase` at it and **every install boots with cards immediately**: no "Download card database" button, no per-instance downloads. One *master* machine (your dev LXC) maintains the database (in-app download/updates, admin uploads, custom printings) and publishes it; every other instance just reads. If the CDN is ever unreachable, instances with a local database fall back to it automatically.
 
-One-time setup (Cloudflare dashboard): **R2 → Create bucket** (e.g. `pokemon-cards`) → bucket **Settings → Public access** → enable the `r2.dev` subdomain (or attach a custom domain) → **Manage R2 API Tokens → Create token** with *Object Read & Write* scoped to the bucket. Note your Account ID (dashboard sidebar), the token's Access Key ID and Secret.
+Cost: full English database (≈5–8 GB with both qualities) fits R2's always-free 10 GB tier, and R2 egress is free at any volume — $0 regardless of popularity.
 
-Publish (from wherever the images live — your dev LXC):
+**One-time setup (Cloudflare dashboard):**
+
+1. **R2 → Create bucket** (e.g. `pokemon-cards`).
+2. Bucket **Settings → Public access** → enable the `r2.dev` subdomain (or attach a custom domain). Note the public URL (`https://pub-….r2.dev`).
+3. Bucket **Settings → CORS policy** — required, the app fetches JSON cross-origin:
+
+   ```json
+   [{ "AllowedOrigins": ["*"], "AllowedMethods": ["GET"], "AllowedHeaders": ["*"], "MaxAgeSeconds": 86400 }]
+   ```
+
+4. **Manage R2 API Tokens → Create token**, *Object Read & Write*, scoped to the bucket. Note your Account ID (dashboard sidebar), Access Key ID and Secret.
+
+**Publish** (from the master — wherever the database lives):
 
 ```bash
 cd /opt/pokemon-set-tracker
@@ -101,15 +113,15 @@ R2_ACCOUNT_ID=<account-id> R2_ACCESS_KEY_ID=<key> R2_SECRET_ACCESS_KEY=<secret> 
 R2_BUCKET=pokemon-cards node scripts/publish-images.js
 ```
 
-Zero dependencies (SigV4 is hand-rolled), idempotent — re-run any time after downloading new sets or uploading variant images; only new/changed files transfer. `--dry-run` previews, `--langs en` filters. Tip: keep the env vars in `/root/.r2.env` and run `env $(cat /root/.r2.env) node scripts/publish-images.js`.
+Zero dependencies (SigV4 is hand-rolled), idempotent — re-run after any database update, admin image upload, or new custom printing; only new/changed files transfer. Images upload immutable; data JSON uploads with a 60s cache so updates propagate fast. `--dry-run` previews, `--langs en` filters, `--images-only` skips data. Tip: keep the env vars in `/root/.r2.env` and run `env $(cat /root/.r2.env) node scripts/publish-images.js`.
 
-Then point the app at the bucket in `public/config.js` (commit this — it's your deployment's config):
+**Point the app at the bucket** in `public/config.js` (commit it — it's your deployment's config):
 
 ```js
-imageBase: 'https://pub-xxxxxxxx.r2.dev',
+cdnBase: 'https://pub-xxxxxxxx.r2.dev',
 ```
 
-Optionally set `Environment=PTCG_BUILD_EXTRA_ARGS=--no-images` in the systemd unit if you later want app instances that don't store images locally at all (the master that runs `publish-images` still needs them).
+The master keeps `cdnBase: 'cdn'`? No — the master can use the remote URL too (it falls back to its local copy if the bucket's empty), but the simplest mental model: master = the one machine where you run database updates + `publish-images.js`; its own `config.js` may stay `'cdn'` so its admin tools remain active. Instances pointed at R2 hide the download/update UI automatically.
 
 ## Also built: container images
 
