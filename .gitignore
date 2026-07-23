@@ -13,3 +13,6 @@ package-lock.json
 *.zip
 *.log
 .DS_Store
+
+# R2 credentials for the publish script (never commit)
+r2.env

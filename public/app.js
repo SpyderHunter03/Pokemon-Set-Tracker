@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.7.0';
+const APP_VERSION = '3.8.0';
 
 /* ============================================================
  * Storage helpers
@@ -239,18 +239,15 @@ function cardImg(card, quality = 'low', variant = null) {
   return `${IMGDB()}/${card.image}/${q}.webp`;
 }
 
-/** Synthetic look for a printing when no real variant scan exists:
- * 1st Edition gets the stamp overlay; holo/reverse get a sheen. */
+/** Printing look when no dedicated scan exists: the closest image — the
+ * card's base scan (same set, same number) — with the printing's name
+ * written across it. The card's primary printing is what the base scan
+ * depicts, so it stays clean; real uploaded scans always win. */
 function variantFxEl(card, variant) {
-  if (card.variantImages && card.variantImages[variant]) return null; // real scan
-  if (variant === 'firstEdition') {
-    return h('div', { class: 'fx fx-stamp', 'aria-hidden': 'true' }, h('span', {}, '1'));
-  }
-  if (variant === 'holo') return h('div', { class: 'fx fx-holo', 'aria-hidden': 'true' });
-  if (variant === 'reverse') return h('div', { class: 'fx fx-reverse', 'aria-hidden': 'true' });
-  const customLabel = customVariantsOf(card.id)[variant];
-  if (customLabel && /holo/i.test(customLabel)) return h('div', { class: 'fx fx-holo', 'aria-hidden': 'true' });
-  return null;
+  if (card.variantImages && card.variantImages[variant]) return null; // real scan of this printing
+  if (realVariants(card)[0] === variant) return null; // the base scan depicts this printing
+  return h('div', { class: 'fx fx-label', 'aria-hidden': 'true' },
+    h('span', {}, variantLabel(card, variant)));
 }
 
 /** Sorting helpers — set release order comes from the index (oldest → newest). */

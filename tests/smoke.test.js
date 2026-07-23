@@ -97,15 +97,15 @@ const { chromium } = require('playwright');
   check('missing filter shows 5 printings', (await page.locator('.tcg-card').count()) === 5);
   await page.click('.chip:has-text("All")');
 
-  // ---- synthetic variant looks + real variant scans ----
-  check('holo printing gets holo sheen', (await page.locator('.tcg-card >> nth=0 >> .fx-holo').count()) === 1);
-  check('1st Edition printing gets the stamp', (await page.locator('.tcg-card >> nth=1 >> .fx-stamp').count()) === 1);
-  check('unlimited printing has neither', (await page.locator('.tcg-card[data-card-id="base1-58"][data-variant="normal"] >> .fx').count()) === 0);
+  // ---- printing looks: name banner on non-primary printings + real variant scans ----
+  check('primary printing shows the plain base scan', (await page.locator('.tcg-card >> nth=0 >> .fx').count()) === 0);
+  check('1st Edition printing shows its name across the base scan', (await page.locator('.tcg-card >> nth=1 >> .fx-label').textContent()) === '1st Edition');
+  check('unlimited (primary) printing stays clean', (await page.locator('.tcg-card[data-card-id="base1-58"][data-variant="normal"] >> .fx').count()) === 0);
   const customT = page.locator('.tcg-card[data-variant="cracked-ice-holo"]');
   check('custom printing survives database rebuild with its image', (await customT.locator('img').getAttribute('src')).includes('cracked-ice-holo-low.webp'));
   const pikaFirstEd = page.locator('.tcg-card[data-card-id="base1-58"][data-variant="firstEdition"]');
   check('real variant scan used when present', (await pikaFirstEd.locator('img').getAttribute('src')).includes('firstEdition-low.webp'));
-  check('real variant scan suppresses synthetic stamp', (await pikaFirstEd.locator('.fx-stamp').count()) === 0);
+  check('real variant scan suppresses the name banner', (await pikaFirstEd.locator('.fx-label').count()) === 0);
 
   // modal image follows the selected printing
   await pikaFirstEd.locator('.info-btn').click();
