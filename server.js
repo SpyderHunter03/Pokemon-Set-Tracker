@@ -448,13 +448,51 @@ function mergeLocalVariantImages(setFile, lang) {
 
 // ---------- custom printings & variant image library ----------
 
-const CUSTOM_FILE = path.join(CDN_DIR, 'custom.json');
+const CUSTOM_FILE = path.join(CDN_DIR, 'custom.json');       // master overlay (published to R2)
+const LOCAL_OVERLAY_FILE = path.join(DATA_DIR, 'local-overlay.json'); // this install's own layer
 const CARD_ID_RE = /^[a-zA-Z0-9.-]{1,64}$/;
+const SET_ID_RE = /^[a-zA-Z0-9.-]{1,40}$/;
 const VARIANT_KEY_RE = /^[a-zA-Z0-9_-]{1,24}$/;
 const LANG_RE = /^[a-z-]{2,7}$/;
 
 function slugifyVariant(label) {
   return label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 24);
+}
+
+/* ---------- overlay layers ----------
+ * The card database is rendered as three stacked layers:
+ *   TCGdex base  →  master overlay (custom.json, published to R2)  →  local overlay
+ * Each overlay is { cards:{id:{…}}, sets:{id:{…}}, removed:[id] }. A card entry
+ * either patches an existing card (partial fields) or defines a brand-new one
+ * (new:true). `removed` is a tombstone list: a card listed here is hidden even
+ * if a lower layer (or a future master pull) still has it. The local overlay is
+ * this install's own edits — it lives in DATA_DIR, is never touched by a master
+ * pull, and is applied last so it always wins. */
+const EMPTY_OVERLAY = () => ({ cards: {}, sets: {}, removed: [] });
+const loadLocalOverlay = () => {
+  const o = readJSON(LOCAL_OVERLAY_FILE, null) || EMPTY_OVERLAY();
+  o.cards = o.cards || {}; o.sets = o.sets || {}; o.removed = Array.isArray(o.removed) ? o.removed : [];
+  return o;
+};
+const saveLocalOverlay = (o) => writeJSONAtomic(LOCAL_OVERLAY_FILE, o);
+
+/** Sanitize a card patch/definition coming from the editor API. */
+function sanitizeOverlayCard(body) {
+  const out = {};
+  const str = (v, n) => (typeof v === 'string' ? v.slice(0, n) : undefined);
+  if (body.name !== undefined) out.name = str(body.name, 80);
+  if (body.rarity !== undefined) out.rarity = str(body.rarity, 40);
+  if (body.category !== undefined) out.category = str(body.category, 20);
+  if (body.localId !== undefined) out.localId = str(body.localId, 24);
+  if (body.image !== undefined) out.image = body.image === null ? null : str(body.image, 120);
+  if (body.hp !== undefined) { const h = parseInt(body.hp, 10); if (h >= 0 && h < 100000) out.hp = h; }
+  if (Array.isArray(body.types)) out.types = body.types.filter((t) => typeof t === 'string').slice(0, 6).map((t) => t.slice(0, 20));
+  if (Array.isArray(body.dexId)) out.dexId = body.dexId.map((d) => parseInt(d, 10)).filter((d) => d > 0 && d < 100000).slice(0, 6);
+  if (body.variants && typeof body.variants === 'object' && !Array.isArray(body.variants)) {
+    out.variants = {};
+    for (const [k, v] of Object.entries(body.variants)) if (VARIANT_KEY_RE.test(k)) out.variants[k] = !!v;
+  }
+  return out;
 }
 
 function setIdOfCard(cardId) {
@@ -510,7 +548,14 @@ async function handleApi(req, res, pathname, ip, url) {
       imageSource: s.imageSource === 'local' ? 'local' : 'remote',
       localDbExists: dbExists(),
       mirroredAt: s.mirroredAt || null,
+      canPublish: !READONLY && !!(process.env.R2_ACCESS_KEY_ID && process.env.R2_SECRET_ACCESS_KEY && process.env.R2_BUCKET),
     });
+  }
+
+  // this install's own overlay layer (adds/edits/removals) — public read so the
+  // app can merge it on top of the master database
+  if (pathname === '/api/local-overlay' && req.method === 'GET') {
+    return sendJSON(res, 200, loadLocalOverlay());
   }
 
   if (pathname === '/api/build-status' && req.method === 'GET') {
@@ -629,11 +674,78 @@ async function handleApi(req, res, pathname, ip, url) {
     if (!cardId || label.length < 2) return sendJSON(res, 400, { error: 'cardId and a printing name (2+ characters) are required' });
     const key = slugifyVariant(label);
     if (!VARIANT_KEY_RE.test(key)) return sendJSON(res, 400, { error: 'That name produces an invalid key' });
-    const custom = readJSON(CUSTOM_FILE, { cards: {} });
-    if (!custom.cards[cardId]) custom.cards[cardId] = { variants: {} };
-    custom.cards[cardId].variants[key] = label;
-    writeJSONAtomic(CUSTOM_FILE, custom);
+    const overlay = loadLocalOverlay();
+    const entry = overlay.cards[cardId] = overlay.cards[cardId] || {};
+    entry.printings = entry.printings || {};
+    entry.printings[key] = label;
+    saveLocalOverlay(overlay);
     return sendJSON(res, 200, { ok: true, cardId, key, label });
+  }
+
+  // ---- admin: add or edit a card (patch an existing one, or define a new one) ----
+  if (pathname === '/api/overlay-card' && req.method === 'POST') {
+    if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
+    if (!isAdminUser(user, loadUsers())) return sendJSON(res, 403, { error: 'Administrator account required' });
+    const body = await readBody(req);
+    const cardId = typeof body.cardId === 'string' && CARD_ID_RE.test(body.cardId) ? body.cardId : null;
+    const setId = typeof body.set === 'string' && SET_ID_RE.test(body.set) ? body.set : null;
+    if (!cardId) return sendJSON(res, 400, { error: 'A valid cardId is required' });
+    const overlay = loadLocalOverlay();
+    const existing = overlay.cards[cardId] || {};
+    const patch = sanitizeOverlayCard(body);
+    const merged = { ...existing, ...patch };
+    if (body.new) {
+      // defining a brand-new card the base database doesn't have
+      if (!setId) return sendJSON(res, 400, { error: 'New cards need a set id' });
+      merged.new = true;
+      merged.set = setId;
+      if (!merged.localId) merged.localId = localIdOfCard(cardId);
+      if (!merged.name) return sendJSON(res, 400, { error: 'New cards need a name' });
+    }
+    overlay.cards[cardId] = merged;
+    // adding a card back un-tombstones it
+    overlay.removed = (overlay.removed || []).filter((id) => id !== cardId);
+    saveLocalOverlay(overlay);
+    return sendJSON(res, 200, { ok: true, cardId, card: merged });
+  }
+
+  // ---- admin: add a brand-new set the base database doesn't have ----
+  if (pathname === '/api/overlay-set' && req.method === 'POST') {
+    if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
+    if (!isAdminUser(user, loadUsers())) return sendJSON(res, 403, { error: 'Administrator account required' });
+    const body = await readBody(req);
+    const setId = typeof body.id === 'string' && SET_ID_RE.test(body.id) ? body.id : null;
+    const name = typeof body.name === 'string' ? body.name.trim().slice(0, 80) : '';
+    if (!setId || name.length < 2) return sendJSON(res, 400, { error: 'A valid set id and name (2+ characters) are required' });
+    const overlay = loadLocalOverlay();
+    overlay.sets[setId] = {
+      id: setId, name,
+      releaseDate: typeof body.releaseDate === 'string' ? body.releaseDate.slice(0, 10) : undefined,
+    };
+    saveLocalOverlay(overlay);
+    return sendJSON(res, 200, { ok: true, set: overlay.sets[setId] });
+  }
+
+  // ---- admin: remove (tombstone) or restore a card ----
+  if (pathname === '/api/overlay-remove' && req.method === 'POST') {
+    if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
+    if (!isAdminUser(user, loadUsers())) return sendJSON(res, 403, { error: 'Administrator account required' });
+    const body = await readBody(req);
+    const cardId = typeof body.cardId === 'string' && CARD_ID_RE.test(body.cardId) ? body.cardId : null;
+    if (!cardId) return sendJSON(res, 400, { error: 'A valid cardId is required' });
+    const overlay = loadLocalOverlay();
+    overlay.removed = overlay.removed || [];
+    const remove = body.removed !== false; // default: remove
+    if (remove) {
+      if (!overlay.removed.includes(cardId)) overlay.removed.push(cardId);
+      // a purely-overlay-added card with no other data → drop it entirely
+      const e = overlay.cards[cardId];
+      if (e && e.new && !e.printings) delete overlay.cards[cardId];
+    } else {
+      overlay.removed = overlay.removed.filter((id) => id !== cardId);
+    }
+    saveLocalOverlay(overlay);
+    return sendJSON(res, 200, { ok: true, cardId, removed: remove });
   }
 
   // ---- admin: upload your own image for a specific printing of a card ----
@@ -655,7 +767,10 @@ async function handleApi(req, res, pathname, ip, url) {
     const setFile = path.join(CDN_DIR, lang, 'sets', setId + '.json');
     const set = readJSON(setFile, null);
     const card = set && Array.isArray(set.cards) ? set.cards.find((c) => c.id === cardId) : null;
-    if (!card) return sendJSON(res, 404, { error: `Card ${cardId} not found in the ${lang} database` });
+    // the card may be an overlay-added one that has no base set-file entry
+    const overlay = loadLocalOverlay();
+    const overlayCard = overlay.cards[cardId];
+    if (!card && !overlayCard) return sendJSON(res, 404, { error: `Card ${cardId} not found — add it to the database first` });
     const raw = await readRawBody(req);
     if (!raw.length) return sendJSON(res, 400, { error: 'Send the image file as the request body' });
     const dir = path.join(CDN_DIR, lang, 'images', setId, localId);
@@ -666,10 +781,17 @@ async function handleApi(req, res, pathname, ip, url) {
     } catch (e) {
       return sendJSON(res, 400, { error: 'Could not process that image: ' + e.message });
     }
-    if (!card.variantImages) card.variantImages = {};
-    card.variantImages[variant] = ['low', 'high'];
-    if (!card.image) card.image = `images/${setId}/${localId}`; // imageless card gains a base path for variant art
-    writeJSONAtomic(setFile, set);
+    if (card) {
+      if (!card.variantImages) card.variantImages = {};
+      card.variantImages[variant] = ['low', 'high'];
+      if (!card.image) card.image = `images/${setId}/${localId}`;
+      writeJSONAtomic(setFile, set);
+    } else {
+      overlayCard.variantImages = overlayCard.variantImages || {};
+      overlayCard.variantImages[variant] = ['low', 'high'];
+      if (!overlayCard.image) overlayCard.image = `images/${setId}/${localId}`;
+      saveLocalOverlay(overlay);
+    }
     return sendJSON(res, 200, {
       ok: true,
       urls: {

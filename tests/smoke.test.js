@@ -26,17 +26,38 @@ const { chromium } = require('playwright');
   const check = (name, cond) => { console.log((cond ? 'PASS' : 'FAIL') + ' — ' + name); if (!cond) failCount++; };
   const coll = () => page.evaluate(() => JSON.parse(localStorage.getItem('ptcg.collection.v2')));
 
-  // ---- seed old v1 data to test migration ----
+  // ---- logged out: browse-only (tracking requires an account) ----
   await page.goto('http://localhost:3111/');
-  await page.evaluate(() => {
-    localStorage.clear();
+  await page.evaluate(() => localStorage.clear());
+  await page.reload();
+  await page.waitForSelector('.set-card');
+  check('logged out: no stats banner', (await page.locator('#stats-banner').count()) === 0);
+  check('logged out: sign-in prompt shown', (await page.locator('.signin-banner').count()) === 1);
+  await page.click('.set-card:has-text("Base Set")');
+  await page.waitForSelector('.tcg-card');
+  check('logged out: owned/missing filters hidden', (await page.locator('.chips .chip', { hasText: 'Owned' }).count()) === 0);
+  await page.click('.tcg-card >> nth=0'); // a tap opens details, does NOT toggle ownership
+  await page.waitForSelector('#card-modal[open]');
+  const guestColl = await page.evaluate(() => JSON.parse(localStorage.getItem('ptcg.collection.v2') || '{}'));
+  check('logged out: tapping a card does not track', Object.keys(guestColl).length === 0);
+  check('logged out: modal offers sign-in', (await page.locator('#card-modal button', { hasText: 'Sign in' }).count()) >= 1);
+  await page.click('#card-modal button:has-text("Close")');
+
+  // ---- sign in + old v1 data migration ----
+  const uniq = 'smoke' + Math.floor(Math.random() * 1e6);
+  await page.goto('http://localhost:3111/');
+  await page.evaluate(async (u) => {
     localStorage.setItem('ptcg.collection.v1', JSON.stringify({ 'base1-58': 2 }));
-  });
+    const r = await fetch('api/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: u, password: 'password123' }) });
+    const d = await r.json();
+    localStorage.setItem('ptcg.auth', JSON.stringify({ token: d.token, username: d.username }));
+  }, uniq);
   await page.reload();
   await page.waitForSelector('.set-card');
 
   const migrated = await coll();
   check('v1 → v2 migration', migrated && migrated['base1-58'] && migrated['base1-58'].normal === 2);
+  check('signed in: stats banner shown', (await page.locator('#stats-banner').count()) === 1);
   check('home shows sets', (await page.locator('.set-card').count()) === 2);
   check('TCG Pocket sets excluded from the database',
     !(await page.locator('.set-card').allTextContents()).join(' ').includes('Genetic Apex'));
@@ -196,15 +217,7 @@ const { chromium } = require('playwright');
   await page.goto('http://localhost:3111/');
   await page.waitForSelector('.set-card');
 
-  // ---- account & variant-aware sync ----
-  await page.click('#account-btn');
-  await page.waitForSelector('#account-modal[open]');
-  const uniq = 'smoke' + Math.floor(Math.random() * 1e6);
-  await page.click('.tabs button:has-text("Create account")');
-  await page.fill('#account-forms input[type=text]', uniq);
-  await page.fill('#account-forms input[type=password]', 'password123');
-  await page.click('#account-forms .btn');
-  await page.waitForSelector('#account-status button:has-text("Sign out"), #account-forms button:has-text("Sign out")');
+  // ---- variant-aware sync (using the account signed in at the start) ----
   await page.waitForTimeout(2500); // debounce push
   const remote = await page.evaluate(async () => {
     const auth = JSON.parse(localStorage.getItem('ptcg.auth'));
@@ -215,10 +228,12 @@ const { chromium } = require('playwright');
     remote.collection && remote.collection['base1-4'] && remote.collection['base1-4'].holo === 2 &&
     remote.collection['base1-4'].firstEdition === 1 && remote.collection['base1-58'].normal === 2);
 
-  // this user is NOT the first account (bootstrap test registered the admin);
-  // the account modal is still open from registration — admin area renders async
-  await page.waitForTimeout(800);
+  // this user is NOT the first account (bootstrap test registered the admin)
+  await page.click('#account-btn');
+  await page.waitForSelector('#account-modal[open]');
+  await page.waitForTimeout(800); // admin area renders async
   check('non-admin sees no Administration section', (await page.locator('#admin-area button').count()) === 0);
+  await page.keyboard.press('Escape');
 
   // ---- external image CDN (config.imageBase) ----
   await context.addInitScript(() => {
@@ -276,6 +291,17 @@ const { chromium } = require('playwright');
     });
     check('pokeball spinner clears once the image arrives', true);
     await slowCtx.close();
+  }
+
+  // ---- copied files with no server behind them → the app does nothing ----
+  {
+    const gctx = await browser.newContext({ serviceWorkers: 'block' });
+    const gp = await gctx.newPage();
+    await gp.route('**/api/**', (r) => r.abort()); // simulate: no server at all
+    await gp.goto('http://localhost:3111/');
+    await gp.waitForSelector('h2:has-text("Server required")');
+    check('no-server copy is gated (server required)', (await gp.locator('.set-card').count()) === 0);
+    await gctx.close();
   }
 
   console.log(errors.length ? 'JS ERRORS:\n' + errors.join('\n') : 'No JS errors, zero external requests.');

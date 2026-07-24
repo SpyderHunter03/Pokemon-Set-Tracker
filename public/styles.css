@@ -120,6 +120,20 @@ a { color: var(--accent-soft); text-decoration: none; }
 
 .stat .lbl { font-size: 12px; color: var(--muted); margin-top: 2px; }
 
+.signin-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 16px;
+  margin-bottom: 18px;
+}
+
+.signin-banner .btn { flex-shrink: 0; }
+
 /* ---------- set list ---------- */
 .set-filter { margin-bottom: 12px; }
 

@@ -112,6 +112,9 @@ function fail(msg) {
   // ---- tcgcsv variant importer against a mock ----
   start('node', ['tests/mock-tcgcsv.js']);
   await waitForPort(3997).catch((e) => fail(e.message));
+  // seed a previously-published master printing to prove the importer's additive merge
+  fs.writeFileSync(path.join(ROOT, 'public', 'cdn', 'custom.json'),
+    JSON.stringify({ cards: { 'base1-4': { variants: { 'cracked-ice-holo': 'Cracked Ice Holo' } } } }));
   const imp = spawnSync('node', ['scripts/import-variants.js', '--api', 'http://localhost:3997/tcgplayer'], { cwd: ROOT, encoding: 'utf8' });
   const customNow = JSON.parse(fs.readFileSync(path.join(ROOT, 'public', 'cdn', 'custom.json'), 'utf8'));
   const vOf = (id) => (customNow.cards[id] || {}).variants || {};
@@ -119,6 +122,19 @@ function fail(msg) {
     imp.status === 0 && vOf('base1-58')['red-cheeks'] === 'Red Cheeks' && vOf('swsh3-20')['cracked-ice-holo'] === 'Cracked Ice Holo');
   check('importer skips standard printings', !Object.keys(vOf('base1-58')).some((k) => /1st|first|holo$|normal/.test(k)));
   check('importer preserves admin-added printings', vOf('base1-4')['cracked-ice-holo'] === 'Cracked Ice Holo');
+
+  // ---- pokemasterlist CSV importer ----
+  const ml = spawnSync('node', ['scripts/import-masterlist.js', 'tests/fixtures/masterlist-sample.csv'], { cwd: ROOT, encoding: 'utf8' });
+  const mlOut = (ml.stdout || '') + (ml.stderr || '');
+  const customML = JSON.parse(fs.readFileSync(path.join(ROOT, 'public', 'cdn', 'custom.json'), 'utf8'));
+  const vML = (id) => (customML.cards[id] || {}).variants || {};
+  check('masterlist importer adds new printings (card exists, variant new)',
+    ml.status === 0 && vML('base1-58')['parallel-holo'] === 'Parallel Holo' && vML('base1-58')['fxe-wtf-g7z'] === 'FXE-WTF-G7Z');
+  check('masterlist importer skips reverse-covered Parallel Holo', /Already covered by the database: 2/.test(mlOut));
+  check('masterlist importer reports cards not in the database (NEED-CARD)', /Cards not in the database:       1/.test(mlOut));
+  check('masterlist importer reports unmatched expansions', /Expansions with no matching set: 1/.test(mlOut));
+  const mlA = spawnSync('node', ['scripts/import-masterlist.js', 'tests/fixtures/masterlist-sample.csv', '--analyze'], { cwd: ROOT, encoding: 'utf8' });
+  check('masterlist importer --analyze parses without a database', mlA.status === 0 && /Printings: 7/.test(mlA.stdout || ''));
 
   // ---- read-only (central) server mode ----
   fs.rmSync(path.join(ROOT, '.test-data-ro'), { recursive: true, force: true });
@@ -134,6 +150,33 @@ function fail(msg) {
   check('read-only server reports itself in app-config', roCfg.readonly === true);
   check('read-only blocks every database write (build/mirror/printing/upload)',
     roBuild === 403 && roMirror === 403 && roCustom === 403 && roUpload === 403);
+  const roOverlayCard = (await fetch('http://localhost:3113/api/overlay-card', { method: 'POST', headers: roAuth, body: JSON.stringify({ cardId: 'x-1', set: 'x', name: 'X', new: true }) })).status;
+  const roOverlayRemove = (await fetch('http://localhost:3113/api/overlay-remove', { method: 'POST', headers: roAuth, body: JSON.stringify({ cardId: 'base1-4' }) })).status;
+  check('read-only blocks overlay editing (add-card / remove)', roOverlayCard === 403 && roOverlayRemove === 403);
+
+  // ---- overlay engine: add card, patch, tombstone, printing → local overlay ----
+  fs.rmSync(path.join(ROOT, '.test-data-ov'), { recursive: true, force: true });
+  start('node', ['server.js'], { PORT: '3115', DATA_DIR: path.join(ROOT, '.test-data-ov'), PTCG_SOURCE_API: 'http://localhost:3999/v2' });
+  await waitForPort(3115).catch((e) => fail(e.message));
+  const ovReg = await jfetch('http://localhost:3115/api/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'ovadmin', password: 'password123' }) });
+  const ovAuth = { 'Content-Type': 'application/json', Authorization: 'Bearer ' + ovReg.token };
+  const ovH = (p, b) => jfetch('http://localhost:3115' + p, { method: 'POST', headers: ovAuth, body: JSON.stringify(b) });
+  await ovH('/api/overlay-card', { cardId: 'promoX-1', set: 'promoX', name: 'Eevee Promo', dexId: [133], new: true }); // new card TCGdex lacks
+  await ovH('/api/overlay-set', { id: 'promoX', name: 'My Promo Set' });
+  await ovH('/api/custom-variant', { cardId: 'base1-4', label: 'Cosmos Holo' });           // printing on existing card
+  await ovH('/api/overlay-card', { cardId: 'base1-58', name: 'Renamed Pikachu' });          // patch existing card
+  await ovH('/api/overlay-remove', { cardId: 'base1-97' });                                 // tombstone
+  const ov = await jfetch('http://localhost:3115/api/local-overlay');
+  const ovCfg = await jfetch('http://localhost:3115/api/app-config');
+  check('overlay stores a new card (not in TCGdex)', ov.cards['promoX-1'] && ov.cards['promoX-1'].new === true && ov.cards['promoX-1'].name === 'Eevee Promo');
+  check('overlay stores a new set', ov.sets['promoX'] && ov.sets['promoX'].name === 'My Promo Set');
+  check('overlay stores a printing in the local layer', ov.cards['base1-4'].printings['cosmos-holo'] === 'Cosmos Holo');
+  check('overlay patches an existing card', ov.cards['base1-58'].name === 'Renamed Pikachu');
+  check('overlay tombstones a card', ov.removed.includes('base1-97'));
+  const ovRestore = await ovH('/api/overlay-remove', { cardId: 'base1-97', removed: false });
+  const ov2 = await jfetch('http://localhost:3115/api/local-overlay');
+  check('overlay restore lifts the tombstone', ovRestore.removed === false && !ov2.removed.includes('base1-97'));
+  check('app-config reports publish capability (no R2 creds here)', ovCfg.canPublish === false);
 
   // ---- offline mirror: fresh install copies a remote database locally ----
   fs.rmSync(path.join(ROOT, '.test-data-mirror'), { recursive: true, force: true });
@@ -190,7 +233,7 @@ function fail(msg) {
     pub3.status === 0 && pubGuard.status === 1 && pub4.status === 0 && /deleted 1/.test(out4) && storeAfter.count === uploaded;
 
   cleanup();
-  for (const d of ['.test-data', '.test-data-ro', '.test-data-mirror']) {
+  for (const d of ['.test-data', '.test-data-ro', '.test-data-mirror', '.test-data-ov']) {
     fs.rmSync(path.join(ROOT, d), { recursive: true, force: true });
   }
   if (suite.status !== 0) { console.error('\nBrowser suite failed.'); process.exit(1); }

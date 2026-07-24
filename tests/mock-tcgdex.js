@@ -78,11 +78,12 @@ http.createServer((req, res) => {
     if (!rel.includes('..')) {
       const file = path.join(__dirname, '..', 'public', 'cdn', rel);
       if (fs.existsSync(file)) {
-        res.writeHead(200, { 'Content-Type': rel.endsWith('.png') ? 'image/png' : 'image/webp', 'Access-Control-Allow-Origin': '*' });
+        const ct = rel.endsWith('.png') ? 'image/png' : rel.endsWith('.json') ? 'application/json' : 'image/webp';
+        res.writeHead(200, { 'Content-Type': ct, 'Access-Control-Allow-Origin': '*' });
         return res.end(fs.readFileSync(file));
       }
     }
-    res.writeHead(404); return res.end();
+    res.writeHead(404, { 'Access-Control-Allow-Origin': '*' }); return res.end();
   }
   if (p.startsWith('/assets/')) {
     // /assets/base1/4/low.webp -> fixture base1-4.png ; logo.png -> tiny png

@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.11.0';
+const APP_VERSION = '3.13.0';
 
 /* ============================================================
  * Storage helpers
@@ -96,30 +96,80 @@ let _searchCache = null;
 const _setDetailCache = new Map();
 let _scanIndexCache = null;
 let _languagesCache = null;
-let _customVariants = null; // { cardId: { variants: { key: label } } }
+let _overlay = null; // effective merged overlay { cards, sets, removed:Set }
 
 function clearDataCaches() {
   _indexCache = null;
   _searchCache = null;
   _setDetailCache.clear();
   _scanIndexCache = null;
-  _customVariants = null;
+  _overlay = null;
 }
 
-/** Admin-defined printings (e.g. "Cracked Ice Holo") — global, language-independent. */
-async function getCustomVariants() {
-  if (_customVariants) return _customVariants;
-  try {
-    const data = await cdnGet(`${CDN}/custom.json`);
-    _customVariants = data.cards || {};
-  } catch {
-    _customVariants = {}; // none defined yet
+/* ---------- overlay (master + local layers) ----------
+ * The database is rendered as: TCGdex base → master overlay (custom.json on the
+ * CDN) → this install's local overlay (from the server). Each overlay can add
+ * cards, add sets, patch fields, and list removed (tombstoned) card ids. Local
+ * wins; a tombstone hides a card even if a lower layer still has it. */
+function mergeOverlayLayers(master, local) {
+  const cards = {};
+  const sets = {};
+  for (const layer of [master, local]) {
+    if (!layer) continue;
+    for (const [id, c] of Object.entries(layer.cards || {})) {
+      const prev = cards[id] || {};
+      cards[id] = { ...prev, ...c, printings: { ...(prev.printings || {}), ...(c.printings || c.variants || {}) } };
+    }
+    for (const [id, s] of Object.entries(layer.sets || {})) sets[id] = { ...(sets[id] || {}), ...s };
   }
-  return _customVariants;
+  const removed = new Set([...(master && master.removed || []), ...(local && local.removed || [])]);
+  return { cards, sets, removed };
 }
+
+async function getOverlay() {
+  if (_overlay) return _overlay;
+  let master = null, local = null;
+  try { master = await cdnGet(`${CDN}/custom.json`); } catch { /* none */ }
+  await detectServer();
+  if (serverAvailable) {
+    try {
+      const res = await fetch('api/local-overlay', { cache: 'no-store' });
+      if (res.ok) local = await res.json();
+    } catch { /* static host */ }
+  }
+  _overlay = mergeOverlayLayers(master, local);
+  return _overlay;
+}
+
+// back-compat name used across the render code
+async function getCustomVariants() { return (await getOverlay()).cards; }
 
 function customVariantsOf(cardId) {
-  return (_customVariants && _customVariants[cardId] && _customVariants[cardId].variants) || {};
+  const c = _overlay && _overlay.cards[cardId];
+  return (c && c.printings) || {};
+}
+
+const isRemoved = (cardId) => !!(_overlay && _overlay.removed.has(cardId));
+
+/** Apply an overlay card entry (patch or full definition) onto a base card. */
+function applyOverlayCard(base, id) {
+  const o = _overlay && _overlay.cards[id];
+  if (!o) return base;
+  const merged = { ...base };
+  for (const k of ['name', 'rarity', 'category', 'localId', 'image', 'hp', 'types', 'dexId']) {
+    if (o[k] !== undefined) merged[k] = o[k];
+  }
+  if (o.variants) merged.variants = { ...(base.variants || {}), ...o.variants };
+  if (o.variantImages) merged.variantImages = { ...(base.variantImages || {}), ...o.variantImages };
+  return merged;
+}
+
+/** Overlay-added cards (new:true) that belong to a set, as card objects. */
+function overlayCardsForSet(setId) {
+  if (!_overlay) return [];
+  return Object.entries(_overlay.cards)
+    .filter(([id, c]) => c.new && (c.set === setId || setIdOf(id) === setId) && !_overlay.removed.has(id))
+    .map(([id, c]) => applyOverlayCard({ id, name: id, localId: localIdOf(id), variants: {} }, id));
 }
 
 async function getIndex() {
@@ -151,17 +201,51 @@ async function getIndex() {
 }
 
 async function getSets() {
-  return (await getIndex()).sets;
+  const sets = [...(await getIndex()).sets];
+  const overlay = await getOverlay();
+  const byId = new Map(sets.map((s) => [s.id, s]));
+  // brand-new sets defined in an overlay (or implied by overlay-added cards)
+  for (const [id, s] of Object.entries(overlay.sets)) {
+    if (!byId.has(id)) { const ns = { id, ...s, cardCount: { total: 0, official: 0 } }; sets.push(ns); byId.set(id, ns); }
+  }
+  // per-set count deltas from overlay adds / tombstones (cheap — no set files)
+  const delta = new Map();
+  for (const [cid, c] of Object.entries(overlay.cards)) {
+    if (c.new && !overlay.removed.has(cid)) delta.set(c.set || setIdOf(cid), (delta.get(c.set || setIdOf(cid)) || 0) + 1);
+  }
+  for (const cid of overlay.removed) delta.set(setIdOf(cid), (delta.get(setIdOf(cid)) || 0) - 1);
+  for (const s of sets) {
+    const d = delta.get(s.id);
+    if (d) { const cc = s.cardCount || (s.cardCount = { total: 0, official: 0 }); cc.total = Math.max(0, (cc.total || 0) + d); cc.official = Math.max(0, (cc.official || 0) + d); }
+  }
+  return sets;
 }
 
 async function getSet(id) {
   if (_setDetailCache.has(id)) return _setDetailCache.get(id);
-  const set = await cdnGet(`${DB()}/sets/${encodeURIComponent(id)}.json`);
+  await getOverlay();
+  let base;
+  try {
+    base = await cdnGet(`${DB()}/sets/${encodeURIComponent(id)}.json`);
+  } catch (e) {
+    // a set that only exists in an overlay has no base file
+    if (_overlay && _overlay.sets[id]) base = { ..._overlay.sets[id], cards: [] };
+    else throw e;
+  }
+  const cards = (base.cards || [])
+    .filter((c) => !isRemoved(c.id))
+    .map((c) => applyOverlayCard(c, c.id))
+    .concat(overlayCardsForSet(id));
+  const set = { ...base, cards };
   _setDetailCache.set(id, set);
   return set;
 }
 
 async function getCard(id) {
+  await getOverlay();
+  if (isRemoved(id)) return { id, name: id, removed: true };
+  const o = _overlay && _overlay.cards[id];
+  if (o && o.new) return applyOverlayCard({ id, name: id, localId: localIdOf(id), variants: {} }, id);
   const set = await getSet(setIdOf(id));
   return (set.cards || []).find((c) => c.id === id) || { id, name: id };
 }
@@ -187,13 +271,38 @@ function setIdOf(cardId) {
   return i > 0 ? cardId.slice(0, i) : cardId;
 }
 
-/** search-index rows: [id, name, rarity, typesCsv, hasImg, dexCsv, category] */
+/** search-index rows: [id, name, rarity, typesCsv, hasImg, dexCsv, category, variantsCsv] */
+function overlayCardToRow(id, c) {
+  return [
+    id, c.name || id, c.rarity || '', (c.types || []).join(','),
+    c.image ? 1 : 0, (c.dexId || []).join(','), c.category || '',
+    Object.keys(c.variants || {}).filter((k) => c.variants[k]).join(',') || 'normal',
+  ];
+}
+
 async function getSearchIndex() {
   if (_searchCache) return _searchCache;
   const raw = await cdnGet(`${DB()}/search-index.json`);
+  const overlay = await getOverlay();
+  // start from base rows minus tombstones, applying field patches
+  let rows = raw.cards.filter((r) => !overlay.removed.has(r[0])).map((r) => {
+    const o = overlay.cards[r[0]];
+    if (!o || o.new) return r;
+    const row = r.slice();
+    if (o.name !== undefined) row[1] = o.name;
+    if (o.rarity !== undefined) row[2] = o.rarity;
+    if (o.types !== undefined) row[3] = (o.types || []).join(',');
+    if (o.dexId !== undefined) row[5] = (o.dexId || []).join(',');
+    if (o.category !== undefined) row[6] = o.category;
+    return row;
+  });
+  // add overlay-defined new cards
+  for (const [id, c] of Object.entries(overlay.cards)) {
+    if (c.new && !overlay.removed.has(id)) rows.push(overlayCardToRow(id, c));
+  }
   const rarities = new Set(), types = new Set();
   const species = new Map(); // dexId -> {dex, name, cards: [briefRow]}
-  for (const row of raw.cards) {
+  for (const row of rows) {
     const [, name, rarity, typesCsv, , dexCsv] = row;
     if (rarity) rarities.add(rarity);
     if (typesCsv) typesCsv.split(',').forEach((t) => t && types.add(t));
@@ -208,7 +317,7 @@ async function getSearchIndex() {
     }
   }
   _searchCache = {
-    cards: raw.cards,
+    cards: rows,
     rarities: [...rarities].sort(),
     types: [...types].sort(),
     species: [...species.values()].sort((a, b) => a.dex - b.dex),
@@ -458,12 +567,21 @@ function detectServer() {
         const res = await fetch('api/health', { cache: 'no-store' });
         const data = await res.json();
         serverAvailable = !!data.ok;
+        if (serverAvailable) lsSet('ptcg.serverSeen', true); // remember this is a server-backed install
       } catch { serverAvailable = false; }
       updateAccountButton();
     })();
   }
   return _serverCheckPromise;
 }
+
+/** Tracking (ownership, stats, badges, filters) requires a signed-in account.
+ * Signing in requires the server, so this is false for logged-out visitors. */
+function canTrack() { return !!auth; }
+
+/** The app is meant to run with its bundled server. A bare copy of the files
+ * with no server behind it (and no memory of ever having one) can do nothing. */
+function serverEverSeen() { return !!lsGet('ptcg.serverSeen'); }
 
 function authHeaders() {
   return auth ? { Authorization: 'Bearer ' + auth.token } : {};
@@ -597,6 +715,7 @@ function cardTile(card, variant, { onOwnershipChange } = {}) {
     role: 'button',
     tabindex: '0',
     onclick: () => {
+      if (!canTrack()) { openCardModal(card, { variant, onOwnershipChange }); return; } // browse-only until signed in
       const result = quickToggle(card, variant);
       if (result === 'complex') { openCardModal(card, { variant, onOwnershipChange }); return; }
       decorateTile(tile, card);
@@ -630,11 +749,17 @@ function cardTile(card, variant, { onOwnershipChange } = {}) {
 }
 
 function decorateTile(tile, card) {
+  tile.querySelectorAll('.badge, .qty-badge').forEach((n) => n.remove());
+  // browse-only until signed in: no ownership styling or badges
+  if (!canTrack()) {
+    tile.classList.remove('missing');
+    tile.setAttribute('aria-label', card.name || tile.dataset.cardId);
+    return;
+  }
   const variant = tile.dataset.variant;
   const qty = variantQty(tile.dataset.cardId, variant);
   tile.classList.toggle('missing', qty === 0);
   tile.setAttribute('aria-label', `${card.name || tile.dataset.cardId} — ${qty ? 'owned' : 'not owned'}`);
-  tile.querySelectorAll('.badge, .qty-badge').forEach((n) => n.remove());
   if (qty) {
     tile.append(h('div', { class: 'badge' }, '✓'));
     if (qty > 1) tile.append(h('div', { class: 'qty-badge' }, `×${qty}`));
@@ -697,14 +822,25 @@ async function openCardModal(brief, { variant, onOwnershipChange } = {}) {
 
   function renderVariantUI() {
     renderModalImage(); // the picture reflects the selected printing
+    const track = canTrack();
     chipsWrap.replaceChildren(...avail().map((vk) => {
-      const qty = variantQty(card.id, vk);
+      const qty = track ? variantQty(card.id, vk) : 0;
       return h('button', {
         type: 'button',
         class: 'chip' + (vk === active ? ' active' : ''),
         onclick: () => { active = vk; renderVariantUI(); },
       }, variantLabel(card, vk) + (qty ? ` ✓${qty > 1 ? '×' + qty : ''}` : ''));
     }));
+    if (!track) {
+      // browse-only: offer sign-in instead of ownership controls
+      counterWrap.replaceChildren(
+        h('div', { class: 'row', style: 'justify-content:center; margin-top:6px' },
+          h('button', { class: 'btn small', onclick: () => { cardModal.close(); renderAccountModal(); accountModal.showModal(); } },
+            serverAvailable ? '🔑 Sign in to track your collection' : 'Tracking needs the server')),
+      );
+      renderAdminControls();
+      return;
+    }
     const qty = variantQty(card.id, active);
     const adjust = (d) => {
       setVariantQty(card.id, active, variantQty(card.id, active) + d);
@@ -758,8 +894,8 @@ async function openCardModal(brief, { variant, onOwnershipChange } = {}) {
           if (!label || label.trim().length < 2) return;
           try {
             const res = await apiCall('custom-variant', { method: 'POST', body: JSON.stringify({ cardId: card.id, label: label.trim() }) });
-            _customVariants = null;
-            await getCustomVariants();
+            _overlay = null;
+            await getOverlay();
             active = res.key;
             toast(`Added printing: ${res.label}`);
             renderVariantUI();
@@ -931,11 +1067,22 @@ async function renderHome() {
     return total && (counts[s.id] || 0) >= total;
   }).length;
 
-  const banner = h('div', { class: 'stats-banner', id: 'stats-banner' },
-    h('div', { class: 'stat' }, h('div', { class: 'num', id: 'stat-owned' }, String(totalOwned)), h('div', { class: 'lbl' }, 'cards owned')),
-    h('div', { class: 'stat' }, h('div', { class: 'num', id: 'stat-complete' }, String(completeSets)), h('div', { class: 'lbl' }, 'sets completed')),
-    h('div', { class: 'stat' }, h('div', { class: 'num' }, String(ordered.length)), h('div', { class: 'lbl' }, 'sets total')),
-  );
+  const banner = canTrack()
+    ? h('div', { class: 'stats-banner', id: 'stats-banner' },
+        h('div', { class: 'stat' }, h('div', { class: 'num', id: 'stat-owned' }, String(totalOwned)), h('div', { class: 'lbl' }, 'cards owned')),
+        h('div', { class: 'stat' }, h('div', { class: 'num', id: 'stat-complete' }, String(completeSets)), h('div', { class: 'lbl' }, 'sets completed')),
+        h('div', { class: 'stat' }, h('div', { class: 'num' }, String(ordered.length)), h('div', { class: 'lbl' }, 'sets total')),
+      )
+    : h('div', { class: 'signin-banner' },
+        h('div', {},
+          h('strong', {}, serverAvailable ? 'Sign in to track your collection' : 'Browsing all cards'),
+          h('div', { class: 'muted small' }, serverAvailable
+            ? 'Create a free account to mark which cards you own and sync across devices.'
+            : 'Every set and card is here to explore.')),
+        serverAvailable
+          ? h('button', { class: 'btn small', onclick: () => { renderAccountModal(); accountModal.showModal(); } }, 'Sign in')
+          : null,
+      );
 
   const grid = h('div', { class: 'set-grid' });
   const filterInput = h('input', {
@@ -1054,10 +1201,14 @@ async function renderSetPage(setId) {
 
   const chipsWrap = h('div', { class: 'chips' });
   function renderChips() {
+    // owned/missing filters only make sense when signed in and tracking
+    const trackChips = canTrack()
+      ? [chip('Owned', filter === 'owned', () => { filter = 'owned'; renderChips(); renderGrid(); }),
+         chip('Missing', filter === 'missing', () => { filter = 'missing'; renderChips(); renderGrid(); })]
+      : [];
     chipsWrap.replaceChildren(
       chip('All', filter === 'all', () => { filter = 'all'; renderChips(); renderGrid(); }),
-      chip('Owned', filter === 'owned', () => { filter = 'owned'; renderChips(); renderGrid(); }),
-      chip('Missing', filter === 'missing', () => { filter = 'missing'; renderChips(); renderGrid(); }),
+      ...trackChips,
       chip('Master set', master, () => { master = !master; renderChips(); updateProgress(); }),
       sortSelect([['number', 'Card number'], ['name', 'Name A–Z']], cardSort,
         (v) => { cardSort = v; lsSet('ptcg.sort.cards', v); renderGrid(); }),
@@ -1073,15 +1224,14 @@ async function renderSetPage(setId) {
     h('a', { class: 'back-link', href: '#/' }, '← All sets'),
     h('div', { class: 'page-head' },
       h('h1', {}, set.name),
-      progressLabel,
-      progressWrap,
+      ...(canTrack() ? [progressLabel, progressWrap] : []),
     ),
     h('div', { class: 'set-filter' }, searchInput),
     chipsWrap,
     grid,
   );
   renderChips();
-  updateProgress();
+  if (canTrack()) updateProgress();
   renderGrid();
 }
 
@@ -1157,6 +1307,7 @@ async function renderPokemonPage(dexStr) {
 
   const progressLabel = h('span', { class: 'muted' });
   function updateProgress() {
+    if (!canTrack()) { progressLabel.textContent = ''; return; }
     progressLabel.textContent = `${sp.cards.filter(([id]) => ownedAny(id)).length} / ${sp.cards.length} owned`;
   }
 
@@ -1652,7 +1803,7 @@ function renderAccountModal() {
       h('p', { class: 'muted small' }, syncState === 'error' ? 'Last sync failed — changes are saved locally and will retry.' : 'Your collection syncs to this server automatically.'),
       h('div', { class: 'row' },
         h('button', { class: 'btn small', onclick: async () => { try { await pullAndMerge(); toast('Synced'); renderAccountModal(); } catch (e) { toast('Sync failed: ' + e.message); } } }, 'Sync now'),
-        h('button', { class: 'btn ghost small', onclick: () => { logout(); renderAccountModal(); } }, 'Sign out'),
+        h('button', { class: 'btn ghost small', onclick: () => { logout(); renderAccountModal(); route(); } }, 'Sign out'),
       ),
     );
     formsEl.replaceChildren();
@@ -1688,6 +1839,7 @@ function renderAccountModal() {
         await doAuth(mode, userIn.value.trim(), passIn.value);
         toast(mode === 'login' ? 'Signed in — collection synced' : 'Account created — collection synced');
         renderAccountModal();
+        route(); // tracking UI (toggles, stats, filters) appears now that we're signed in
       } catch (ex) {
         err.textContent = ex.message;
       } finally {
@@ -1800,7 +1952,21 @@ if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
 }
 
+/** Full-screen notice shown when the app is running with no server behind it
+ * and has never seen one — i.e. someone copied just the files. */
+function renderNoServerGate() {
+  view.replaceChildren(h('div', { class: 'center', style: 'max-width:460px; margin:60px auto' },
+    h('h2', {}, 'Server required'),
+    h('p', { class: 'muted' }, 'This app needs its companion server to run. It looks like only the app files were copied, without the server that powers accounts and the card database.'),
+    h('p', { class: 'muted small' }, 'Install it with the bundled server (see the project’s README) and open it from there.'),
+  ));
+  document.querySelector('.topbar')?.style.setProperty('pointer-events', 'none');
+}
+
 detectServer().then(() => {
   if (auth && serverAvailable) pullAndMerge().catch(() => {});
 });
-loadAppConfig().then(route);
+Promise.all([detectServer(), loadAppConfig()]).then(() => {
+  if (!serverAvailable && !serverEverSeen()) { renderNoServerGate(); return; }
+  route();
+});

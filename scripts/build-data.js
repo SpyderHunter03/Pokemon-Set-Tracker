@@ -407,6 +407,11 @@ function buildIndexes(lang, langOut, keptSets) {
     languages: present.map((code) => ({ code, name: LANG_NAMES[code] || code })),
   });
 
+  // ensure the master overlay file exists (empty) so the app never 404s
+  // fetching it; importers and the in-app editor fill it in later
+  const customFile = path.join(OUT, 'custom.json');
+  if (!fs.existsSync(customFile)) writeJSON(customFile, { cards: {} });
+
   console.log(`\nDone. Languages available: ${present.join(', ')}`);
   if (cardFailures) console.log(`Card detail fetches that fell back to basic info: ${cardFailures}`);
   if (imageFailures) console.log(`Images unavailable at source: ${imageFailures}`);
