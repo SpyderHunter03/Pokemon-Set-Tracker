@@ -68,7 +68,60 @@ db.exec(`
     data       TEXT NOT NULL,               -- JSON: { cardId: { variant: qty } }
     updated_at INTEGER NOT NULL
   );
+
+  -- ---- card catalog (the app reads cards from here, not from R2 JSON) ----
+  -- Every card and printing is a row. Image fields hold a full location: a
+  -- remote URL (default, e.g. the R2 bucket) OR a local path served by this
+  -- server (e.g. /cdn/en/images/…) once an admin uploads or downloads one.
+  -- source = 'master' (imported/pulled) or 'local' (this install's own edits);
+  -- hidden = 1 tombstones a row so a future pull can't bring it back.
+  CREATE TABLE IF NOT EXISTS sets (
+    lang           TEXT NOT NULL DEFAULT 'en',
+    id             TEXT NOT NULL,
+    name           TEXT NOT NULL,
+    release_date   TEXT,
+    logo           TEXT,                     -- image location or null
+    official_count INTEGER,                  -- printed set size (completion denominator)
+    position       INTEGER NOT NULL DEFAULT 0, -- release order
+    source         TEXT NOT NULL DEFAULT 'master',
+    hidden         INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (lang, id)
+  );
+  CREATE TABLE IF NOT EXISTS cards (
+    lang        TEXT NOT NULL DEFAULT 'en',
+    id          TEXT NOT NULL,               -- e.g. base1-4
+    set_id      TEXT NOT NULL,
+    local_id    TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    rarity      TEXT,
+    category    TEXT,
+    dex_csv     TEXT,                         -- "6" or "6,7"
+    types_csv   TEXT,
+    hp          INTEGER,
+    illustrator TEXT,
+    variants_csv TEXT,                        -- base variants present: "normal,holo,firstEdition"
+    img_low     TEXT,                          -- base image URLs (remote or local) or null
+    img_high    TEXT,
+    position    INTEGER NOT NULL DEFAULT 0,
+    source      TEXT NOT NULL DEFAULT 'master',
+    hidden      INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (lang, id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_cards_set ON cards (lang, set_id);
+  -- one row per printing that is either custom-named or has its own image
+  CREATE TABLE IF NOT EXISTS printings (
+    lang     TEXT NOT NULL DEFAULT 'en',
+    card_id  TEXT NOT NULL,
+    variant  TEXT NOT NULL,                   -- normal/holo/reverse/firstEdition/cracked-ice-holo…
+    label    TEXT,                             -- custom printing name (null for standard variants)
+    img_low  TEXT,                             -- image override URLs or null (→ use the card image)
+    img_high TEXT,
+    source   TEXT NOT NULL DEFAULT 'master',
+    PRIMARY KEY (lang, card_id, variant)
+  );
 `);
+// migrate older catalog schemas (add columns introduced after first release)
+try { db.exec('ALTER TABLE sets ADD COLUMN official_count INTEGER'); } catch { /* already present */ }
 
 // ---------- storage helpers ----------
 
@@ -377,7 +430,11 @@ function startBuild(opts = {}) {
 /** After the data build: best-effort scanner index (needs the optional sharp package). */
 function runHashes() {
   build.phase = 'hashes';
-  const finish = (ok) => { build.running = false; build.phase = null; build.hashesOk = ok; };
+  const finish = (ok) => {
+    // the freshly downloaded catalog (public/cdn) becomes the DB's card source
+    try { importCatalogToDb(); } catch (e) { pushLog('Catalog import after build failed: ' + e.message); }
+    build.running = false; build.phase = null; build.hashesOk = ok;
+  };
   const runScript = () => {
     const child = spawn(process.execPath, [path.join(__dirname, 'scripts', 'build-hashes.js')], { cwd: __dirname, stdio: ['ignore', 'pipe', 'pipe'] });
     child.stdout.on('data', (d) => d.toString().split('\n').forEach(pushLog));
@@ -607,31 +664,246 @@ function localIdOfCard(cardId) {
   return i > 0 ? cardId.slice(i + 1) : cardId;
 }
 
-/** List every variant image on disk (from the per-set JSON files) for the API. */
-function variantImageManifest(lang) {
-  const langDir = path.join(CDN_DIR, lang);
-  const setsDir = path.join(langDir, 'sets');
-  const images = [];
-  let setFiles = [];
-  try { setFiles = fs.readdirSync(setsDir).filter((f) => f.endsWith('.json')); } catch { return images; }
-  for (const f of setFiles) {
-    const set = readJSON(path.join(setsDir, f), null);
-    if (!set || !Array.isArray(set.cards)) continue;
-    for (const c of set.cards) {
-      if (!c.variantImages) continue;
-      for (const [vk, qualities] of Object.entries(c.variantImages)) {
-        images.push({
-          card: c.id,
-          name: c.name,
-          set: set.id,
-          variant: vk,
-          qualities,
-          urls: Object.fromEntries(qualities.map((q) => [q, `/cdn/${lang}/images/${set.id}/${localIdOfCard(c.id)}/${vk}-${q}.webp`])),
+// ---------- card catalog import (JSON catalog → SQLite) ----------
+/* Loads the static JSON catalog (index.json + sets/*.json + custom.json) into
+ * the sets/cards/printings tables. Image fields become full locations. When the
+ * app's configured CDN is a remote URL (R2), images default to that URL; when
+ * it's local ('cdn'), they point at this server's /cdn path. Re-import only
+ * updates rows that are still 'master' — a self-hoster's 'local' edits and
+ * tombstones are left untouched. */
+
+const _catSet = db.prepare(`INSERT INTO sets (lang,id,name,release_date,logo,official_count,position,source,hidden)
+  VALUES (?,?,?,?,?,?,?, 'master', 0)
+  ON CONFLICT(lang,id) DO UPDATE SET name=excluded.name, release_date=excluded.release_date,
+    logo=excluded.logo, official_count=excluded.official_count, position=excluded.position WHERE sets.source='master'`);
+const _catCard = db.prepare(`INSERT INTO cards (lang,id,set_id,local_id,name,rarity,category,dex_csv,types_csv,hp,illustrator,variants_csv,img_low,img_high,position,source,hidden)
+  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'master', 0)
+  ON CONFLICT(lang,id) DO UPDATE SET set_id=excluded.set_id, local_id=excluded.local_id, name=excluded.name,
+    rarity=excluded.rarity, category=excluded.category, dex_csv=excluded.dex_csv, types_csv=excluded.types_csv,
+    hp=excluded.hp, illustrator=excluded.illustrator, variants_csv=excluded.variants_csv,
+    img_low=excluded.img_low, img_high=excluded.img_high, position=excluded.position WHERE cards.source='master'`);
+const _catPrinting = db.prepare(`INSERT INTO printings (lang,card_id,variant,label,img_low,img_high,source)
+  VALUES (?,?,?,?,?,?, 'master')
+  ON CONFLICT(lang,card_id,variant) DO UPDATE SET label=excluded.label,
+    img_low=excluded.img_low, img_high=excluded.img_high WHERE printings.source='master'`);
+const _countCards = db.prepare('SELECT COUNT(*) AS n FROM cards');
+const _countSets = db.prepare('SELECT COUNT(*) AS n FROM sets');
+const _countPrintings = db.prepare('SELECT COUNT(*) AS n FROM printings');
+
+/** Read the app's configured cdnBase from public/config.js (server-side). */
+function configCdnBase() {
+  try {
+    const m = fs.readFileSync(path.join(PUBLIC_DIR, 'config.js'), 'utf8').match(/cdnBase:\s*['"]([^'"]+)['"]/);
+    return m && /^https?:\/\//.test(m[1]) ? m[1].replace(/\/+$/, '') : null;
+  } catch { return null; }
+}
+
+function importCatalogToDb() {
+  const imageBase = configCdnBase() || '/cdn';   // remote R2 URL, or this server's local path
+  let langs = [];
+  try {
+    langs = fs.readdirSync(CDN_DIR, { withFileTypes: true })
+      .filter((d) => d.isDirectory() && fs.existsSync(path.join(CDN_DIR, d.name, 'index.json')))
+      .map((d) => d.name);
+  } catch { /* no catalog present */ }
+  if (!langs.length) return { sets: 0, cards: 0, printings: 0, empty: true };
+  const custom = readJSON(CUSTOM_FILE, { cards: {} });
+  let nSets = 0, nCards = 0, nPrint = 0;
+  db.exec('BEGIN');
+  try {
+    for (const lang of langs) {
+      const index = readJSON(path.join(CDN_DIR, lang, 'index.json'), { sets: [] });
+      const qualities = Array.isArray(index.qualities) && index.qualities.length ? index.qualities : ['low'];
+      const hasHigh = qualities.includes('high');
+      (index.sets || []).forEach((s, pos) => {
+        const official = (s.cardCount && (s.cardCount.official || s.cardCount.total)) || null;
+        _catSet.run(lang, s.id, s.name, s.releaseDate || null, s.logo ? `${imageBase}/${lang}/${s.logo}` : null, official, pos);
+        nSets++;
+        const setData = readJSON(path.join(CDN_DIR, lang, 'sets', s.id + '.json'), null);
+        if (!setData) return;
+        (setData.cards || []).forEach((c, ci) => {
+          const prefix = c.image ? `${imageBase}/${lang}/${c.image}` : null;
+          const variantsCsv = c.variants
+            ? (Object.entries(c.variants).filter(([, v]) => v).map(([k]) => k).join(',') || 'normal')
+            : 'normal';
+          _catCard.run(lang, c.id, s.id, String(c.localId ?? localIdOfCard(c.id)), c.name || c.id,
+            c.rarity || null, c.category || null, (c.dexId || []).join(',') || null, (c.types || []).join(',') || null,
+            c.hp || null, c.illustrator || null, variantsCsv,
+            prefix ? prefix + '/low.webp' : null, (prefix && hasHigh) ? prefix + '/high.webp' : null, ci);
+          nCards++;
+          // printings = per-variant image overrides (variantImages) ∪ custom labels (custom.json)
+          const prints = {};
+          const num = localIdOfCard(c.id);
+          for (const [vk, qs] of Object.entries(c.variantImages || {})) {
+            const b = `${imageBase}/${lang}/images/${s.id}/${num}/${vk}`;
+            prints[vk] = { label: null, img_low: qs.includes('low') ? b + '-low.webp' : null, img_high: qs.includes('high') ? b + '-high.webp' : null };
+          }
+          const cu = custom.cards && custom.cards[c.id];
+          const cuVars = cu && (cu.printings || cu.variants);
+          if (cuVars) for (const [vk, label] of Object.entries(cuVars)) {
+            prints[vk] = { label, img_low: (prints[vk] || {}).img_low || null, img_high: (prints[vk] || {}).img_high || null };
+          }
+          for (const [vk, p] of Object.entries(prints)) {
+            _catPrinting.run(lang, c.id, vk, p.label, p.img_low, p.img_high);
+            nPrint++;
+          }
         });
-      }
+      });
     }
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
   }
-  return images;
+  return { sets: nSets, cards: nCards, printings: nPrint };
+}
+
+const catalogStats = () => ({
+  cards: _countCards.get().n, sets: _countSets.get().n, printings: _countPrintings.get().n,
+});
+
+// ---------- catalog served from the DB (the app reads cards from here) ----------
+const LANG_NAMES = {
+  en: 'English', fr: 'Français', de: 'Deutsch', es: 'Español', it: 'Italiano',
+  'pt-br': 'Português (BR)', ja: '日本語', ko: '한국어', 'zh-tw': '中文 (繁體)',
+  nl: 'Nederlands', pl: 'Polski', ru: 'Русский',
+};
+const _langsDistinct = db.prepare('SELECT DISTINCT lang FROM sets ORDER BY lang');
+const _setsIndex = db.prepare('SELECT id, name, release_date, logo, official_count FROM sets WHERE lang = ? AND hidden = 0 ORDER BY position, id');
+const _setCount = db.prepare('SELECT COUNT(*) AS n FROM cards WHERE lang = ? AND set_id = ? AND hidden = 0');
+const _oneSet = db.prepare('SELECT id, name, release_date, official_count FROM sets WHERE lang = ? AND id = ? AND hidden = 0');
+const _cardsOfSet = db.prepare('SELECT * FROM cards WHERE lang = ? AND set_id = ? AND hidden = 0 ORDER BY position, local_id');
+const _cardsOfLang = db.prepare('SELECT id, set_id, local_id, name, rarity, category, dex_csv, types_csv, variants_csv, img_low, img_high FROM cards WHERE lang = ? AND hidden = 0 ORDER BY position');
+const _printsOfCard = db.prepare('SELECT variant, label, img_low, img_high FROM printings WHERE lang = ? AND card_id = ?');
+const _printsOfLang = db.prepare('SELECT card_id, variant, label, img_low, img_high FROM printings WHERE lang = ?');
+
+const langsAvailable = () => { const r = _langsDistinct.all().map((x) => x.lang); return r.length ? r : ['en']; };
+const emitLanguages = () => ({ languages: langsAvailable().map((code) => ({ code, name: LANG_NAMES[code] || code })) });
+
+function printingMaps(rows) {
+  const printings = {}, variantImages = {};
+  for (const p of rows || []) {
+    if (p.label) printings[p.variant] = p.label;
+    if (p.img_low || p.img_high) variantImages[p.variant] = { low: p.img_low || null, high: p.img_high || null };
+  }
+  return { printings, variantImages };
+}
+function cardObj(c, maps, lean) {
+  const variants = {};
+  (c.variants_csv ? c.variants_csv.split(',') : ['normal']).forEach((v) => { if (v) variants[v] = true; });
+  const o = {
+    id: c.id, localId: c.local_id, name: c.name,
+    rarity: c.rarity || undefined, category: c.category || undefined,
+    dexId: c.dex_csv ? c.dex_csv.split(',').map(Number) : undefined,
+    types: c.types_csv ? c.types_csv.split(',') : undefined,
+    variants,
+    img: (c.img_low || c.img_high) ? { low: c.img_low || null, high: c.img_high || null } : null,
+  };
+  if (!lean) { o.hp = c.hp || undefined; o.illustrator = c.illustrator || undefined; }
+  if (Object.keys(maps.printings).length) o.printings = maps.printings;
+  if (Object.keys(maps.variantImages).length) o.variantImages = maps.variantImages;
+  return o;
+}
+function emitIndex(lang) {
+  const sets = _setsIndex.all(lang).map((s) => {
+    const n = _setCount.get(lang, s.id).n;
+    const official = s.official_count || n;   // printed set size (completion denominator)
+    return { id: s.id, name: s.name, releaseDate: s.release_date || undefined, logo: s.logo || null, cardCount: { total: Math.max(n, official), official } };
+  });
+  return { language: lang, sets };
+}
+function emitSet(lang, id) {
+  const s = _oneSet.get(lang, id);
+  if (!s) return null;
+  const cards = _cardsOfSet.all(lang, id).map((c) => cardObj(c, printingMaps(_printsOfCard.all(lang, c.id)), false));
+  const official = s.official_count || cards.length;
+  return { id: s.id, name: s.name, releaseDate: s.release_date || undefined, cardCount: { total: Math.max(cards.length, official), official }, cards };
+}
+function emitSearch(lang) {
+  const byCard = {};
+  for (const p of _printsOfLang.all(lang)) (byCard[p.card_id] = byCard[p.card_id] || []).push(p);
+  const cards = _cardsOfLang.all(lang).map((c) => cardObj(c, printingMaps(byCard[c.id]), true));
+  return { cards };
+}
+
+// ---------- catalog editing (admin) + image localisation ----------
+const _cardExists = db.prepare('SELECT 1 FROM cards WHERE lang = ? AND id = ?');
+const _localPrintingLabel = db.prepare(`INSERT INTO printings (lang, card_id, variant, label, source) VALUES (?,?,?,?, 'local')
+  ON CONFLICT(lang, card_id, variant) DO UPDATE SET label = excluded.label, source = 'local'`);
+const _localPrintingImg = db.prepare(`INSERT INTO printings (lang, card_id, variant, img_low, img_high, source) VALUES (?,?,?,?,?, 'local')
+  ON CONFLICT(lang, card_id, variant) DO UPDATE SET img_low = excluded.img_low, img_high = excluded.img_high, source = 'local'`);
+const _imgRemote = db.prepare("SELECT COUNT(*) AS n FROM cards WHERE hidden = 0 AND img_low LIKE 'http%'");
+const _imgLocal = db.prepare("SELECT COUNT(*) AS n FROM cards WHERE hidden = 0 AND img_low IS NOT NULL AND img_low NOT LIKE 'http%'");
+const imageCounts = () => ({ remote: _imgRemote.get().n, local: _imgLocal.get().n });
+
+// rows whose images are remote URLs, for the "download all images" job
+const _remoteImgCards = db.prepare("SELECT lang, id, set_id, local_id, img_low, img_high FROM cards WHERE img_low LIKE 'http%' OR img_high LIKE 'http%'");
+const _remoteImgPrints = db.prepare("SELECT lang, card_id, variant, img_low, img_high FROM printings WHERE img_low LIKE 'http%' OR img_high LIKE 'http%'");
+const _setCardImg = db.prepare('UPDATE cards SET img_low = ?, img_high = ? WHERE lang = ? AND id = ?');
+const _setPrintImg = db.prepare('UPDATE printings SET img_low = ?, img_high = ? WHERE lang = ? AND card_id = ? AND variant = ?');
+
+/** Download all remote (http) card images to this server and repoint each row
+ * to its local /cdn path, so the install works fully offline. */
+async function runImageDownload() {
+  const progress = {
+    startedAt: new Date().toISOString(), imagesLocalize: true,
+    setsDone: 0, setTotal: 0, imagesDownloaded: 0, imagesSkipped: 0, imageFailures: 0, done: false, error: null,
+  };
+  const write = (extra) => { Object.assign(progress, extra); try { writeJSONAtomic(PROGRESS_FILE, progress); } catch { /* cosmetic */ } };
+  const cards = _remoteImgCards.all();
+  const prints = _remoteImgPrints.all();
+  write({ setTotal: cards.length + prints.length });
+  let done = 0;
+  const fetchTo = async (urlRemote, destRel) => {
+    const dest = path.join(CDN_DIR, destRel);
+    if (fs.existsSync(dest)) { progress.imagesSkipped++; return '/cdn/' + destRel.split(path.sep).join('/'); }
+    const res = await fetch(urlRemote);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.writeFileSync(dest, Buffer.from(await res.arrayBuffer()));
+    progress.imagesDownloaded++;
+    return '/cdn/' + destRel.split(path.sep).join('/');
+  };
+  const localOrKeep = async (urlRemote, destRel) => {
+    if (!urlRemote || !/^https?:\/\//i.test(urlRemote)) return urlRemote;
+    try { return await fetchTo(urlRemote, destRel); }
+    catch (e) { progress.imageFailures++; pushLog('! image ' + destRel + ': ' + e.message); return urlRemote; }
+  };
+  for (const c of cards) {
+    const dir = path.join(c.lang, 'images', c.set_id, c.local_id);
+    const low = await localOrKeep(c.img_low, path.join(dir, 'low.webp'));
+    const high = await localOrKeep(c.img_high, path.join(dir, 'high.webp'));
+    _setCardImg.run(low, high, c.lang, c.id);
+    if (++done % 25 === 0) write({ setsDone: done });
+  }
+  for (const p of prints) {
+    const dir = path.join(p.lang, 'images', setIdOfCard(p.card_id), localIdOfCard(p.card_id));
+    const low = await localOrKeep(p.img_low, path.join(dir, `${p.variant}-low.webp`));
+    const high = await localOrKeep(p.img_high, path.join(dir, `${p.variant}-high.webp`));
+    _setPrintImg.run(low, high, p.lang, p.card_id, p.variant);
+    if (++done % 25 === 0) write({ setsDone: done });
+  }
+  write({ setsDone: cards.length + prints.length, done: true, finishedAt: new Date().toISOString() });
+}
+function startImageDownload() {
+  build = { running: true, phase: 'images', startedAt: Date.now(), error: null, hashesOk: null, log: [] };
+  pushLog('Downloading remote card images to this server');
+  runImageDownload()
+    .then(() => { build.running = false; build.phase = null; build.hashesOk = true; pushLog('Image download complete — images now served locally'); })
+    .catch((e) => { build.running = false; build.phase = null; build.error = 'Image download failed: ' + e.message + ' (safe to retry)'; });
+}
+
+/** Every printing that has its own image, from the database, for the API. */
+const _printsWithImg = db.prepare(`SELECT p.card_id, p.variant, p.img_low, p.img_high, c.name
+  FROM printings p JOIN cards c ON c.lang = p.lang AND c.id = p.card_id
+  WHERE p.lang = ? AND (p.img_low IS NOT NULL OR p.img_high IS NOT NULL)`);
+function variantImageManifest(lang) {
+  return _printsWithImg.all(lang).map((r) => {
+    const urls = {};
+    if (r.img_low) urls.low = r.img_low;
+    if (r.img_high) urls.high = r.img_high;
+    return { card: r.card_id, name: r.name, set: setIdOfCard(r.card_id), variant: r.variant, qualities: Object.keys(urls), urls };
+  });
 }
 
 // ---------- api routes ----------
@@ -651,6 +923,7 @@ async function handleApi(req, res, pathname, ip, url) {
       imageSource: s.imageSource === 'local' ? 'local' : 'remote',
       localDbExists: dbExists(),
       mirroredAt: s.mirroredAt || null,
+      images: imageCounts(),
       canPublish: !READONLY && !!(process.env.R2_ACCESS_KEY_ID && process.env.R2_SECRET_ACCESS_KEY && process.env.R2_BUCKET),
     });
   }
@@ -659,6 +932,60 @@ async function handleApi(req, res, pathname, ip, url) {
   // app can merge it on top of the master database
   if (pathname === '/api/local-overlay' && req.method === 'GET') {
     return sendJSON(res, 200, loadLocalOverlay());
+  }
+
+  // how many cards/sets/printings are in the database catalog
+  if (pathname === '/api/catalog/stats' && req.method === 'GET') {
+    return sendJSON(res, 200, catalogStats());
+  }
+
+  // ---- catalog read API: the app loads card data from these (from the DB) ----
+  if (pathname === '/api/catalog/languages' && req.method === 'GET') {
+    return sendJSON(res, 200, emitLanguages());
+  }
+  if (pathname === '/api/catalog/index' && req.method === 'GET') {
+    const lang = LANG_RE.test(url.searchParams.get('lang') || '') ? url.searchParams.get('lang') : 'en';
+    return sendJSON(res, 200, emitIndex(lang));
+  }
+  if (pathname === '/api/catalog/set' && req.method === 'GET') {
+    const lang = LANG_RE.test(url.searchParams.get('lang') || '') ? url.searchParams.get('lang') : 'en';
+    const id = url.searchParams.get('id') || '';
+    if (!SET_ID_RE.test(id)) return sendJSON(res, 400, { error: 'A valid set id is required' });
+    const set = emitSet(lang, id);
+    if (!set) return sendJSON(res, 404, { error: 'Set not found' });
+    return sendJSON(res, 200, set);
+  }
+  if (pathname === '/api/catalog/search' && req.method === 'GET') {
+    const lang = LANG_RE.test(url.searchParams.get('lang') || '') ? url.searchParams.get('lang') : 'en';
+    return sendJSON(res, 200, emitSearch(lang));
+  }
+  if (pathname === '/api/catalog/scan-index' && req.method === 'GET') {
+    const lang = LANG_RE.test(url.searchParams.get('lang') || '') ? url.searchParams.get('lang') : 'en';
+    return sendJSON(res, 200, readJSON(path.join(CDN_DIR, lang, 'scan-index.json'), { cards: [] }));
+  }
+
+  // admin: download all remote card images to this server, repointing rows local
+  if (pathname === '/api/catalog/download-images' && req.method === 'POST') {
+    if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
+    const admin = authUser(req);
+    if (!admin || !isAdminUser(admin)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    if (build.running) return sendJSON(res, 409, { error: 'Another job is already running' });
+    if (imageCounts().remote === 0) return sendJSON(res, 200, { ok: true, started: false, message: 'All images are already local' });
+    startImageDownload();
+    return sendJSON(res, 200, { ok: true, started: true });
+  }
+
+  // admin: (re)load the static JSON catalog into the database
+  if (pathname === '/api/catalog/import' && req.method === 'POST') {
+    if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
+    const admin = authUser(req);
+    if (!admin || !isAdminUser(admin)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    try {
+      const r = importCatalogToDb();
+      return sendJSON(res, 200, { ok: true, ...r });
+    } catch (e) {
+      return sendJSON(res, 500, { error: 'Import failed: ' + e.message });
+    }
   }
 
   if (pathname === '/api/build-status' && req.method === 'GET') {
@@ -795,11 +1122,8 @@ async function handleApi(req, res, pathname, ip, url) {
     if (!cardId || label.length < 2) return sendJSON(res, 400, { error: 'cardId and a printing name (2+ characters) are required' });
     const key = slugifyVariant(label);
     if (!VARIANT_KEY_RE.test(key)) return sendJSON(res, 400, { error: 'That name produces an invalid key' });
-    const overlay = loadLocalOverlay();
-    const entry = overlay.cards[cardId] = overlay.cards[cardId] || {};
-    entry.printings = entry.printings || {};
-    entry.printings[key] = label;
-    saveLocalOverlay(overlay);
+    const lang = LANG_RE.test(body.lang || '') ? body.lang : 'en';
+    _localPrintingLabel.run(lang, cardId, key, label);
     return sendJSON(res, 200, { ok: true, cardId, key, label });
   }
 
@@ -883,15 +1207,9 @@ async function handleApi(req, res, pathname, ip, url) {
     try { sharp = require('sharp'); } catch {
       return sendJSON(res, 501, { error: 'Image processing needs the sharp package on the server: npm install --no-save sharp (the in-app database download installs it automatically)' });
     }
+    if (!_cardExists.get(lang, cardId)) return sendJSON(res, 404, { error: `Card ${cardId} not found in the ${lang} database` });
     const setId = setIdOfCard(cardId);
     const localId = localIdOfCard(cardId);
-    const setFile = path.join(CDN_DIR, lang, 'sets', setId + '.json');
-    const set = readJSON(setFile, null);
-    const card = set && Array.isArray(set.cards) ? set.cards.find((c) => c.id === cardId) : null;
-    // the card may be an overlay-added one that has no base set-file entry
-    const overlay = loadLocalOverlay();
-    const overlayCard = overlay.cards[cardId];
-    if (!card && !overlayCard) return sendJSON(res, 404, { error: `Card ${cardId} not found — add it to the database first` });
     const raw = await readRawBody(req);
     if (!raw.length) return sendJSON(res, 400, { error: 'Send the image file as the request body' });
     const dir = path.join(CDN_DIR, lang, 'images', setId, localId);
@@ -902,24 +1220,10 @@ async function handleApi(req, res, pathname, ip, url) {
     } catch (e) {
       return sendJSON(res, 400, { error: 'Could not process that image: ' + e.message });
     }
-    if (card) {
-      if (!card.variantImages) card.variantImages = {};
-      card.variantImages[variant] = ['low', 'high'];
-      if (!card.image) card.image = `images/${setId}/${localId}`;
-      writeJSONAtomic(setFile, set);
-    } else {
-      overlayCard.variantImages = overlayCard.variantImages || {};
-      overlayCard.variantImages[variant] = ['low', 'high'];
-      if (!overlayCard.image) overlayCard.image = `images/${setId}/${localId}`;
-      saveLocalOverlay(overlay);
-    }
-    return sendJSON(res, 200, {
-      ok: true,
-      urls: {
-        low: `/cdn/${lang}/images/${setId}/${localId}/${variant}-low.webp`,
-        high: `/cdn/${lang}/images/${setId}/${localId}/${variant}-high.webp`,
-      },
-    });
+    const low = `/cdn/${lang}/images/${setId}/${localId}/${variant}-low.webp`;
+    const high = `/cdn/${lang}/images/${setId}/${localId}/${variant}-high.webp`;
+    _localPrintingImg.run(lang, cardId, variant, low, high);   // point this printing at the local upload
+    return sendJSON(res, 200, { ok: true, urls: { low, high } });
   }
 
   if (pathname === '/api/collection' && req.method === 'GET') {
@@ -980,6 +1284,16 @@ const server = http.createServer(async (req, res) => {
     sendJSON(res, 400, { error: err.message || 'Bad request' });
   }
 });
+
+// seed the catalog DB from a local JSON catalog on first boot, if one is present
+if (catalogStats().cards === 0 && dbExists()) {
+  try {
+    const r = importCatalogToDb();
+    if (r.cards) console.log(`Imported catalog into the database: ${r.cards} cards, ${r.sets} sets, ${r.printings} printings`);
+  } catch (e) {
+    console.error('Initial catalog import failed: ' + e.message);
+  }
+}
 
 server.listen(PORT, HOST, () => {
   console.log(`Pokemon TCG Tracker running at http://localhost:${PORT}`);

@@ -36,22 +36,23 @@ const { chromium } = require('playwright');
   const denied = await page.evaluate(async () => (await fetch('api/build-data', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).status);
   check('unauthenticated re-run is rejected', denied === 403);
 
-  // first registered account becomes the administrator
+  // first registered account becomes the administrator (fixed creds so the
+  // test runner can log in later to refresh the catalog)
   await page.click('#account-btn');
   await page.waitForSelector('#account-modal[open]');
   await page.click('.tabs button:has-text("Create account")');
-  await page.fill('#account-forms input[type=text]', 'admin' + Math.floor(Math.random() * 1e6));
+  await page.fill('#account-forms input[type=text]', 'ptcgadmin');
   await page.fill('#account-forms input[type=password]', 'password123');
   await page.click('#account-forms .btn');
   await page.waitForSelector('#account-status button:has-text("Sign out")');
-  await page.waitForSelector('#admin-area button:has-text("Update card database")');
+  await page.waitForSelector('#admin-area button:has-text("Update cards from TCGdex")');
   check('first account sees the Administration section', true);
 
   // admin re-run: starts, runs, completes (resume makes it quick)
-  await page.click('#admin-area button:has-text("Update card database")');
+  await page.click('#admin-area button:has-text("Update cards from TCGdex")');
   await page.waitForSelector('#admin-area .build-progress');
   check('admin update shows progress', true);
-  await page.waitForSelector('#admin-area button:has-text("Update card database")', { timeout: 120000 });
+  await page.waitForSelector('#admin-area button:has-text("Update cards from TCGdex")', { timeout: 120000 });
   check('admin update completes', true);
 
   // ---- custom printings + own variant images (admin) ----

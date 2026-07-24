@@ -210,10 +210,10 @@ const { chromium } = require('playwright');
 
   // ---- debug page ----
   await page.goto('http://localhost:3111/#/debug');
-  await page.waitForFunction(() => document.getElementById('view').textContent.includes('Data has variant/Pokédex info'));
+  await page.waitForFunction(() => document.getElementById('view').textContent.includes('Cards in database'));
   const debugText = await page.textContent('#view');
-  check('debug probes all green', (debugText.match(/OK \(200\)/g) || []).length >= 5);
-  check('debug confirms v3 data', debugText.includes('yes'));
+  check('debug probes all green', (debugText.match(/OK \(200\)/g) || []).length >= 3);
+  check('debug reports cards in the database', /Cards in database/.test(debugText) && !/Cards in database\D*\b0\b/.test(debugText));
   await page.goto('http://localhost:3111/');
   await page.waitForSelector('.set-card');
 
@@ -235,43 +235,12 @@ const { chromium } = require('playwright');
   check('non-admin sees no Administration section', (await page.locator('#admin-area button').count()) === 0);
   await page.keyboard.press('Escape');
 
-  // ---- external image CDN (config.imageBase) ----
-  await context.addInitScript(() => {
-    const cfg = { cdnBase: 'cdn', defaultLanguage: 'en', imageBase: 'http://localhost:3999/imgcdn' };
-    Object.defineProperty(self, 'PTCG_CONFIG', { configurable: true, get: () => cfg, set: () => {} });
-  });
-  await page.goto('http://localhost:3111/?extcdn=1#/set/base1'); // query change forces a real document load
+  // ---- card data comes from the server's database (not R2/static JSON) ----
+  await page.goto('http://localhost:3111/#/set/base1');
   await page.waitForSelector('.tcg-card img');
-  const extSrc = await page.locator('.tcg-card img >> nth=0').getAttribute('src');
-  check('images come from the external CDN when imageBase is set', extSrc.startsWith('http://localhost:3999/imgcdn/en/images/'));
-  await page.waitForFunction(() => {
-    const img = document.querySelector('.tcg-card img');
-    return img && img.complete && img.naturalWidth > 0;
-  });
-  check('external CDN images actually load', true);
-  const dataReq = await page.evaluate(async () => (await fetch('cdn/en/index.json')).ok);
-  check('card data still served locally alongside external images', dataReq === true);
-
-  // ---- full-remote card database (cdnBase = external URL) ----
-  await context.addInitScript(() => {
-    const cfg = { cdnBase: 'http://localhost:3999/imgcdn', defaultLanguage: 'en', imageBase: null };
-    Object.defineProperty(self, 'PTCG_CONFIG', { configurable: true, get: () => cfg, set: () => {} });
-  });
-  await page.goto('http://localhost:3111/?remotecdn=1#/');
-  await page.waitForSelector('.set-card');
-  const remoteIndexFetched = await page.evaluate(() =>
-    performance.getEntriesByType('resource').some((r) => r.name.includes('localhost:3999/imgcdn/en/index.json')));
-  check('sets load from the remote card database', remoteIndexFetched === true);
-  check('no download button when database is remote', (await page.locator('button:has-text("Download card database")').count()) === 0);
-
-  // ---- remote CDN unreachable → automatic local fallback ----
-  await context.addInitScript(() => {
-    const cfg = { cdnBase: 'http://localhost:3999/nonexistent', defaultLanguage: 'en', imageBase: null };
-    Object.defineProperty(self, 'PTCG_CONFIG', { configurable: true, get: () => cfg, set: () => {} });
-  });
-  await page.goto('http://localhost:3111/?fallback=1#/');
-  await page.waitForSelector('.set-card');
-  check('unreachable remote CDN falls back to the local database', (await page.locator('.set-card').count()) >= 1);
+  const usedCatalogApi = await page.evaluate(() =>
+    performance.getEntriesByType('resource').some((r) => r.name.includes('/api/catalog/')));
+  check('app loads the catalog from the server database API', usedCatalogApi === true);
 
   // ---- spinning-pokeball image loader ----
   {

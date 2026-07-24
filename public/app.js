@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.13.0';
+const APP_VERSION = '3.14.0';
 
 /* ============================================================
  * Storage helpers
@@ -12,51 +12,37 @@ function lsGet(key) {
 function lsSet(key, val) { localStorage.setItem(key, JSON.stringify(val)); }
 
 /* ============================================================
- * Card data provider — self-hosted static database
- * Reads the folder produced by scripts/build-data.js from the
- * location configured in config.js (same server or your own CDN).
- * No third-party APIs are called at runtime.
+ * Card data provider — reads the catalog from the bundled server,
+ * which serves it from its SQLite database. Each card carries its
+ * image locations as full URLs (a remote CDN like R2, or a local
+ * path this server serves once images are downloaded/uploaded).
  * ============================================================ */
-const CONFIG_CDN = ((self.PTCG_CONFIG && self.PTCG_CONFIG.cdnBase) || 'cdn').replace(/\/+$/, '');
-let CDN = CONFIG_CDN;
-const IMAGE_BASE = ((self.PTCG_CONFIG && self.PTCG_CONFIG.imageBase) || '').replace(/\/+$/, '');
-const isRemoteCdn = () => /^https?:\/\//i.test(CDN);
-const isConfigRemoteCdn = () => /^https?:\/\//i.test(CONFIG_CDN);
-
-/** Server-side app config: read-only central mode + offline-mirror state.
- * When the admin has downloaded the database locally, the server tells us to
- * pull data/images from this install instead of the configured CDN. */
 let appConfig = {};
 async function loadAppConfig() {
   try {
     const res = await fetch('api/app-config', { cache: 'no-store' });
     if (res.ok) appConfig = await res.json();
-  } catch { /* static hosting — no server config */ }
-  CDN = (appConfig.imageSource === 'local' && appConfig.localDbExists) ? 'cdn' : CONFIG_CDN;
+  } catch { /* no server reachable */ }
 }
 let lang = lsGet('ptcg.lang') || (self.PTCG_CONFIG && self.PTCG_CONFIG.defaultLanguage) || 'en';
 
-const DB = () => `${CDN}/${lang}`;
-/** Images may live on a separately controlled CDN (config.imageBase). */
-const IMGDB = () => (IMAGE_BASE ? `${IMAGE_BASE}/${lang}` : DB());
-
-async function cdnGet(url) {
+/** Fetch a catalog resource from the server (served from its database). */
+async function catGet(pathAndQuery) {
   let res;
   try {
-    res = await fetch(url);
+    res = await fetch('api/catalog/' + pathAndQuery, { cache: 'no-store' });
   } catch {
-    const e = new Error(`Could not reach the card database (${url}). Check cdnBase in config.js.`);
+    const e = new Error('Could not reach the card database server.');
     e.dbError = true;
     throw e;
   }
   if (res.status === 404) {
-    const e = new Error(`Missing data file: ${url}`);
-    e.dbError = true;
-    e.notFound = true;
+    const e = new Error('Not found: ' + pathAndQuery);
+    e.dbError = true; e.notFound = true;
     throw e;
   }
   if (!res.ok) {
-    const e = new Error(`Card database error ${res.status} for ${url}`);
+    const e = new Error('Card database error ' + res.status);
     e.dbError = true;
     throw e;
   }
@@ -96,156 +82,32 @@ let _searchCache = null;
 const _setDetailCache = new Map();
 let _scanIndexCache = null;
 let _languagesCache = null;
-let _overlay = null; // effective merged overlay { cards, sets, removed:Set }
 
 function clearDataCaches() {
   _indexCache = null;
   _searchCache = null;
   _setDetailCache.clear();
   _scanIndexCache = null;
-  _overlay = null;
-}
-
-/* ---------- overlay (master + local layers) ----------
- * The database is rendered as: TCGdex base → master overlay (custom.json on the
- * CDN) → this install's local overlay (from the server). Each overlay can add
- * cards, add sets, patch fields, and list removed (tombstoned) card ids. Local
- * wins; a tombstone hides a card even if a lower layer still has it. */
-function mergeOverlayLayers(master, local) {
-  const cards = {};
-  const sets = {};
-  for (const layer of [master, local]) {
-    if (!layer) continue;
-    for (const [id, c] of Object.entries(layer.cards || {})) {
-      const prev = cards[id] || {};
-      cards[id] = { ...prev, ...c, printings: { ...(prev.printings || {}), ...(c.printings || c.variants || {}) } };
-    }
-    for (const [id, s] of Object.entries(layer.sets || {})) sets[id] = { ...(sets[id] || {}), ...s };
-  }
-  const removed = new Set([...(master && master.removed || []), ...(local && local.removed || [])]);
-  return { cards, sets, removed };
-}
-
-async function getOverlay() {
-  if (_overlay) return _overlay;
-  let master = null, local = null;
-  try { master = await cdnGet(`${CDN}/custom.json`); } catch { /* none */ }
-  await detectServer();
-  if (serverAvailable) {
-    try {
-      const res = await fetch('api/local-overlay', { cache: 'no-store' });
-      if (res.ok) local = await res.json();
-    } catch { /* static host */ }
-  }
-  _overlay = mergeOverlayLayers(master, local);
-  return _overlay;
-}
-
-// back-compat name used across the render code
-async function getCustomVariants() { return (await getOverlay()).cards; }
-
-function customVariantsOf(cardId) {
-  const c = _overlay && _overlay.cards[cardId];
-  return (c && c.printings) || {};
-}
-
-const isRemoved = (cardId) => !!(_overlay && _overlay.removed.has(cardId));
-
-/** Apply an overlay card entry (patch or full definition) onto a base card. */
-function applyOverlayCard(base, id) {
-  const o = _overlay && _overlay.cards[id];
-  if (!o) return base;
-  const merged = { ...base };
-  for (const k of ['name', 'rarity', 'category', 'localId', 'image', 'hp', 'types', 'dexId']) {
-    if (o[k] !== undefined) merged[k] = o[k];
-  }
-  if (o.variants) merged.variants = { ...(base.variants || {}), ...o.variants };
-  if (o.variantImages) merged.variantImages = { ...(base.variantImages || {}), ...o.variantImages };
-  return merged;
-}
-
-/** Overlay-added cards (new:true) that belong to a set, as card objects. */
-function overlayCardsForSet(setId) {
-  if (!_overlay) return [];
-  return Object.entries(_overlay.cards)
-    .filter(([id, c]) => c.new && (c.set === setId || setIdOf(id) === setId) && !_overlay.removed.has(id))
-    .map(([id, c]) => applyOverlayCard({ id, name: id, localId: localIdOf(id), variants: {} }, id));
 }
 
 async function getIndex() {
   if (_indexCache) return _indexCache;
-  try {
-    _indexCache = await cdnGet(`${DB()}/index.json`);
-  } catch (e) {
-    // configured remote CDN unreachable or missing this language — fall back
-    // to a locally built database when one exists (self-hosting still works)
-    if (isRemoteCdn()) {
-      const remote = CDN;
-      try {
-        const res = await fetch(`cdn/${lang}/index.json`);
-        if (!res.ok) throw e;
-        const local = await res.json();
-        CDN = 'cdn';
-        clearDataCaches();
-        _indexCache = local;
-        toast('Card CDN unreachable — using the local database');
-      } catch {
-        CDN = remote;
-        throw e;
-      }
-    } else {
-      throw e;
-    }
-  }
+  _indexCache = await catGet('index?lang=' + encodeURIComponent(lang));
   return _indexCache;
 }
 
 async function getSets() {
-  const sets = [...(await getIndex()).sets];
-  const overlay = await getOverlay();
-  const byId = new Map(sets.map((s) => [s.id, s]));
-  // brand-new sets defined in an overlay (or implied by overlay-added cards)
-  for (const [id, s] of Object.entries(overlay.sets)) {
-    if (!byId.has(id)) { const ns = { id, ...s, cardCount: { total: 0, official: 0 } }; sets.push(ns); byId.set(id, ns); }
-  }
-  // per-set count deltas from overlay adds / tombstones (cheap — no set files)
-  const delta = new Map();
-  for (const [cid, c] of Object.entries(overlay.cards)) {
-    if (c.new && !overlay.removed.has(cid)) delta.set(c.set || setIdOf(cid), (delta.get(c.set || setIdOf(cid)) || 0) + 1);
-  }
-  for (const cid of overlay.removed) delta.set(setIdOf(cid), (delta.get(setIdOf(cid)) || 0) - 1);
-  for (const s of sets) {
-    const d = delta.get(s.id);
-    if (d) { const cc = s.cardCount || (s.cardCount = { total: 0, official: 0 }); cc.total = Math.max(0, (cc.total || 0) + d); cc.official = Math.max(0, (cc.official || 0) + d); }
-  }
-  return sets;
+  return (await getIndex()).sets;
 }
 
 async function getSet(id) {
   if (_setDetailCache.has(id)) return _setDetailCache.get(id);
-  await getOverlay();
-  let base;
-  try {
-    base = await cdnGet(`${DB()}/sets/${encodeURIComponent(id)}.json`);
-  } catch (e) {
-    // a set that only exists in an overlay has no base file
-    if (_overlay && _overlay.sets[id]) base = { ..._overlay.sets[id], cards: [] };
-    else throw e;
-  }
-  const cards = (base.cards || [])
-    .filter((c) => !isRemoved(c.id))
-    .map((c) => applyOverlayCard(c, c.id))
-    .concat(overlayCardsForSet(id));
-  const set = { ...base, cards };
+  const set = await catGet('set?lang=' + encodeURIComponent(lang) + '&id=' + encodeURIComponent(id));
   _setDetailCache.set(id, set);
   return set;
 }
 
 async function getCard(id) {
-  await getOverlay();
-  if (isRemoved(id)) return { id, name: id, removed: true };
-  const o = _overlay && _overlay.cards[id];
-  if (o && o.new) return applyOverlayCard({ id, name: id, localId: localIdOf(id), variants: {} }, id);
   const set = await getSet(setIdOf(id));
   return (set.cards || []).find((c) => c.id === id) || { id, name: id };
 }
@@ -253,8 +115,7 @@ async function getCard(id) {
 async function getLanguages() {
   if (_languagesCache) return _languagesCache;
   try {
-    const data = await cdnGet(`${CDN}/languages.json`);
-    _languagesCache = data.languages || [];
+    _languagesCache = (await catGet('languages')).languages || [];
   } catch {
     _languagesCache = [{ code: lang, name: lang }];
   }
@@ -271,53 +132,26 @@ function setIdOf(cardId) {
   return i > 0 ? cardId.slice(0, i) : cardId;
 }
 
-/** search-index rows: [id, name, rarity, typesCsv, hasImg, dexCsv, category, variantsCsv] */
-function overlayCardToRow(id, c) {
-  return [
-    id, c.name || id, c.rarity || '', (c.types || []).join(','),
-    c.image ? 1 : 0, (c.dexId || []).join(','), c.category || '',
-    Object.keys(c.variants || {}).filter((k) => c.variants[k]).join(',') || 'normal',
-  ];
-}
-
+/** Search index: card objects (id, name, rarity, types, dexId, category,
+ * variants, img, printings, variantImages) served from the DB. */
 async function getSearchIndex() {
   if (_searchCache) return _searchCache;
-  const raw = await cdnGet(`${DB()}/search-index.json`);
-  const overlay = await getOverlay();
-  // start from base rows minus tombstones, applying field patches
-  let rows = raw.cards.filter((r) => !overlay.removed.has(r[0])).map((r) => {
-    const o = overlay.cards[r[0]];
-    if (!o || o.new) return r;
-    const row = r.slice();
-    if (o.name !== undefined) row[1] = o.name;
-    if (o.rarity !== undefined) row[2] = o.rarity;
-    if (o.types !== undefined) row[3] = (o.types || []).join(',');
-    if (o.dexId !== undefined) row[5] = (o.dexId || []).join(',');
-    if (o.category !== undefined) row[6] = o.category;
-    return row;
-  });
-  // add overlay-defined new cards
-  for (const [id, c] of Object.entries(overlay.cards)) {
-    if (c.new && !overlay.removed.has(id)) rows.push(overlayCardToRow(id, c));
-  }
+  const raw = await catGet('search?lang=' + encodeURIComponent(lang));
   const rarities = new Set(), types = new Set();
-  const species = new Map(); // dexId -> {dex, name, cards: [briefRow]}
-  for (const row of rows) {
-    const [, name, rarity, typesCsv, , dexCsv] = row;
-    if (rarity) rarities.add(rarity);
-    if (typesCsv) typesCsv.split(',').forEach((t) => t && types.add(t));
-    if (dexCsv) {
-      const dex = parseInt(dexCsv.split(',')[0], 10);
-      if (dex) {
-        if (!species.has(dex)) species.set(dex, { dex, name, cards: [] });
-        const sp = species.get(dex);
-        sp.cards.push(row);
-        if (name.length < sp.name.length) sp.name = name; // shortest name ≈ species name
-      }
+  const species = new Map(); // dexId -> {dex, name, cards: [cardObj]}
+  for (const c of raw.cards) {
+    if (c.rarity) rarities.add(c.rarity);
+    (c.types || []).forEach((t) => t && types.add(t));
+    const dex = c.dexId && c.dexId[0];
+    if (dex) {
+      if (!species.has(dex)) species.set(dex, { dex, name: c.name, cards: [] });
+      const sp = species.get(dex);
+      sp.cards.push(c);
+      if (c.name.length < sp.name.length) sp.name = c.name; // shortest name ≈ species name
     }
   }
   _searchCache = {
-    cards: rows,
+    cards: raw.cards,
     rarities: [...rarities].sort(),
     types: [...types].sort(),
     species: [...species.values()].sort((a, b) => a.dex - b.dex),
@@ -325,41 +159,25 @@ async function getSearchIndex() {
   return _searchCache;
 }
 
-function briefFromRow(row) {
-  const [id, name, , , hasImg, , , variantsCsv] = row;
-  const variants = {};
-  (variantsCsv ? variantsCsv.split(',') : ['normal']).forEach((v) => { if (v) variants[v] = true; });
-  return { id, name, localId: localIdOf(id), image: hasImg ? `images/${setIdOf(id)}/${localIdOf(id)}` : null, variants };
-}
-
 async function searchCards({ name, rarity, type, sort, page = 1, perPage = 100 }) {
   const idx = await getSearchIndex();
   await getIndex(); // set order needed for release-date sorting
   const q = (name || '').toLowerCase();
-  let matches = [];
-  for (const row of idx.cards) {
-    const [, cardName, cardRarity, typesCsv] = row;
-    if (q && !cardName.toLowerCase().includes(q)) continue;
-    if (rarity && cardRarity !== rarity) continue;
-    if (type && !typesCsv.split(',').includes(type)) continue;
-    matches.push(row);
-  }
-  if (sort) matches = sortCards(matches, sort, (row) => row[0], (row) => row[1]);
-  return matches.slice((page - 1) * perPage, page * perPage).map(briefFromRow);
+  let matches = idx.cards.filter((c) =>
+    (!q || c.name.toLowerCase().includes(q)) &&
+    (!rarity || c.rarity === rarity) &&
+    (!type || (c.types || []).includes(type)));
+  if (sort) matches = sortCards(matches, sort, (c) => c.id, (c) => c.name);
+  return matches.slice((page - 1) * perPage, page * perPage);
 }
 
+/** Image URL for a printing. Each card/printing carries explicit low/high
+ * URLs from the database (a remote CDN, or a local path this server serves). */
 function cardImg(card, quality = 'low', variant = null) {
-  if (!card.image) return null;
-  // a real per-variant scan (user-supplied, detected by build-data) wins
-  if (variant && card.variantImages && card.variantImages[variant]) {
-    const avail = card.variantImages[variant];
-    const q = avail.includes(quality) ? quality : avail[0];
-    return `${IMGDB()}/${card.image}/${variant}-${q}.webp`;
-  }
-  const qualities = (_indexCache && _indexCache.qualities) || ['low'];
-  const q = quality === 'high' && qualities.includes('high') ? 'high' : 'low';
-  if (!qualities.includes(q)) return null; // data-only install
-  return `${IMGDB()}/${card.image}/${q}.webp`;
+  const vi = variant && card.variantImages && card.variantImages[variant];
+  if (vi) return vi[quality] || vi.low || vi.high || null;
+  if (!card.img) return null;
+  return card.img[quality] || card.img.low || card.img.high || null;
 }
 
 /** Printing look when no dedicated scan exists: the closest image — the
@@ -408,7 +226,7 @@ function sortSelect(options, current, onchange) {
 }
 
 function setLogo(set) {
-  return set.logo ? `${IMGDB()}/${set.logo}` : null;
+  return set.logo || null;   // explicit URL from the database
 }
 
 /* ============================================================
@@ -494,7 +312,8 @@ function realVariants(card) {
     if (v && v[key]) avail.push(key);
   }
   if (!avail.length) avail.push('normal');
-  for (const key of Object.keys(customVariantsOf(card.id))) {
+  const pr = card && card.printings;   // custom printings carried on the card
+  if (pr) for (const key of Object.keys(pr)) {
     if (!avail.includes(key)) avail.push(key);
   }
   return avail;
@@ -508,7 +327,7 @@ function availableVariants(card) {
 /** Display label for a variant of a specific card. A "normal" printing of a
  * card that also has a 1st Edition printing is what collectors call "Unlimited". */
 function variantLabel(card, vk) {
-  const custom = customVariantsOf(card.id)[vk];
+  const custom = card && card.printings && card.printings[vk];
   if (custom) return custom;
   if (vk === 'normal') {
     return card && card.variants && card.variants.firstEdition ? 'Unlimited' : 'Normal';
@@ -783,7 +602,6 @@ async function openCardModal(brief, { variant, onOwnershipChange } = {}) {
   cardModal.showModal();
   let card = brief, set = null;
   try {
-    await getCustomVariants();
     card = await getCard(brief.id);
     set = await getSet(setIdOf(brief.id));
   } catch { /* offline — show what we have */ }
@@ -862,9 +680,8 @@ async function openCardModal(brief, { variant, onOwnershipChange } = {}) {
   // ---- admin: add custom printings & upload your own variant images ----
   function renderAdminControls() {
     adminWrap.replaceChildren();
-    // needs admin, a writable server, and the LOCAL database active (edits
-    // would be invisible while data is read from a remote CDN)
-    if (!isAdmin || appConfig.readonly || isRemoteCdn()) return;
+    // editing writes to the server's database (this install's own copy)
+    if (!isAdmin || appConfig.readonly) return;
     const fileInput = h('input', { type: 'file', accept: 'image/*', hidden: '' });
     fileInput.addEventListener('change', async (e) => {
       const f = e.target.files[0];
@@ -878,7 +695,7 @@ async function openCardModal(brief, { variant, onOwnershipChange } = {}) {
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || 'Upload failed');
         toast(`Image saved for ${variantLabel(card, active)}`);
-        _setDetailCache.delete(setIdOf(card.id)); // pick up the new variantImages
+        clearDataCaches(); // pick up the new image from the database
         card = await getCard(card.id);
         renderVariantUI();
         route(); // rebuild the grid behind the modal with the new image
@@ -894,8 +711,8 @@ async function openCardModal(brief, { variant, onOwnershipChange } = {}) {
           if (!label || label.trim().length < 2) return;
           try {
             const res = await apiCall('custom-variant', { method: 'POST', body: JSON.stringify({ cardId: card.id, label: label.trim() }) });
-            _overlay = null;
-            await getOverlay();
+            clearDataCaches();
+            card = await getCard(card.id);
             active = res.key;
             toast(`Added printing: ${res.label}`);
             renderVariantUI();
@@ -1033,12 +850,14 @@ async function renderHome() {
   try {
     sets = await getSets();
   } catch (e) {
-    await detectServer(); // make sure we know whether a server is present
-    if (e.notFound && serverAvailable && !isRemoteCdn()) {
-      renderBootstrap(); // no local database yet — offer the in-app download
-    } else {
-      view.replaceChildren(dbErrorView('Could not load the card database.', e, renderHome));
-    }
+    view.replaceChildren(dbErrorView('Could not load the card database.', e, renderHome));
+    return;
+  }
+  // empty database → offer the in-app download (populates the catalog)
+  if (!sets.length) {
+    await detectServer();
+    if (serverAvailable) { renderBootstrap(); return; }
+    view.replaceChildren(dbErrorView('The card database is empty.', { message: 'No cards have been loaded yet.' }, renderHome));
     return;
   }
 
@@ -1138,7 +957,6 @@ async function renderSetPage(setId) {
   view.replaceChildren(spinner());
   let set;
   try {
-    await getCustomVariants();
     set = await getSet(setId);
   } catch (e) {
     view.replaceChildren(dbErrorView('Could not load this set.', e, () => renderSetPage(setId)));
@@ -1258,11 +1076,11 @@ async function renderPokemonList() {
     list.replaceChildren();
     for (const sp of idx.species) {
       if (filter && !sp.name.toLowerCase().includes(filter) && String(sp.dex) !== filter) continue;
-      const owned = sp.cards.filter(([id]) => ownedAny(id)).length;
+      const owned = sp.cards.filter((c) => ownedAny(c.id)).length;
       const total = sp.cards.length;
       const done = owned >= total;
-      const withImg = sp.cards.find(([, , , , hasImg]) => hasImg);
-      const thumb = withImg ? cardImg(briefFromRow(withImg)) : null;
+      const withImg = sp.cards.find((c) => c.img);
+      const thumb = withImg ? cardImg(withImg) : null;
       const pct = total ? Math.round((owned / total) * 100) : 0;
       list.append(h('a', { class: 'set-card' + (done ? ' complete' : ''), href: '#/pokemon/' + sp.dex },
         thumb
@@ -1298,7 +1116,6 @@ async function renderPokemonPage(dexStr) {
     return;
   }
   await getIndex(); // ensures set ordering/names are available
-  await getCustomVariants();
   const sp = idx.species.find((s) => s.dex === dex);
   if (!sp) {
     view.replaceChildren(h('div', { class: 'center' }, 'No cards found for this Pokémon.'));
@@ -1308,7 +1125,7 @@ async function renderPokemonPage(dexStr) {
   const progressLabel = h('span', { class: 'muted' });
   function updateProgress() {
     if (!canTrack()) { progressLabel.textContent = ''; return; }
-    progressLabel.textContent = `${sp.cards.filter(([id]) => ownedAny(id)).length} / ${sp.cards.length} owned`;
+    progressLabel.textContent = `${sp.cards.filter((c) => ownedAny(c.id)).length} / ${sp.cards.length} owned`;
   }
 
   const grid = h('div', { class: 'card-grid' });
@@ -1316,9 +1133,8 @@ async function renderPokemonPage(dexStr) {
 
   function renderGrid() {
     grid.replaceChildren();
-    const rows = sortCards(sp.cards, pokeSort, (row) => row[0], (row) => row[1]);
-    for (const row of rows) {
-      const c = briefFromRow(row);
+    const cards = sortCards(sp.cards, pokeSort, (c) => c.id, (c) => c.name);
+    for (const c of cards) {
       for (const vk of realVariants(c)) {
         grid.append(cardTile(c, vk, { onOwnershipChange: updateProgress }));
       }
@@ -1350,7 +1166,6 @@ async function renderSearchPage(rawQuery) {
   let idx;
   try {
     idx = await getSearchIndex(); // provides real rarity/type lists from the data
-    await getCustomVariants();
   } catch (e) {
     view.replaceChildren(dbErrorView('Could not load the card database.', e, route));
     return;
@@ -1464,7 +1279,10 @@ function hammingHex(a, b) {
 }
 
 async function getScanIndex() {
-  if (!_scanIndexCache) _scanIndexCache = await cdnGet(`${DB()}/scan-index.json`);
+  if (!_scanIndexCache) {
+    try { _scanIndexCache = await catGet('scan-index?lang=' + encodeURIComponent(lang)); }
+    catch { _scanIndexCache = { cards: [] }; }
+  }
   return _scanIndexCache;
 }
 
@@ -1499,9 +1317,8 @@ async function renderScanPage() {
     let matches, idxRows;
     try {
       await getIndex(); // set names for the result list
-      await getCustomVariants();
       matches = await identifyCard(source, 5);
-      idxRows = new Map((await getSearchIndex()).cards.map((row) => [row[0], row]));
+      idxRows = new Map((await getSearchIndex()).cards.map((c) => [c.id, c]));
     } catch (e) {
       resultsEl.replaceChildren(h('div', { class: 'center' },
         h('p', {}, 'Scanning needs the scan index.'),
@@ -1514,8 +1331,7 @@ async function renderScanPage() {
       h('h3', { style: 'margin:14px 0 8px' }, strong ? 'Best matches' : 'Closest matches (low confidence — try better lighting)'),
       h('div', { class: 'scan-results' },
         matches.map(({ id, distance }) => {
-          const row = idxRows.get(id);
-          const brief = row ? briefFromRow(row) : { id, name: id, localId: localIdOf(id) };
+          const brief = idxRows.get(id) || { id, name: id, localId: localIdOf(id) };
           const owned = ownedAny(id);
           const item = h('div', { class: 'scan-result' + (owned ? ' have' : ''), role: 'button', tabindex: '0',
             onclick: () => openCardModal(brief, { onOwnershipChange: () => decorate() }) },
@@ -1609,7 +1425,7 @@ async function renderDebugPage() {
     h('span', { style: ok === false ? 'color:#ff7b6b' : (ok === true ? 'color:var(--owned)' : '') }, String(value))));
 
   line('App version', APP_VERSION);
-  line('Data location (cdnBase)', CDN);
+  line('Card source', 'server database');
   line('Language', lang);
   line('Service worker', 'serviceWorker' in navigator ? (navigator.serviceWorker.controller ? 'controlling this page' : 'registered, not controlling yet') : 'unsupported');
 
@@ -1624,32 +1440,30 @@ async function renderDebugPage() {
     }
   };
 
-  await probe('languages.json', `${CDN}/languages.json`);
-  const idxRes = await probe(`${lang}/index.json`, `${DB()}/index.json`);
-  await probe(`${lang}/search-index.json`, `${DB()}/search-index.json`);
-  await probe(`${lang}/scan-index.json (scanner)`, `${DB()}/scan-index.json`);
+  try {
+    const stats = await catGet('stats');
+    line('Cards in database', stats.cards, stats.cards > 0);
+    line('Sets in database', stats.sets, stats.sets > 0);
+    line('Custom printings', stats.printings);
+  } catch { line('Catalog stats', 'unreachable', false); }
+  const idxRes = await probe(`catalog/index (${lang})`, `api/catalog/index?lang=${encodeURIComponent(lang)}`);
+  await probe(`catalog/search (${lang})`, `api/catalog/search?lang=${encodeURIComponent(lang)}`);
+  await probe('catalog/scan-index (scanner)', `api/catalog/scan-index?lang=${encodeURIComponent(lang)}`);
 
   if (idxRes && idxRes.ok) {
     try {
       const idx = await idxRes.json();
       line('Sets in index', idx.sets.length, idx.sets.length > 0);
-      line('Image qualities', (idx.qualities || []).join(', ') || 'none (data-only)');
       if (idx.sets[0]) {
         const first = idx.sets[0].id;
-        const setRes = await probe(`first set file (${first}.json)`, `${DB()}/sets/${encodeURIComponent(first)}.json`);
+        const setRes = await probe(`first set (${first})`, `api/catalog/set?lang=${encodeURIComponent(lang)}&id=${encodeURIComponent(first)}`);
         if (setRes && setRes.ok) {
           const setData = await setRes.json();
-          const hasV3 = (setData.cards || []).some((c) => c.variants || c.category || (c.dexId && c.dexId.length));
-          line('Data has variant/Pokédex info', hasV3 ? 'yes' : 'NO — data is from an older version. Re-run "node scripts/build-data.js" (your images are kept).', hasV3);
+          const withImg = (setData.cards || []).filter((c) => c.img).length;
+          line('Cards with an image (first set)', `${withImg} / ${(setData.cards || []).length}`);
         }
       }
-    } catch { line('index.json parse', 'failed', false); }
-  } else {
-    // maybe the data is in the old flat layout?
-    try {
-      const old = await fetch(`${CDN}/index.json`, { cache: 'no-store' });
-      if (old.ok) line('Old-format data detected', `found ${CDN}/index.json (pre-language layout). Re-run "node scripts/build-data.js" — it migrates automatically and keeps your images.`, false);
-    } catch { /* nothing there either */ }
+    } catch { line('index parse', 'failed', false); }
   }
 }
 
@@ -1698,87 +1512,43 @@ async function renderAdminArea() {
     return;
   }
 
-  if (isConfigRemoteCdn()) {
-    // Reads from a public CDN — offer a local copy for offline use.
-    const renderMirror = async () => {
-      const status = await getBuildStatus();
-      const local = appConfig.imageSource === 'local' && appConfig.localDbExists;
-      if (status && status.running) {
-        content.replaceChildren(
-          h('p', { class: 'muted small' }, 'Downloading the card database to this server:'),
-          buildProgressView(async () => {
-            await loadAppConfig();
-            clearDataCaches();
-            toast('Local copy ready — images now load from this server');
-            renderMirror();
-          }),
-        );
-        return;
-      }
-      content.replaceChildren(
-        h('p', { class: 'muted small' },
-          'This install reads the card database from ', h('code', {}, CONFIG_CDN), '. ',
-          local
-            ? 'A local copy is active: data and images are served from this server (no internet needed).'
-            : appConfig.localDbExists
-              ? 'A local copy exists but the online CDN is currently in use.'
-              : 'Download a local copy to use this install without internet access and to add your own printing photos.'),
-        appConfig.mirroredAt
-          ? h('p', { class: 'muted small' }, 'Local copy last updated: ' + new Date(appConfig.mirroredAt).toLocaleString())
-          : null,
-        h('div', { class: 'row' },
-          h('button', { class: 'btn small', onclick: async (e) => {
-            e.target.disabled = true;
-            try {
-              await apiCall('mirror', { method: 'POST', body: JSON.stringify({ remote: CONFIG_CDN }) });
-              renderMirror();
-            } catch (err) { e.target.disabled = false; toast(err.message); }
-          } }, appConfig.localDbExists ? '🔄 Update local copy' : '⬇️ Download database for offline use'),
-          appConfig.localDbExists
-            ? h('button', { class: 'btn ghost small', onclick: async (e) => {
-                e.target.disabled = true;
-                try {
-                  await apiCall('image-source', { method: 'POST', body: JSON.stringify({ source: local ? 'remote' : 'local' }) });
-                  await loadAppConfig();
-                  clearDataCaches();
-                  toast(local ? 'Switched to the online CDN' : 'Switched to the local copy');
-                  renderMirror();
-                } catch (err) { e.target.disabled = false; toast(err.message); }
-              } }, local ? '🌐 Use online CDN' : '💾 Use local copy')
-            : null,
-        ),
-      );
-    };
-    renderMirror();
-    return;
-  }
-
   async function renderControls() {
     const status = await getBuildStatus();
     if (status && status.running) {
+      const msg = status.phase === 'images' ? 'Downloading card images to this server:'
+        : status.phase === 'mirror' ? 'Copying the card database:'
+          : 'Working on the card database:';
       content.replaceChildren(
-        h('p', { class: 'muted small' }, 'Card database update in progress:'),
-        buildProgressView(() => { toast('Card database updated'); renderControls(); }),
+        h('p', { class: 'muted small' }, msg),
+        buildProgressView(async () => { await loadAppConfig(); clearDataCaches(); toast('Done'); renderControls(); }),
       );
       return;
     }
+    let stats = {};
+    try { stats = await catGet('stats'); } catch { /* ignore */ }
+    const img = appConfig.images || {};   // { local, remote }
     content.replaceChildren(
-      h('p', { class: 'muted small' }, 'Re-runs the card downloader: picks up newly released sets and missing images, then refreshes the scanner index. Existing files are skipped, so updates are quick.'),
-      h('div', { class: 'row' },
+      h('p', { class: 'muted small' }, `Database: ${stats.cards || 0} cards, ${stats.sets || 0} sets, ${stats.printings || 0} custom printings.`),
+      // update the card catalogue from TCGdex
+      h('div', { class: 'row', style: 'margin-bottom:12px' },
         h('button', { class: 'btn small', onclick: async (e) => {
           e.target.disabled = true;
-          try {
-            await startDatabaseBuild();
-            renderControls();
-          } catch (err) {
-            e.target.disabled = false;
-            toast(err.message);
-          }
-        } }, '🔄 Update card database'),
+          try { await startDatabaseBuild(); renderControls(); }
+          catch (err) { e.target.disabled = false; toast(err.message); }
+        } }, '🔄 Update cards from TCGdex'),
       ),
-      status && status.progress && status.progress.finishedAt
-        ? h('p', { class: 'muted small', style: 'margin-top:8px' }, 'Last completed: ' + new Date(status.progress.finishedAt).toLocaleString())
-        : null,
+      // download images locally + repoint rows to the local copies
+      h('hr'),
+      h('p', { class: 'muted small' }, img.remote
+        ? `${img.remote} image${img.remote === 1 ? '' : 's'} currently load from the online CDN. Download them to this server so it works fully offline — each card is repointed to its local copy.`
+        : (img.local ? 'All card images are served locally from this server.' : 'No card images yet.')),
+      img.remote ? h('div', { class: 'row' },
+        h('button', { class: 'btn small', onclick: async (e) => {
+          e.target.disabled = true;
+          try { await apiCall('catalog/download-images', { method: 'POST', body: '{}' }); renderControls(); }
+          catch (err) { e.target.disabled = false; toast(err.message); }
+        } }, '⬇️ Download all images to this server'),
+      ) : null,
     );
   }
   renderControls();
@@ -1814,8 +1584,17 @@ function renderAccountModal() {
 
   let mode = 'login';
   const err = h('div', { class: 'error-msg' });
-  const userIn = h('input', { type: 'text', placeholder: 'Username', autocomplete: 'username' });
-  const passIn = h('input', { type: 'password', placeholder: 'Password (8+ characters)', autocomplete: 'current-password' });
+  // stable name/id + correct autocomplete tokens so password managers (Bitwarden,
+  // 1Password, browser built-ins) recognise the form cleanly instead of treating
+  // it as suspicious and disabling their autofill overlay
+  const userIn = h('input', {
+    type: 'text', name: 'username', id: 'ptcg-username', placeholder: 'Username',
+    autocomplete: 'username', autocapitalize: 'none', autocorrect: 'off', spellcheck: 'false',
+  });
+  const passIn = h('input', {
+    type: 'password', name: 'password', id: 'ptcg-password', placeholder: 'Password (8+ characters)',
+    autocomplete: 'current-password',
+  });
   const submit = h('button', { class: 'btn', style: 'width:100%' }, 'Sign in');
 
   const tabs = h('div', { class: 'tabs' },
@@ -1827,6 +1606,9 @@ function renderAccountModal() {
     mode = m;
     tabs.querySelectorAll('button').forEach((b) => b.classList.toggle('active', b === btn));
     submit.textContent = m === 'login' ? 'Sign in' : 'Create account';
+    // "new-password" tells the password manager this is a sign-up field (offer to
+    // generate/save), "current-password" that it's an existing login (offer to fill)
+    passIn.setAttribute('autocomplete', m === 'login' ? 'current-password' : 'new-password');
     err.textContent = '';
   }
 

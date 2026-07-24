@@ -101,6 +101,15 @@ function fail(msg) {
   console.log('=== 5/8 rebuild scanner index ===');
   run('node', ['scripts/build-hashes.js']);
 
+  // the app now reads cards from the server's database — refresh :3111's catalog
+  // from the freshly built public/cdn (adds French + the custom variant scan)
+  {
+    const login = await fetch('http://localhost:3111/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'ptcgadmin', password: 'password123' }) }).then((r) => r.json());
+    const imp = await fetch('http://localhost:3111/api/catalog/import', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + login.token }, body: '{}' }).then((r) => r.json());
+    if (!imp.ok) fail('catalog re-import into :3111 failed: ' + JSON.stringify(imp));
+    console.log(`  catalog refreshed: ${imp.cards} cards, ${imp.sets} sets, ${imp.printings} printings`);
+  }
+
   console.log('=== 6/8 main browser suite ===');
   const suite = spawnSync('node', ['tests/smoke.test.js'], { cwd: ROOT, stdio: 'inherit', env: process.env });
 
@@ -154,29 +163,61 @@ function fail(msg) {
   const roOverlayRemove = (await fetch('http://localhost:3113/api/overlay-remove', { method: 'POST', headers: roAuth, body: JSON.stringify({ cardId: 'base1-4' }) })).status;
   check('read-only blocks overlay editing (add-card / remove)', roOverlayCard === 403 && roOverlayRemove === 403);
 
-  // ---- overlay engine: add card, patch, tombstone, printing → local overlay ----
+  // ---- catalog editing writes to the database (add printing shows in the API) ----
   fs.rmSync(path.join(ROOT, '.test-data-ov'), { recursive: true, force: true });
   start('node', ['server.js'], { PORT: '3115', DATA_DIR: path.join(ROOT, '.test-data-ov'), PTCG_SOURCE_API: 'http://localhost:3999/v2' });
   await waitForPort(3115).catch((e) => fail(e.message));
   const ovReg = await jfetch('http://localhost:3115/api/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'ovadmin', password: 'password123' }) });
   const ovAuth = { 'Content-Type': 'application/json', Authorization: 'Bearer ' + ovReg.token };
   const ovH = (p, b) => jfetch('http://localhost:3115' + p, { method: 'POST', headers: ovAuth, body: JSON.stringify(b) });
-  await ovH('/api/overlay-card', { cardId: 'promoX-1', set: 'promoX', name: 'Eevee Promo', dexId: [133], new: true }); // new card TCGdex lacks
-  await ovH('/api/overlay-set', { id: 'promoX', name: 'My Promo Set' });
-  await ovH('/api/custom-variant', { cardId: 'base1-4', label: 'Cosmos Holo' });           // printing on existing card
-  await ovH('/api/overlay-card', { cardId: 'base1-58', name: 'Renamed Pikachu' });          // patch existing card
-  await ovH('/api/overlay-remove', { cardId: 'base1-97' });                                 // tombstone
-  const ov = await jfetch('http://localhost:3115/api/local-overlay');
+  await ovH('/api/custom-variant', { cardId: 'base1-4', label: 'Cosmos Holo' });
+  const ovSet = await jfetch('http://localhost:3115/api/catalog/set?lang=en&id=base1');
+  const ovB4 = (ovSet.cards || []).find((c) => c.id === 'base1-4');
   const ovCfg = await jfetch('http://localhost:3115/api/app-config');
-  check('overlay stores a new card (not in TCGdex)', ov.cards['promoX-1'] && ov.cards['promoX-1'].new === true && ov.cards['promoX-1'].name === 'Eevee Promo');
-  check('overlay stores a new set', ov.sets['promoX'] && ov.sets['promoX'].name === 'My Promo Set');
-  check('overlay stores a printing in the local layer', ov.cards['base1-4'].printings['cosmos-holo'] === 'Cosmos Holo');
-  check('overlay patches an existing card', ov.cards['base1-58'].name === 'Renamed Pikachu');
-  check('overlay tombstones a card', ov.removed.includes('base1-97'));
-  const ovRestore = await ovH('/api/overlay-remove', { cardId: 'base1-97', removed: false });
-  const ov2 = await jfetch('http://localhost:3115/api/local-overlay');
-  check('overlay restore lifts the tombstone', ovRestore.removed === false && !ov2.removed.includes('base1-97'));
+  check('add-printing writes to the catalog (shows on the card)', ovB4 && ovB4.printings && ovB4.printings['cosmos-holo'] === 'Cosmos Holo');
   check('app-config reports publish capability (no R2 creds here)', ovCfg.canPublish === false);
+
+  // ---- catalog imported into the database (Phase 1: cards live in SQLite) ----
+  const catStats = await jfetch('http://localhost:3115/api/catalog/stats');
+  check('catalog auto-imported into the DB on boot', catStats.cards > 10 && catStats.sets >= 4);
+  const catImp = await ovH('/api/catalog/import', {});
+  check('admin can re-import the catalog (idempotent count)', catImp.ok === true && catImp.cards === catStats.cards);
+  const catDenied = (await fetch('http://localhost:3115/api/catalog/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).status;
+  check('catalog import requires admin', catDenied === 403);
+  {
+    const { DatabaseSync } = require('node:sqlite');
+    const cdb = new DatabaseSync(path.join(ROOT, '.test-data-ov', 'ptcg.db'));
+    const cRow = cdb.prepare('SELECT img_low, variants_csv, source FROM cards WHERE lang = ? AND id = ?').get('en', 'base1-4');
+    const imgless = cdb.prepare("SELECT img_low FROM cards WHERE lang='en' AND id='base1-102'").get();
+    const pRow = cdb.prepare("SELECT label FROM printings WHERE lang='en' AND card_id='base1-4' AND variant='cracked-ice-holo'").get();
+    cdb.close();
+    check('imported card has an image location + variants', !!cRow && /images\/base1\/4\/low\.webp$/.test(cRow.img_low || '') && cRow.variants_csv.includes('holo'));
+    check('imageless card has a null image location', imgless && imgless.img_low === null);
+    check('imported custom printing carried its label', pRow && pRow.label === 'Cracked Ice Holo');
+  }
+
+  // ---- download all images locally: repoint a remote image to /cdn ----
+  {
+    const { DatabaseSync } = require('node:sqlite');
+    const ddb = new DatabaseSync(path.join(ROOT, '.test-data-ov', 'ptcg.db'));
+    // point a card at a remote image the mock TCGdex CDN can serve
+    ddb.exec("UPDATE cards SET img_low = 'http://localhost:3999/imgcdn/en/images/base1/4/low.webp', img_high = NULL WHERE lang='en' AND id='base1-4'");
+    ddb.close();
+  }
+  const dlCfg = await jfetch('http://localhost:3115/api/app-config');
+  const dlStart = await ovH('/api/catalog/download-images', {});
+  let dlDone = null;
+  for (let i = 0; i < 120 && !dlDone; i++) {
+    const st = await jfetch('http://localhost:3115/api/build-status');
+    if (!st.running) dlDone = st; else await new Promise((r) => setTimeout(r, 300));
+  }
+  const dlSet = await jfetch('http://localhost:3115/api/catalog/set?lang=en&id=base1');
+  const dlB4 = (dlSet.cards || []).find((c) => c.id === 'base1-4');
+  check('download-images: a remote image is detected', dlCfg.images && dlCfg.images.remote >= 1);
+  check('download-images: run completes and repoints the row to a local /cdn path',
+    dlStart.started === true && dlDone && !dlDone.error && dlB4 && dlB4.img && /^\/cdn\//.test(dlB4.img.low || ''));
+  check('download-images: the file was saved on this server',
+    fs.existsSync(path.join(ROOT, 'public', 'cdn', 'en', 'images', 'base1', '4', 'low.webp')));
 
   // ---- SQLite accounts: change-password invalidates old sessions ----
   const cpUser = await jfetch('http://localhost:3115/api/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'cpuser', password: 'password123' }) });
