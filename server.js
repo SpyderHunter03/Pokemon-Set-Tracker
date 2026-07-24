@@ -4,7 +4,9 @@
  * Zero dependencies: plain Node.js (>= 18).
  *
  * Serves the PWA from ./public and provides optional account + cloud-sync API.
- * Data is stored as JSON files under DATA_DIR (default ./data).
+ * Accounts and collections live in a SQLite database (DATA_DIR/ptcg.db) via
+ * Node's built-in node:sqlite — no external dependency. Requires Node 22.5+.
+ * Card-database overlays and settings remain small JSON files under DATA_DIR.
  *
  * Usage:  node server.js          (then open http://localhost:3000)
  * Env:    PORT=3000  DATA_DIR=./data
@@ -25,17 +27,50 @@ const PORT = parseInt(process.env.PORT || '3000', 10);
 const HOST = process.env.HOST || '0.0.0.0';
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, 'data'));
 const PUBLIC_DIR = path.join(__dirname, 'public');
-const USERS_FILE = path.join(DATA_DIR, 'users.json');
-const COLLECTIONS_DIR = path.join(DATA_DIR, 'collections');
+const USERS_FILE = path.join(DATA_DIR, 'users.json');           // legacy (pre-SQLite) — migrated on first run
+const COLLECTIONS_DIR = path.join(DATA_DIR, 'collections');     // legacy (pre-SQLite) — migrated on first run
+const DB_FILE = path.join(DATA_DIR, 'ptcg.db');
 const SECRET_FILE = path.join(DATA_DIR, 'secret.key');
 const TOKEN_TTL_MS = 1000 * 60 * 60 * 24 * 90; // 90 days
 const MAX_BODY = 8 * 1024 * 1024; // 8 MB — a full collection is far smaller
 const READONLY = process.env.PTCG_READONLY === '1';
 const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
 
-// ---------- storage helpers ----------
+fs.mkdirSync(DATA_DIR, { recursive: true });
 
-fs.mkdirSync(COLLECTIONS_DIR, { recursive: true });
+// ---------- database (accounts + collections) ----------
+// Uses SQLite via Node's built-in node:sqlite (no external dependency), the
+// same storage model the mature self-hosted apps use (Uptime Kuma, Gitea,
+// Nextcloud). Everything lives in one file, DATA_DIR/ptcg.db — back it up by
+// copying that single file.
+let DatabaseSync;
+try {
+  ({ DatabaseSync } = require('node:sqlite'));
+} catch {
+  console.error('This server needs Node 22.5+ (for the built-in node:sqlite database). Please update Node and restart.');
+  process.exit(1);
+}
+const db = new DatabaseSync(DB_FILE);
+db.exec('PRAGMA journal_mode = WAL');       // concurrent-safe writes
+db.exec('PRAGMA busy_timeout = 5000');
+db.exec(`
+  CREATE TABLE IF NOT EXISTS users (
+    id       TEXT PRIMARY KEY,
+    username TEXT UNIQUE NOT NULL,          -- lowercase login key
+    display  TEXT NOT NULL,
+    salt     TEXT NOT NULL,
+    hash     TEXT NOT NULL,
+    created  TEXT NOT NULL,
+    admin    INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE TABLE IF NOT EXISTS collections (
+    user_id    TEXT PRIMARY KEY,
+    data       TEXT NOT NULL,               -- JSON: { cardId: { variant: qty } }
+    updated_at INTEGER NOT NULL
+  );
+`);
+
+// ---------- storage helpers ----------
 
 function loadSecret() {
   try {
@@ -63,13 +98,76 @@ function writeJSONAtomic(file, obj) {
   fs.renameSync(tmp, file);
 }
 
-function loadUsers() { return readJSON(USERS_FILE, {}); }
-function saveUsers(users) { writeJSONAtomic(USERS_FILE, users); }
+// ---------- user & collection queries ----------
+
+const rowToUser = (r) => (r ? { id: r.id, username: r.username, display: r.display, salt: r.salt, hash: r.hash, created: r.created, admin: !!r.admin } : null);
+
+const _getUserById = db.prepare('SELECT * FROM users WHERE id = ?');
+const _getUserByName = db.prepare('SELECT * FROM users WHERE username = ?');
+const _insertUser = db.prepare('INSERT INTO users (id, username, display, salt, hash, created, admin) VALUES (?, ?, ?, ?, ?, ?, ?)');
+const _updateUserHash = db.prepare('UPDATE users SET salt = ?, hash = ? WHERE id = ?');
+const _countUsers = db.prepare('SELECT COUNT(*) AS n FROM users');
+const _countAdmins = db.prepare('SELECT COUNT(*) AS n FROM users WHERE admin = 1');
+const _earliestUser = db.prepare('SELECT * FROM users ORDER BY created ASC, id ASC LIMIT 1');
+const _getCollection = db.prepare('SELECT data, updated_at FROM collections WHERE user_id = ?');
+const _upsertCollection = db.prepare(
+  'INSERT INTO collections (user_id, data, updated_at) VALUES (?, ?, ?) ' +
+  'ON CONFLICT(user_id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at');
+
+const getUserById = (id) => rowToUser(_getUserById.get(id));
+const getUserByName = (key) => rowToUser(_getUserByName.get(key));
+const userCount = () => _countUsers.get().n;
+function createUser(u) {
+  _insertUser.run(u.id, u.username, u.display, u.salt, u.hash, u.created, u.admin ? 1 : 0);
+}
+function getCollectionOf(userId) {
+  const row = _getCollection.get(userId);
+  return row ? { collection: JSON.parse(row.data), updatedAt: row.updated_at } : { collection: {}, updatedAt: 0 };
+}
+function putCollectionOf(userId, collection, updatedAt) {
+  _upsertCollection.run(userId, JSON.stringify(collection), updatedAt);
+}
+
+/** First-run migration: import any pre-SQLite JSON accounts/collections. */
+function migrateJsonToDb() {
+  if (userCount() > 0) return;               // DB already populated
+  const users = readJSON(USERS_FILE, null);
+  if (!users || typeof users !== 'object') return;
+  let migrated = 0;
+  db.exec('BEGIN');
+  try {
+    for (const [key, u] of Object.entries(users)) {
+      if (!u || !u.id) continue;
+      _insertUser.run(u.id, key, u.display || key, u.salt || '', u.hash || '', u.created || new Date(0).toISOString(), u.admin ? 1 : 0);
+      const coll = readJSON(path.join(COLLECTIONS_DIR, u.id + '.json'), null);
+      if (coll && coll.collection) _upsertCollection.run(u.id, JSON.stringify(coll.collection), coll.updatedAt || 0);
+      migrated++;
+    }
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    console.error('Account migration failed (leaving JSON files in place): ' + e.message);
+    return;
+  }
+  if (migrated) {
+    // keep the old files as a backup, but out of the way so we don't re-import
+    try { fs.renameSync(USERS_FILE, USERS_FILE + '.migrated'); } catch { /* ignore */ }
+    try { if (fs.existsSync(COLLECTIONS_DIR)) fs.renameSync(COLLECTIONS_DIR, COLLECTIONS_DIR + '.migrated'); } catch { /* ignore */ }
+    console.log(`Migrated ${migrated} account(s) from JSON files into ${DB_FILE}`);
+  }
+}
+migrateJsonToDb();
 
 // ---------- auth ----------
 
 function hashPassword(password, salt) {
   return crypto.scryptSync(password, salt, 64).toString('hex');
+}
+
+/** Short fingerprint of a password hash, embedded in tokens so that changing
+ * the password invalidates every existing session (as Uptime Kuma does). */
+function pwFingerprint(hash) {
+  return crypto.createHash('sha256').update(hash).digest('hex').slice(0, 16);
 }
 
 function b64url(buf) {
@@ -80,6 +178,10 @@ function sign(payload) {
   const body = b64url(JSON.stringify(payload));
   const sig = crypto.createHmac('sha256', SECRET).update(body).digest('base64url');
   return body + '.' + sig;
+}
+
+function issueToken(user) {
+  return sign({ uid: user.id, pv: pwFingerprint(user.hash), exp: Date.now() + TOKEN_TTL_MS });
 }
 
 function verifyToken(token) {
@@ -105,10 +207,11 @@ function authUser(req) {
   const token = header.startsWith('Bearer ') ? header.slice(7) : null;
   const payload = verifyToken(token);
   if (!payload) return null;
-  const users = loadUsers();
-  const entry = Object.entries(users).find(([, u]) => u.id === payload.uid);
-  if (!entry) return null;
-  return { username: entry[0], ...entry[1] };
+  const user = getUserById(payload.uid);
+  if (!user) return null;
+  // token bound to the password hash: a password change logs out old sessions
+  if (payload.pv && payload.pv !== pwFingerprint(user.hash)) return null;
+  return user;
 }
 
 // ---------- rate limiting (in-memory, per IP) ----------
@@ -238,11 +341,11 @@ function dbExists() {
 }
 
 /** The first registered account is the administrator. */
-function isAdminUser(user, users) {
+function isAdminUser(user) {
   if (user.admin === true) return true;
-  if (Object.values(users).some((u) => u.admin === true)) return false;
+  if (_countAdmins.get().n > 0) return false;
   // accounts created before the admin flag existed: earliest registration wins
-  const earliest = Object.values(users).sort((a, b) => new Date(a.created) - new Date(b.created))[0];
+  const earliest = rowToUser(_earliestUser.get());
   return !!earliest && earliest.id === user.id;
 }
 
@@ -579,7 +682,7 @@ async function handleApi(req, res, pathname, ip, url) {
     if (dbExists()) {
       // database already present → only the administrator may re-run/update it
       const admin = authUser(req);
-      if (!admin || !isAdminUser(admin, loadUsers())) {
+      if (!admin || !isAdminUser(admin)) {
         return sendJSON(res, 403, { error: 'Administrator account required to update the card database' });
       }
     }
@@ -598,51 +701,69 @@ async function handleApi(req, res, pathname, ip, url) {
     const { username, password } = await readBody(req);
     if (!USERNAME_RE.test(username || '')) return sendJSON(res, 400, { error: 'Username must be 3-30 letters, numbers or underscores' });
     if (typeof password !== 'string' || password.length < 8) return sendJSON(res, 400, { error: 'Password must be at least 8 characters' });
-    const users = loadUsers();
     const key = username.toLowerCase();
-    if (users[key]) return sendJSON(res, 409, { error: 'Username already taken' });
+    if (getUserByName(key)) return sendJSON(res, 409, { error: 'Username already taken' });
     const salt = crypto.randomBytes(16).toString('hex');
     const user = {
       id: crypto.randomUUID(),
+      username: key,
       display: username,
       salt,
       hash: hashPassword(password, salt),
       created: new Date().toISOString(),
-      admin: Object.keys(users).length === 0, // first account = administrator
+      admin: userCount() === 0, // first account = administrator
     };
-    users[key] = user;
-    saveUsers(users);
-    const token = sign({ uid: user.id, exp: Date.now() + TOKEN_TTL_MS });
-    return sendJSON(res, 200, { token, username: user.display });
+    try {
+      createUser(user);
+    } catch {
+      return sendJSON(res, 409, { error: 'Username already taken' }); // UNIQUE race
+    }
+    return sendJSON(res, 200, { token: issueToken(user), username: user.display });
   }
 
   if (pathname === '/api/login' && req.method === 'POST') {
     if (rateLimited(ip, 'auth', 20, 10 * 60 * 1000)) return sendJSON(res, 429, { error: 'Too many attempts, try again later' });
     const { username, password } = await readBody(req);
-    const users = loadUsers();
-    const user = users[(username || '').toLowerCase()];
+    const user = getUserByName((username || '').toLowerCase());
     const bad = () => sendJSON(res, 401, { error: 'Invalid username or password' });
     if (!user || typeof password !== 'string') return bad();
     const hash = hashPassword(password, user.salt);
     const a = Buffer.from(hash), b = Buffer.from(user.hash);
     if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return bad();
-    const token = sign({ uid: user.id, exp: Date.now() + TOKEN_TTL_MS });
-    return sendJSON(res, 200, { token, username: user.display });
+    return sendJSON(res, 200, { token: issueToken(user), username: user.display });
   }
 
   // authenticated routes
   const user = authUser(req);
   if (!user) return sendJSON(res, 401, { error: 'Not signed in' });
-  const collFile = path.join(COLLECTIONS_DIR, user.id + '.json');
 
   if (pathname === '/api/me' && req.method === 'GET') {
-    return sendJSON(res, 200, { username: user.display, admin: isAdminUser(user, loadUsers()) });
+    return sendJSON(res, 200, { username: user.display, admin: isAdminUser(user) });
+  }
+
+  // ---- change password (invalidates all other sessions via the hash-bound token) ----
+  if (pathname === '/api/change-password' && req.method === 'POST') {
+    const body = await readBody(req);
+    const bad = () => sendJSON(res, 401, { error: 'Current password is incorrect' });
+    if (typeof body.currentPassword !== 'string' || typeof body.newPassword !== 'string') {
+      return sendJSON(res, 400, { error: 'currentPassword and newPassword are required' });
+    }
+    if (body.newPassword.length < 8) return sendJSON(res, 400, { error: 'New password must be at least 8 characters' });
+    const cur = hashPassword(body.currentPassword, user.salt);
+    const a = Buffer.from(cur), b = Buffer.from(user.hash);
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return bad();
+    const salt = crypto.randomBytes(16).toString('hex');
+    const hash = hashPassword(body.newPassword, salt);
+    _updateUserHash.run(salt, hash, user.id);
+    // fresh token for THIS session; every previously-issued token no longer
+    // matches the new hash fingerprint and is now dead
+    return sendJSON(res, 200, { ok: true, token: issueToken({ id: user.id, hash }) });
   }
 
   // ---- admin: mirror a remote card database onto this server (offline use) ----
   if (pathname === '/api/mirror' && req.method === 'POST') {
     if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
-    if (!isAdminUser(user, loadUsers())) return sendJSON(res, 403, { error: 'Administrator account required' });
+    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
     if (build.running) return sendJSON(res, 409, { error: 'A download is already running' });
     const body = await readBody(req);
     const remote = typeof body.remote === 'string' && /^https?:\/\/[^\s]{4,300}$/i.test(body.remote) ? body.remote : null;
@@ -654,7 +775,7 @@ async function handleApi(req, res, pathname, ip, url) {
   // ---- admin: choose where the app pulls images/data from ----
   if (pathname === '/api/image-source' && req.method === 'POST') {
     if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
-    if (!isAdminUser(user, loadUsers())) return sendJSON(res, 403, { error: 'Administrator account required' });
+    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
     const body = await readBody(req);
     if (!['local', 'remote'].includes(body.source)) return sendJSON(res, 400, { error: 'source must be "local" or "remote"' });
     if (body.source === 'local' && !dbExists()) return sendJSON(res, 400, { error: 'No local copy exists yet — download the database first' });
@@ -667,7 +788,7 @@ async function handleApi(req, res, pathname, ip, url) {
   // ---- admin: define a custom printing (e.g. "Cracked Ice Holo") for a card ----
   if (pathname === '/api/custom-variant' && req.method === 'POST') {
     if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
-    if (!isAdminUser(user, loadUsers())) return sendJSON(res, 403, { error: 'Administrator account required' });
+    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
     const body = await readBody(req);
     const cardId = typeof body.cardId === 'string' && CARD_ID_RE.test(body.cardId) ? body.cardId : null;
     const label = typeof body.label === 'string' ? body.label.trim().slice(0, 40) : '';
@@ -685,7 +806,7 @@ async function handleApi(req, res, pathname, ip, url) {
   // ---- admin: add or edit a card (patch an existing one, or define a new one) ----
   if (pathname === '/api/overlay-card' && req.method === 'POST') {
     if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
-    if (!isAdminUser(user, loadUsers())) return sendJSON(res, 403, { error: 'Administrator account required' });
+    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
     const body = await readBody(req);
     const cardId = typeof body.cardId === 'string' && CARD_ID_RE.test(body.cardId) ? body.cardId : null;
     const setId = typeof body.set === 'string' && SET_ID_RE.test(body.set) ? body.set : null;
@@ -712,7 +833,7 @@ async function handleApi(req, res, pathname, ip, url) {
   // ---- admin: add a brand-new set the base database doesn't have ----
   if (pathname === '/api/overlay-set' && req.method === 'POST') {
     if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
-    if (!isAdminUser(user, loadUsers())) return sendJSON(res, 403, { error: 'Administrator account required' });
+    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
     const body = await readBody(req);
     const setId = typeof body.id === 'string' && SET_ID_RE.test(body.id) ? body.id : null;
     const name = typeof body.name === 'string' ? body.name.trim().slice(0, 80) : '';
@@ -729,7 +850,7 @@ async function handleApi(req, res, pathname, ip, url) {
   // ---- admin: remove (tombstone) or restore a card ----
   if (pathname === '/api/overlay-remove' && req.method === 'POST') {
     if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
-    if (!isAdminUser(user, loadUsers())) return sendJSON(res, 403, { error: 'Administrator account required' });
+    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
     const body = await readBody(req);
     const cardId = typeof body.cardId === 'string' && CARD_ID_RE.test(body.cardId) ? body.cardId : null;
     if (!cardId) return sendJSON(res, 400, { error: 'A valid cardId is required' });
@@ -751,7 +872,7 @@ async function handleApi(req, res, pathname, ip, url) {
   // ---- admin: upload your own image for a specific printing of a card ----
   if (pathname === '/api/variant-image' && req.method === 'POST') {
     if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
-    if (!isAdminUser(user, loadUsers())) return sendJSON(res, 403, { error: 'Administrator account required' });
+    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
     const cardId = url.searchParams.get('cardId') || '';
     const variant = url.searchParams.get('variant') || '';
     const lang = LANG_RE.test(url.searchParams.get('lang') || '') ? url.searchParams.get('lang') : 'en';
@@ -802,8 +923,7 @@ async function handleApi(req, res, pathname, ip, url) {
   }
 
   if (pathname === '/api/collection' && req.method === 'GET') {
-    const data = readJSON(collFile, { collection: {}, updatedAt: 0 });
-    return sendJSON(res, 200, data);
+    return sendJSON(res, 200, getCollectionOf(user.id));
   }
 
   if (pathname === '/api/collection' && req.method === 'PUT') {
@@ -835,9 +955,9 @@ async function handleApi(req, res, pathname, ip, url) {
       if (Object.keys(variants).length) clean[id] = variants;
       if (++n > 100000) break;
     }
-    const data = { collection: clean, updatedAt: Date.now() };
-    writeJSONAtomic(collFile, data);
-    return sendJSON(res, 200, { ok: true, updatedAt: data.updatedAt, count: Object.keys(clean).length });
+    const updatedAt = Date.now();
+    putCollectionOf(user.id, clean, updatedAt);
+    return sendJSON(res, 200, { ok: true, updatedAt, count: Object.keys(clean).length });
   }
 
   return sendJSON(res, 404, { error: 'Unknown API endpoint' });
@@ -865,3 +985,16 @@ server.listen(PORT, HOST, () => {
   console.log(`Pokemon TCG Tracker running at http://localhost:${PORT}`);
   console.log(`Data directory: ${DATA_DIR}`);
 });
+
+// close the database cleanly on shutdown so SQLite checkpoints its WAL into
+// the main .db file (keeps backups of DATA_DIR/ptcg.db self-contained)
+let closing = false;
+function shutdown() {
+  if (closing) return;
+  closing = true;
+  try { db.close(); } catch { /* already closed */ }
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 2000).unref();
+}
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);

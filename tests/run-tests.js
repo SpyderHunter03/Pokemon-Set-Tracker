@@ -178,6 +178,37 @@ function fail(msg) {
   check('overlay restore lifts the tombstone', ovRestore.removed === false && !ov2.removed.includes('base1-97'));
   check('app-config reports publish capability (no R2 creds here)', ovCfg.canPublish === false);
 
+  // ---- SQLite accounts: change-password invalidates old sessions ----
+  const cpUser = await jfetch('http://localhost:3115/api/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'cpuser', password: 'password123' }) });
+  const cpAuthOld = { 'Content-Type': 'application/json', Authorization: 'Bearer ' + cpUser.token };
+  await fetch('http://localhost:3115/api/collection', { method: 'PUT', headers: cpAuthOld, body: JSON.stringify({ collection: { 'base1-4': { holo: 3 } } }) });
+  const cpChange = await jfetch('http://localhost:3115/api/change-password', { method: 'POST', headers: cpAuthOld, body: JSON.stringify({ currentPassword: 'password123', newPassword: 'newpassword123' }) });
+  const oldTokStatus = (await fetch('http://localhost:3115/api/me', { headers: { Authorization: 'Bearer ' + cpUser.token } })).status;
+  const newTokStatus = (await fetch('http://localhost:3115/api/me', { headers: { Authorization: 'Bearer ' + cpChange.token } })).status;
+  const cpColl = await jfetch('http://localhost:3115/api/collection', { headers: { Authorization: 'Bearer ' + cpChange.token } });
+  check('change-password kills old sessions, keeps new one', cpChange.ok === true && oldTokStatus === 401 && newTokStatus === 200);
+  check('collection survives a password change', cpColl.collection['base1-4'] && cpColl.collection['base1-4'].holo === 3);
+
+  // ---- SQLite migration: a pre-SQLite JSON install imports on first boot ----
+  const migDir = path.join(ROOT, '.test-data-mig');
+  fs.rmSync(migDir, { recursive: true, force: true });
+  fs.mkdirSync(path.join(migDir, 'collections'), { recursive: true });
+  const migId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+  const migSalt = 'abcd', migHash = require('crypto').scryptSync('password123', migSalt, 64).toString('hex');
+  fs.writeFileSync(path.join(migDir, 'users.json'), JSON.stringify({ olduser: { id: migId, display: 'olduser', salt: migSalt, hash: migHash, created: '2020-01-01T00:00:00Z', admin: true } }));
+  fs.writeFileSync(path.join(migDir, 'collections', migId + '.json'), JSON.stringify({ collection: { 'base1-58': { normal: 5 } }, updatedAt: 42 }));
+  start('node', ['server.js'], { PORT: '3116', DATA_DIR: migDir });
+  await waitForPort(3116).catch((e) => fail(e.message));
+  const migLogin = await jfetch('http://localhost:3116/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'olduser', password: 'password123' }) });
+  const migAuth = { Authorization: 'Bearer ' + (migLogin.token || '') };
+  const migColl = migLogin.token ? await jfetch('http://localhost:3116/api/collection', { headers: migAuth }) : {};
+  const migMe = migLogin.token ? await jfetch('http://localhost:3116/api/me', { headers: migAuth }) : {};
+  check('JSON→SQLite migration: old password still logs in', !!migLogin.token);
+  check('JSON→SQLite migration: collection + admin flag preserved',
+    migColl.collection && migColl.collection['base1-58'] && migColl.collection['base1-58'].normal === 5 && migMe.admin === true);
+  check('JSON→SQLite migration: db created, old files archived',
+    fs.existsSync(path.join(migDir, 'ptcg.db')) && fs.existsSync(path.join(migDir, 'users.json.migrated')));
+
   // ---- offline mirror: fresh install copies a remote database locally ----
   fs.rmSync(path.join(ROOT, '.test-data-mirror'), { recursive: true, force: true });
   start('node', ['server.js'], { PORT: '3114', DATA_DIR: path.join(ROOT, '.test-data-mirror') });
@@ -233,7 +264,7 @@ function fail(msg) {
     pub3.status === 0 && pubGuard.status === 1 && pub4.status === 0 && /deleted 1/.test(out4) && storeAfter.count === uploaded;
 
   cleanup();
-  for (const d of ['.test-data', '.test-data-ro', '.test-data-mirror', '.test-data-ov']) {
+  for (const d of ['.test-data', '.test-data-ro', '.test-data-mirror', '.test-data-ov', '.test-data-mig']) {
     fs.rmSync(path.join(ROOT, d), { recursive: true, force: true });
   }
   if (suite.status !== 0) { console.error('\nBrowser suite failed.'); process.exit(1); }
