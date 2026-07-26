@@ -34,6 +34,11 @@ const SECRET_FILE = path.join(DATA_DIR, 'secret.key');
 const TOKEN_TTL_MS = 1000 * 60 * 60 * 24 * 90; // 90 days
 const MAX_BODY = 8 * 1024 * 1024; // 8 MB — a full collection is far smaller
 const READONLY = process.env.PTCG_READONLY === '1';
+// Maintainer/curation workspace: this instance manages the MASTER database
+// (edits here are what get published). It is not a personal install — the app
+// shows a banner so the two are never confused. See README "maintainer
+// workspace".
+const MASTER_MODE = process.env.PTCG_MASTER === '1';
 const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -672,16 +677,22 @@ function localIdOfCard(cardId) {
  * updates rows that are still 'master' — a self-hoster's 'local' edits and
  * tombstones are left untouched. */
 
+// Master-source upserts. The trailing `hidden` parameter lets master
+// tombstones (deletions) propagate on pull; the WHERE source='master' guard
+// is the other half of the contract — rows this install edited locally
+// (source='local') are NEVER touched by a master import/pull.
 const _catSet = db.prepare(`INSERT INTO sets (lang,id,name,release_date,logo,official_count,position,source,hidden)
-  VALUES (?,?,?,?,?,?,?, 'master', 0)
+  VALUES (?,?,?,?,?,?,?, 'master', ?)
   ON CONFLICT(lang,id) DO UPDATE SET name=excluded.name, release_date=excluded.release_date,
-    logo=excluded.logo, official_count=excluded.official_count, position=excluded.position WHERE sets.source='master'`);
+    logo=excluded.logo, official_count=excluded.official_count, position=excluded.position,
+    hidden=excluded.hidden WHERE sets.source='master'`);
 const _catCard = db.prepare(`INSERT INTO cards (lang,id,set_id,local_id,name,rarity,category,dex_csv,types_csv,hp,illustrator,variants_csv,img_low,img_high,position,source,hidden)
-  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'master', 0)
+  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'master', ?)
   ON CONFLICT(lang,id) DO UPDATE SET set_id=excluded.set_id, local_id=excluded.local_id, name=excluded.name,
     rarity=excluded.rarity, category=excluded.category, dex_csv=excluded.dex_csv, types_csv=excluded.types_csv,
     hp=excluded.hp, illustrator=excluded.illustrator, variants_csv=excluded.variants_csv,
-    img_low=excluded.img_low, img_high=excluded.img_high, position=excluded.position WHERE cards.source='master'`);
+    img_low=excluded.img_low, img_high=excluded.img_high, position=excluded.position,
+    hidden=excluded.hidden WHERE cards.source='master'`);
 const _catPrinting = db.prepare(`INSERT INTO printings (lang,card_id,variant,label,img_low,img_high,source)
   VALUES (?,?,?,?,?,?, 'master')
   ON CONFLICT(lang,card_id,variant) DO UPDATE SET label=excluded.label,
@@ -692,12 +703,47 @@ const _countPrintings = db.prepare('SELECT COUNT(*) AS n FROM printings');
 
 /** Read the app's configured cdnBase from public/config.js (server-side). */
 function configCdnBase() {
+  // An explicit env override wins (handy for deployments and tests) — must be a
+  // full http(s) URL to count as a *remote* database.
+  const envBase = (process.env.PTCG_CDN_BASE || '').trim();
+  if (/^https?:\/\//.test(envBase)) return envBase.replace(/\/+$/, '');
   try {
     const m = fs.readFileSync(path.join(PUBLIC_DIR, 'config.js'), 'utf8').match(/cdnBase:\s*['"]([^'"]+)['"]/);
     return m && /^https?:\/\//.test(m[1]) ? m[1].replace(/\/+$/, '') : null;
   } catch { return null; }
 }
 
+// shared upsert helpers so local and remote imports build rows identically
+function _upsertCatSet(lang, s, pos, imageBase) {
+  const official = (s.cardCount && (s.cardCount.official || s.cardCount.total)) || null;
+  _catSet.run(lang, s.id, s.name, s.releaseDate || null, s.logo ? `${imageBase}/${lang}/${s.logo}` : null, official, pos, 0);
+}
+function _upsertCatCard(lang, c, setId, ci, imageBase, hasHigh, custom) {
+  const prefix = c.image ? `${imageBase}/${lang}/${c.image}` : null;
+  const variantsCsv = c.variants
+    ? (Object.entries(c.variants).filter(([, v]) => v).map(([k]) => k).join(',') || 'normal')
+    : 'normal';
+  _catCard.run(lang, c.id, setId, String(c.localId ?? localIdOfCard(c.id)), c.name || c.id,
+    c.rarity || null, c.category || null, (c.dexId || []).join(',') || null, (c.types || []).join(',') || null,
+    c.hp || null, c.illustrator || null, variantsCsv,
+    prefix ? prefix + '/low.webp' : null, (prefix && hasHigh) ? prefix + '/high.webp' : null, ci, 0);
+  const prints = {};
+  const num = localIdOfCard(c.id);
+  for (const [vk, qs] of Object.entries(c.variantImages || {})) {
+    const b = `${imageBase}/${lang}/images/${setId}/${num}/${vk}`;
+    prints[vk] = { label: null, img_low: qs.includes('low') ? b + '-low.webp' : null, img_high: qs.includes('high') ? b + '-high.webp' : null };
+  }
+  const cu = custom && custom.cards && custom.cards[c.id];
+  const cuVars = cu && (cu.printings || cu.variants);
+  if (cuVars) for (const [vk, label] of Object.entries(cuVars)) {
+    prints[vk] = { label, img_low: (prints[vk] || {}).img_low || null, img_high: (prints[vk] || {}).img_high || null };
+  }
+  let n = 0;
+  for (const [vk, p] of Object.entries(prints)) { _catPrinting.run(lang, c.id, vk, p.label, p.img_low, p.img_high); n++; }
+  return n;
+}
+
+/** Import the catalog from the LOCAL public/cdn tree (a build on this server). */
 function importCatalogToDb() {
   const imageBase = configCdnBase() || '/cdn';   // remote R2 URL, or this server's local path
   let langs = [];
@@ -713,41 +759,12 @@ function importCatalogToDb() {
   try {
     for (const lang of langs) {
       const index = readJSON(path.join(CDN_DIR, lang, 'index.json'), { sets: [] });
-      const qualities = Array.isArray(index.qualities) && index.qualities.length ? index.qualities : ['low'];
-      const hasHigh = qualities.includes('high');
+      const hasHigh = (Array.isArray(index.qualities) ? index.qualities : ['low']).includes('high');
       (index.sets || []).forEach((s, pos) => {
-        const official = (s.cardCount && (s.cardCount.official || s.cardCount.total)) || null;
-        _catSet.run(lang, s.id, s.name, s.releaseDate || null, s.logo ? `${imageBase}/${lang}/${s.logo}` : null, official, pos);
-        nSets++;
+        _upsertCatSet(lang, s, pos, imageBase); nSets++;
         const setData = readJSON(path.join(CDN_DIR, lang, 'sets', s.id + '.json'), null);
         if (!setData) return;
-        (setData.cards || []).forEach((c, ci) => {
-          const prefix = c.image ? `${imageBase}/${lang}/${c.image}` : null;
-          const variantsCsv = c.variants
-            ? (Object.entries(c.variants).filter(([, v]) => v).map(([k]) => k).join(',') || 'normal')
-            : 'normal';
-          _catCard.run(lang, c.id, s.id, String(c.localId ?? localIdOfCard(c.id)), c.name || c.id,
-            c.rarity || null, c.category || null, (c.dexId || []).join(',') || null, (c.types || []).join(',') || null,
-            c.hp || null, c.illustrator || null, variantsCsv,
-            prefix ? prefix + '/low.webp' : null, (prefix && hasHigh) ? prefix + '/high.webp' : null, ci);
-          nCards++;
-          // printings = per-variant image overrides (variantImages) ∪ custom labels (custom.json)
-          const prints = {};
-          const num = localIdOfCard(c.id);
-          for (const [vk, qs] of Object.entries(c.variantImages || {})) {
-            const b = `${imageBase}/${lang}/images/${s.id}/${num}/${vk}`;
-            prints[vk] = { label: null, img_low: qs.includes('low') ? b + '-low.webp' : null, img_high: qs.includes('high') ? b + '-high.webp' : null };
-          }
-          const cu = custom.cards && custom.cards[c.id];
-          const cuVars = cu && (cu.printings || cu.variants);
-          if (cuVars) for (const [vk, label] of Object.entries(cuVars)) {
-            prints[vk] = { label, img_low: (prints[vk] || {}).img_low || null, img_high: (prints[vk] || {}).img_high || null };
-          }
-          for (const [vk, p] of Object.entries(prints)) {
-            _catPrinting.run(lang, c.id, vk, p.label, p.img_low, p.img_high);
-            nPrint++;
-          }
-        });
+        (setData.cards || []).forEach((c, ci) => { nPrint += _upsertCatCard(lang, c, s.id, ci, imageBase, hasHigh, custom); nCards++; });
       });
     }
     db.exec('COMMIT');
@@ -756,6 +773,105 @@ function importCatalogToDb() {
     throw e;
   }
   return { sets: nSets, cards: nCards, printings: nPrint };
+}
+
+/** Import the catalog from the REMOTE master database (catalog.db on the
+ * bucket). The merge contract, in both directions:
+ *   - master rows (source='master') here are made to MATCH the master:
+ *     updated in place, hidden state included (master deletions propagate),
+ *     and rows the master no longer has are removed — but only within the
+ *     languages the master actually covers.
+ *   - rows this install created or edited itself (source='local') are NEVER
+ *     touched, so the master can't override local changes.
+ * Records the master's version (meta table) in settings for update checks.
+ * progressCb({ setsDone, setTotal, lang, setName }) drives the UI. */
+async function importCatalogFromRemote(base, progressCb) {
+  base = base.replace(/\/+$/, '');
+  const { DatabaseSync } = require('node:sqlite');
+
+  // 1) download the master catalog.db to a temp file next to our own DB
+  const res = await fetch(base + '/catalog.db');
+  if (!res.ok) { const e = new Error('HTTP ' + res.status + ' for catalog.db'); e.status = res.status; throw e; }
+  const tmp = path.join(DATA_DIR, `.catalog-pull-${process.pid}.db`);
+  fs.writeFileSync(tmp, Buffer.from(await res.arrayBuffer()));
+
+  let src, nSets = 0, nCards = 0, nPrint = 0, version = null;
+  try {
+    src = new DatabaseSync(tmp);
+    try { version = Number((src.prepare("SELECT value FROM meta WHERE key='version'").get() || {}).value) || null; } catch { /* pre-versioning master */ }
+
+    // 2) upsert every master row (including hidden ones — tombstones travel)
+    const sets = src.prepare('SELECT lang,id,name,release_date,logo,official_count,position,hidden FROM sets ORDER BY position').all();
+    const setTotal = sets.length;
+    const cardsOf = src.prepare('SELECT lang,id,set_id,local_id,name,rarity,category,dex_csv,types_csv,hp,illustrator,variants_csv,img_low,img_high,position,hidden FROM cards WHERE lang=? AND set_id=?');
+    const masterLangs = new Set(), seenSets = new Set(), seenCards = new Set(), seenPrints = new Set();
+    for (const s of sets) {
+      masterLangs.add(s.lang);
+      seenSets.add(s.lang + '\n' + s.id);
+      db.exec('BEGIN');
+      try {
+        _catSet.run(s.lang, s.id, s.name, s.release_date, s.logo, s.official_count, s.position, s.hidden ? 1 : 0);
+        for (const c of cardsOf.all(s.lang, s.id)) {
+          _catCard.run(c.lang, c.id, c.set_id, c.local_id, c.name, c.rarity, c.category, c.dex_csv, c.types_csv,
+            c.hp, c.illustrator, c.variants_csv, c.img_low, c.img_high, c.position, c.hidden ? 1 : 0);
+          seenCards.add(c.lang + '\n' + c.id);
+          nCards++;
+        }
+        db.exec('COMMIT');
+      } catch (e) { db.exec('ROLLBACK'); throw e; }
+      nSets++;
+      if (progressCb) progressCb({ setsDone: nSets, setTotal, lang: s.lang, setName: s.name });
+    }
+    // custom printings (labels / per-printing image overrides)
+    db.exec('BEGIN');
+    try {
+      for (const p of src.prepare('SELECT lang,card_id,variant,label,img_low,img_high FROM printings').all()) {
+        _catPrinting.run(p.lang, p.card_id, p.variant, p.label, p.img_low, p.img_high);
+        seenPrints.add(p.lang + '\n' + p.card_id + '\n' + p.variant);
+        nPrint++;
+      }
+      db.exec('COMMIT');
+    } catch (e) { db.exec('ROLLBACK'); throw e; }
+
+    // 3) deletion sweep: master-source rows the master no longer has are
+    //    removed — restricted to the master's own languages so a locally
+    //    built extra language is left alone. Local-source rows never sweep.
+    db.exec('BEGIN');
+    try {
+      for (const lang of masterLangs) {
+        for (const r of db.prepare("SELECT id FROM sets WHERE lang=? AND source='master'").all(lang))
+          if (!seenSets.has(lang + '\n' + r.id)) db.prepare("DELETE FROM sets WHERE lang=? AND id=? AND source='master'").run(lang, r.id);
+        for (const r of db.prepare("SELECT id FROM cards WHERE lang=? AND source='master'").all(lang))
+          if (!seenCards.has(lang + '\n' + r.id)) db.prepare("DELETE FROM cards WHERE lang=? AND id=? AND source='master'").run(lang, r.id);
+        for (const r of db.prepare("SELECT card_id, variant FROM printings WHERE lang=? AND source='master'").all(lang))
+          if (!seenPrints.has(lang + '\n' + r.card_id + '\n' + r.variant))
+            db.prepare("DELETE FROM printings WHERE lang=? AND card_id=? AND variant=? AND source='master'").run(lang, r.card_id, r.variant);
+      }
+      db.exec('COMMIT');
+    } catch (e) { db.exec('ROLLBACK'); throw e; }
+
+    // 4) remember which master version this install now mirrors
+    const st = loadSettings();
+    st.masterVersion = version || st.masterVersion || 1;
+    st.masterPulledAt = new Date().toISOString();
+    saveSettings(st);
+  } finally {
+    if (src) { try { src.close(); } catch { /* already closed */ } }
+    try { fs.rmSync(tmp, { force: true }); } catch { /* temp */ }
+  }
+  return { sets: nSets, cards: nCards, printings: nPrint, version };
+}
+
+/** Background job: pull the catalog from a remote database into this DB. */
+function startCatalogPull(base) {
+  build = { running: true, phase: 'import', startedAt: Date.now(), error: null, hashesOk: null, log: [] };
+  pushLog('Loading the card database from ' + base);
+  const progress = { startedAt: new Date().toISOString(), catalogPull: true, setsDone: 0, setTotal: 0, setName: null, done: false, error: null };
+  const write = (extra) => { Object.assign(progress, extra); try { writeJSONAtomic(PROGRESS_FILE, progress); } catch { /* cosmetic */ } };
+  write({});
+  importCatalogFromRemote(base, (p) => write(p))
+    .then((r) => { write({ done: true, finishedAt: new Date().toISOString() }); build.running = false; build.phase = null; build.hashesOk = true; pushLog(`Card database loaded: ${r.cards} cards, ${r.sets} sets`); })
+    .catch((e) => { build.running = false; build.phase = null; build.error = 'Loading the card database failed: ' + e.message + ' (safe to retry)'; write({ error: e.message }); });
 }
 
 const catalogStats = () => ({
@@ -924,6 +1040,11 @@ async function handleApi(req, res, pathname, ip, url) {
       localDbExists: dbExists(),
       mirroredAt: s.mirroredAt || null,
       images: imageCounts(),
+      catalogCards: catalogStats().cards,
+      remoteCatalog: configCdnBase() || null,
+      masterVersion: s.masterVersion || null,
+      masterPulledAt: s.masterPulledAt || null,
+      master: MASTER_MODE,
       canPublish: !READONLY && !!(process.env.R2_ACCESS_KEY_ID && process.env.R2_SECRET_ACCESS_KEY && process.env.R2_BUCKET),
     });
   }
@@ -961,7 +1082,46 @@ async function handleApi(req, res, pathname, ip, url) {
   }
   if (pathname === '/api/catalog/scan-index' && req.method === 'GET') {
     const lang = LANG_RE.test(url.searchParams.get('lang') || '') ? url.searchParams.get('lang') : 'en';
-    return sendJSON(res, 200, readJSON(path.join(CDN_DIR, lang, 'scan-index.json'), { cards: [] }));
+    const localFile = path.join(CDN_DIR, lang, 'scan-index.json');
+    if (fs.existsSync(localFile)) return sendJSON(res, 200, readJSON(localFile, { cards: [] }));
+    // No local scanner index (this install pulled the master rather than
+    // building locally) — fetch the published one from the bucket and cache
+    // it to disk so the scanner works on pulled-only installs too.
+    const base = configCdnBase();
+    if (base) {
+      try {
+        const r = await fetch(`${base}/${lang}/scan-index.json`);
+        if (r.ok) {
+          const data = await r.json();
+          try { fs.mkdirSync(path.dirname(localFile), { recursive: true }); writeJSONAtomic(localFile, data); } catch { /* cache is best-effort */ }
+          return sendJSON(res, 200, data);
+        }
+      } catch { /* fall through to empty */ }
+    }
+    return sendJSON(res, 200, { cards: [] });
+  }
+
+  // does the master have a newer database than this install? (cheap ping of
+  // catalog.json — no card data moves until the admin actually updates)
+  if (pathname === '/api/catalog/update-check' && req.method === 'GET') {
+    const base = configCdnBase();
+    if (!base) return sendJSON(res, 200, { configured: false });
+    const s = loadSettings();
+    const local = s.masterVersion || 0;
+    try {
+      const r = await fetch(base + '/catalog.json');
+      if (!r.ok) return sendJSON(res, 200, { configured: true, reachable: false, localVersion: local });
+      const m = await r.json();
+      const remote = Number(m.version) || 0;
+      return sendJSON(res, 200, {
+        configured: true, reachable: true,
+        localVersion: local, remoteVersion: remote,
+        behind: remote > local,
+        remoteCards: m.cards || null, remoteSets: m.sets || null,
+      });
+    } catch {
+      return sendJSON(res, 200, { configured: true, reachable: false, localVersion: local });
+    }
   }
 
   // admin: download all remote card images to this server, repointing rows local
@@ -986,6 +1146,20 @@ async function handleApi(req, res, pathname, ip, url) {
     } catch (e) {
       return sendJSON(res, 500, { error: 'Import failed: ' + e.message });
     }
+  }
+
+  // admin: pull the catalog from the remote published database (R2) into this DB.
+  // Used when there is no local JSON build to import from (the common case for a
+  // fresh self-hosted install that reads from a shared CDN).
+  if (pathname === '/api/catalog/pull' && req.method === 'POST') {
+    if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
+    const admin = authUser(req);
+    if (!admin || !isAdminUser(admin)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    if (build.running) return sendJSON(res, 409, { error: 'Another job is already running' });
+    const base = configCdnBase();
+    if (!base) return sendJSON(res, 400, { error: 'No remote database is configured (set cdnBase in public/config.js)' });
+    startCatalogPull(base);
+    return sendJSON(res, 200, { ok: true, started: true, source: base });
   }
 
   if (pathname === '/api/build-status' && req.method === 'GET') {
@@ -1298,6 +1472,14 @@ if (catalogStats().cards === 0 && dbExists()) {
 server.listen(PORT, HOST, () => {
   console.log(`Pokemon TCG Tracker running at http://localhost:${PORT}`);
   console.log(`Data directory: ${DATA_DIR}`);
+
+  // Fresh install with no local card build but a remote database configured
+  // (reads cards from a shared CDN): pull the catalog into the DB so cards show
+  // up without the admin having to click anything. Runs in the background.
+  if (!READONLY && catalogStats().cards === 0 && !dbExists() && configCdnBase() && !build.running) {
+    try { startCatalogPull(configCdnBase()); }
+    catch (e) { console.error('Auto-load from remote database failed to start: ' + e.message); }
+  }
 });
 
 // close the database cleanly on shutdown so SQLite checkpoints its WAL into

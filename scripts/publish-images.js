@@ -5,9 +5,12 @@
  * done with Node's crypto.
  *
  * Uploads everything under public/cdn/ (images, per-set data, indexes,
- * custom printings, languages) in exactly the layout the app expects —
- * point config.js `cdnBase` at the bucket's public URL and fresh installs
- * boot straight from the CDN with no local download. Idempotent:
+ * custom printings, languages) in exactly the layout the app expects, plus
+ * `catalog.db` — the master card database (a single SQLite file built from
+ * this server's DATA_DIR/ptcg.db, so it includes every edit made in the app)
+ * that fresh installs pull on boot. Point config.js `cdnBase` at the bucket's
+ * public URL and new installs load cards + images straight from R2 with no
+ * TCGdex download. Idempotent:
  * unchanged files (same MD5) are skipped, so re-running after new
  * downloads or admin uploads/printings only transfers what's new. By
  * default nothing remote is ever deleted; pass --prune to also delete
@@ -30,7 +33,9 @@
  *                 https://<R2_ACCOUNT_ID>.r2.cloudflarestorage.com;
  *                 also how tests point this at a mock)
  *   --langs en,fr publish only these languages (default: all found)
- *   --images-only skip data files (the pre-v3.7 behaviour)
+ *   --data-dir P  path to the server data dir holding ptcg.db (default ./data;
+ *                 or set DATA_DIR) — the source for the master catalog.db
+ *   --images-only skip data files + catalog.db (the pre-v3.7 behaviour)
  *   --prune       delete remote objects that don't exist locally.
  *                 Refused together with --langs/--images-only (a partial
  *                 local view would wrongly delete everything outside it).
@@ -40,6 +45,7 @@
 'use strict';
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 
@@ -192,6 +198,123 @@ const isImageKey = (key) => key.includes('/images/');
 
 const CONTENT_TYPES = { '.webp': 'image/webp', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg' };
 
+// ---------- master catalog database (catalog.db + catalog.json) ----------
+// The master database every install pulls is a single SQLite file holding just
+// the card data + R2 image locations. We build it from the MASTER workspace's
+// database (DATA_DIR/ptcg.db — see the README's "maintainer workspace" section;
+// the master is managed separately from any install), then upload it as
+// `catalog.db` together with a tiny `catalog.json` manifest:
+//   { version, contentHash, cards, sets, printings }
+// Installs ping catalog.json (one small request) to see whether they are
+// behind, and pull catalog.db only when they are. The version is a counter
+// that bumps automatically whenever the exported content actually changes.
+// Everything in the export is normalized to source='master' (the master IS
+// the authority), and hidden rows ARE included so deletions/tombstones
+// propagate to installs. Image locations are rewritten to absolute R2 URLs.
+const DATA_DIR = path.resolve(process.env.DATA_DIR || opt('data-dir', path.join(__dirname, '..', 'data')));
+const CATALOG_SCHEMA = `
+  CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+  CREATE TABLE sets (
+    lang TEXT NOT NULL DEFAULT 'en', id TEXT NOT NULL, name TEXT NOT NULL,
+    release_date TEXT, logo TEXT, official_count INTEGER,
+    position INTEGER NOT NULL DEFAULT 0, source TEXT NOT NULL DEFAULT 'master',
+    hidden INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (lang, id));
+  CREATE TABLE cards (
+    lang TEXT NOT NULL DEFAULT 'en', id TEXT NOT NULL, set_id TEXT NOT NULL,
+    local_id TEXT NOT NULL, name TEXT NOT NULL, rarity TEXT, category TEXT,
+    dex_csv TEXT, types_csv TEXT, hp INTEGER, illustrator TEXT, variants_csv TEXT,
+    img_low TEXT, img_high TEXT, position INTEGER NOT NULL DEFAULT 0,
+    source TEXT NOT NULL DEFAULT 'master', hidden INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (lang, id));
+  CREATE INDEX idx_cards_set ON cards (lang, set_id);
+  CREATE TABLE printings (
+    lang TEXT NOT NULL DEFAULT 'en', card_id TEXT NOT NULL, variant TEXT NOT NULL,
+    label TEXT, img_low TEXT, img_high TEXT, source TEXT NOT NULL DEFAULT 'master',
+    PRIMARY KEY (lang, card_id, variant));
+`;
+
+/** The R2 public base URL (config.js cdnBase) — used to make image locations
+ * absolute. Local '/cdn/...' paths only work on the machine that downloaded
+ * them, so they must be rewritten before other installs can use them. */
+function publicCdnBase() {
+  const envBase = (process.env.PTCG_CDN_BASE || '').trim();
+  if (/^https?:\/\//.test(envBase)) return envBase.replace(/\/+$/, '');
+  try {
+    const m = fs.readFileSync(path.join(__dirname, '..', 'public', 'config.js'), 'utf8')
+      .match(/cdnBase:\s*['"]([^'"]+)['"]/);
+    return m && /^https?:\/\//.test(m[1]) ? m[1].replace(/\/+$/, '') : null;
+  } catch { return null; }
+}
+
+/** Build catalog.db from DATA_DIR/ptcg.db. Returns
+ * { path, cards, sets, printings, contentHash } or null.
+ * The contentHash covers every exported row (deterministic order), so two
+ * exports of the same data always hash identically — the version and
+ * timestamp live only in `meta` (stamped later via stampCatalogVersion once
+ * the bump decision is made) and don't affect it. */
+function buildCatalogDb() {
+  const { DatabaseSync } = require('node:sqlite');
+  const srcPath = path.join(DATA_DIR, 'ptcg.db');
+  if (!fs.existsSync(srcPath)) {
+    console.warn(`No master database at ${srcPath} — skipping catalog.db (set DATA_DIR or --data-dir to the maintainer workspace).`);
+    return null;
+  }
+  const cdnBase = publicCdnBase();
+  const abs = (u) => (u && u.startsWith('/cdn/') && cdnBase) ? cdnBase + u.slice(4) : u;
+  if (!cdnBase) console.warn('config.js cdnBase is not an http(s) URL — image locations will be published as-is.');
+
+  const outPath = path.join(os.tmpdir(), `ptcg-catalog-${process.pid}.db`);
+  fs.rmSync(outPath, { force: true });
+  const src = new DatabaseSync(srcPath);
+  const out = new DatabaseSync(outPath);
+  out.exec('PRAGMA journal_mode=DELETE');   // single self-contained file, no -wal sidecar
+  out.exec(CATALOG_SCHEMA);
+  out.exec('BEGIN');
+  const hasher = crypto.createHash('sha256');
+  const feed = (row) => hasher.update(JSON.stringify(row) + '\n');
+  // stable row order → identical hash for identical data (idempotent re-runs).
+  // hidden rows are INCLUDED (deletions must reach installs); source is
+  // normalized to 'master' — whatever it was in the workspace, published
+  // content IS the master truth.
+  const insSet = out.prepare("INSERT INTO sets (lang,id,name,release_date,logo,official_count,position,source,hidden) VALUES (?,?,?,?,?,?,?,'master',?)");
+  let nSets = 0;
+  for (const s of src.prepare('SELECT * FROM sets ORDER BY lang,position,id').all()) {
+    const row = [s.lang, s.id, s.name, s.release_date, abs(s.logo), s.official_count, s.position, s.hidden ? 1 : 0];
+    insSet.run(...row); feed(row); nSets++;
+  }
+  const insCard = out.prepare("INSERT INTO cards (lang,id,set_id,local_id,name,rarity,category,dex_csv,types_csv,hp,illustrator,variants_csv,img_low,img_high,position,source,hidden) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'master',?)");
+  let nCards = 0;
+  for (const c of src.prepare('SELECT * FROM cards ORDER BY lang,set_id,position,id').all()) {
+    const row = [c.lang, c.id, c.set_id, c.local_id, c.name, c.rarity, c.category, c.dex_csv, c.types_csv,
+      c.hp, c.illustrator, c.variants_csv, abs(c.img_low), abs(c.img_high), c.position, c.hidden ? 1 : 0];
+    insCard.run(...row); feed(row); nCards++;
+  }
+  const insPrint = out.prepare("INSERT INTO printings (lang,card_id,variant,label,img_low,img_high,source) VALUES (?,?,?,?,?,?,'master')");
+  let nPrints = 0;
+  for (const p of src.prepare('SELECT * FROM printings ORDER BY lang,card_id,variant').all()) {
+    const row = [p.lang, p.card_id, p.variant, p.label, abs(p.img_low), abs(p.img_high)];
+    insPrint.run(...row); feed(row); nPrints++;
+  }
+  const contentHash = hasher.digest('hex');
+  const insMeta = out.prepare('INSERT INTO meta (key, value) VALUES (?,?)');
+  insMeta.run('schema', '1');
+  insMeta.run('contentHash', contentHash);
+  out.exec('COMMIT');
+  src.close();
+  out.close();
+  return { path: outPath, cards: nCards, sets: nSets, printings: nPrints, contentHash };
+}
+
+/** Stamp the decided version + timestamp into an already-built catalog.db. */
+function stampCatalogVersion(dbPath, version) {
+  const { DatabaseSync } = require('node:sqlite');
+  const d = new DatabaseSync(dbPath);
+  const ins = d.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?,?)');
+  ins.run('version', String(version));
+  ins.run('publishedAt', new Date().toISOString());
+  d.close();
+}
+
 async function pool(items, size, worker) {
   let next = 0;
   async function run() {
@@ -221,7 +344,29 @@ async function pool(items, size, worker) {
   }
   console.log(`To upload (new or changed): ${toUpload.length}`);
 
+  // The master catalog database — a single SQLite file installs pull, plus a
+  // tiny catalog.json manifest installs ping to see whether they're behind.
+  // Version bumps automatically when (and only when) the content hash changes.
+  let catalog = null, catalogChanged = false, catalogVersion = 0;
+  if (!IMAGES_ONLY) {
+    catalog = buildCatalogDb();
+    if (catalog) {
+      let remoteManifest = null;
+      try {
+        const r = await signedFetch('GET', 'catalog.json');
+        if (r.ok) remoteManifest = JSON.parse(await r.text());
+      } catch { /* no manifest yet */ }
+      const remoteVersion = (remoteManifest && Number(remoteManifest.version)) || 0;
+      catalogChanged = !remoteManifest || remoteManifest.contentHash !== catalog.contentHash;
+      catalogVersion = catalogChanged ? remoteVersion + 1 : remoteVersion;
+      if (catalogChanged) stampCatalogVersion(catalog.path, catalogVersion);
+      console.log(`Master catalog.db: ${catalog.cards} cards — ` +
+        (catalogChanged ? `changed, will publish as version ${catalogVersion}.` : `unchanged (version ${catalogVersion}).`));
+    }
+  }
+
   const localSet = new Set(keys);
+  if (catalog) { localSet.add('catalog.db'); localSet.add('catalog.json'); }   // never prune the master database
   const stale = [...remote.keys()].filter((k) => !localSet.has(k));
   if (PRUNE) console.log(`To delete (remote only): ${stale.length}`);
   else if (stale.length && !ONLY_LANGS && !IMAGES_ONLY) {
@@ -231,6 +376,8 @@ async function pool(items, size, worker) {
   if (DRY) {
     toUpload.slice(0, 20).forEach((k) => console.log('  would upload: ' + k));
     if (toUpload.length > 20) console.log(`  … and ${toUpload.length - 20} more`);
+    if (catalogChanged) console.log('  would upload: catalog.db (master database)');
+    if (catalog) fs.rmSync(catalog.path, { force: true });
     if (PRUNE) {
       stale.slice(0, 20).forEach((k) => console.log('  would delete: ' + k));
       if (stale.length > 20) console.log(`  … and ${stale.length - 20} more`);
@@ -259,6 +406,35 @@ async function pool(items, size, worker) {
       console.warn(`  ! failed: ${key} (${e.message})`);
     }
   });
+
+  // upload the master catalog database + manifest (small; short cache so
+  // update checks and pulls see new versions quickly)
+  if (catalog) {
+    if (catalogChanged) {
+      try {
+        const res = await signedFetch('PUT', 'catalog.db', {
+          body: fs.readFileSync(catalog.path),
+          headers: { 'content-type': 'application/octet-stream', 'cache-control': 'public, max-age=60' },
+        });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const manifest = JSON.stringify({
+          version: catalogVersion, contentHash: catalog.contentHash,
+          cards: catalog.cards, sets: catalog.sets, printings: catalog.printings,
+        });
+        const mres = await signedFetch('PUT', 'catalog.json', {
+          body: manifest,
+          headers: { 'content-type': 'application/json', 'cache-control': 'public, max-age=60' },
+        });
+        if (!mres.ok) throw new Error('manifest HTTP ' + mres.status);
+        done += 2;
+        console.log(`  uploaded catalog.db + catalog.json (master version ${catalogVersion})`);
+      } catch (e) {
+        failed++;
+        console.warn(`  ! failed: catalog.db/catalog.json (${e.message})`);
+      }
+    }
+    fs.rmSync(catalog.path, { force: true });
+  }
 
   let deleted = 0, deleteFailed = 0;
   if (PRUNE && stale.length) {

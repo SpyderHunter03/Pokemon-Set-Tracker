@@ -23,8 +23,19 @@ http.createServer((req, res) => {
 
   if (req.method === 'POST' && url.pathname === '/__seed') {
     const k = url.searchParams.get('key') || 'stale/object.webp';
-    store.set(k, { md5: crypto.createHash('md5').update(k).digest('hex'), size: k.length });
+    store.set(k, { md5: crypto.createHash('md5').update(k).digest('hex'), size: k.length, body: Buffer.from(k) });
     res.writeHead(200); return res.end();
+  }
+
+  // Public object read — like an R2 public bucket (r2.dev URL): unauthenticated
+  // GET of /bucket/key returns the stored bytes. Lets the app pull catalog.db
+  // and images the same way a real deployment does.
+  if (req.method === 'GET' && parts.length >= 2 && url.searchParams.get('list-type') !== '2') {
+    const k = decodeURIComponent(parts.slice(1).join('/'));
+    const o = store.get(k);
+    if (!o) { res.writeHead(404); return res.end(); }
+    res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': o.body.length });
+    return res.end(o.body);
   }
 
   if (!req.headers.authorization || !req.headers.authorization.startsWith('AWS4-HMAC-SHA256')) {
@@ -39,7 +50,7 @@ http.createServer((req, res) => {
     req.on('data', (c) => chunks.push(c));
     req.on('end', () => {
       const body = Buffer.concat(chunks);
-      store.set(key, { md5: crypto.createHash('md5').update(body).digest('hex'), size: body.length });
+      store.set(key, { md5: crypto.createHash('md5').update(body).digest('hex'), size: body.length, body });
       res.writeHead(200, { ETag: '"' + store.get(key).md5 + '"' });
       res.end();
     });

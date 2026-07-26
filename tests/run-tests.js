@@ -269,7 +269,8 @@ function fail(msg) {
     mDone && mDone.progress.imagesSkipped > 0 && mDone.progress.imageFailures === 0);
   check('mirror switches the install to the local copy', mCfg.imageSource === 'local' && mCfg.localDbExists === true);
 
-  console.log('=== 8/8 R2 image publisher (against mock S3) ===');
+  console.log('=== 8/8 master catalog.db publish → pull round-trip (against mock S3) ===');
+  const os = require('os');
   start('node', ['tests/mock-s3.js']);
   await waitForPort(3998).catch((e) => fail(e.message));
   const r2env = {
@@ -277,6 +278,10 @@ function fail(msg) {
     R2_ACCESS_KEY_ID: 'testkey',
     R2_SECRET_ACCESS_KEY: 'testsecret',
     R2_BUCKET: 'cards',
+    // build catalog.db from :3111's database (has an admin-added custom printing)
+    // and rewrite image locations to the bucket's public URL
+    DATA_DIR: path.join(ROOT, '.test-data'),
+    PTCG_CDN_BASE: 'http://localhost:3998/cards',
   };
   const pub1 = spawnSync('node', ['scripts/publish-images.js'], { cwd: ROOT, env: { ...process.env, ...r2env }, encoding: 'utf8' });
   const out1 = (pub1.stdout || '') + (pub1.stderr || '');
@@ -304,12 +309,107 @@ function fail(msg) {
   const publishOk = pub1.status === 0 && uploaded > 0 && storeInfo.count === uploaded && pub2.status === 0 && /Uploaded 0, skipped/.test(out2) &&
     pub3.status === 0 && pubGuard.status === 1 && pub4.status === 0 && /deleted 1/.test(out4) && storeAfter.count === uploaded;
 
+  // ---- the master catalog.db exists on the bucket and is a real SQLite file ----
+  const catRes = await fetch('http://localhost:3998/cards/catalog.db');
+  const catBuf = Buffer.from(await catRes.arrayBuffer());
+  check('publisher uploads a master catalog.db (a real SQLite database)',
+    catRes.ok && catBuf.length > 1000 && catBuf.slice(0, 15).toString() === 'SQLite format 3');
+
+  // ---- a fresh install (no local build) pulls the master catalog.db on boot ----
+  // Copy the app to an isolated dir so dbExists() is false — the real
+  // non-Proxmox / Proxmox-LXC situation. It points at the bucket's public URL.
+  const pullRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ptcg-pull-'));
+  for (const item of ['server.js', 'public', 'scripts', 'package.json']) {
+    fs.cpSync(path.join(ROOT, item), path.join(pullRoot, item), {
+      recursive: true,
+      filter: (s) => !/[/\\](cdn|node_modules|\.git|\.test-data)/.test(s),
+    });
+  }
+  const pullChild = spawn('node', ['server.js'], {
+    cwd: pullRoot,
+    env: { ...process.env, PORT: '3117', DATA_DIR: path.join(pullRoot, 'data'), PTCG_CDN_BASE: 'http://localhost:3998/cards' },
+    stdio: 'inherit',
+  });
+  children.push(pullChild);
+  await waitForPort(3117).catch((e) => fail(e.message));
+  let pullStats = { cards: 0, sets: 0 };
+  for (let i = 0; i < 240 && pullStats.cards === 0; i++) {
+    const st = await jfetch('http://localhost:3117/api/build-status').catch(() => ({}));
+    pullStats = await jfetch('http://localhost:3117/api/catalog/stats').catch(() => pullStats);
+    if (pullStats.cards === 0 && st && !st.running && st.error) fail('catalog pull errored: ' + st.error);
+    if (pullStats.cards === 0) await new Promise((r) => setTimeout(r, 300));
+  }
+  const pullCfg = await jfetch('http://localhost:3117/api/app-config');
+  const pullSet = await jfetch('http://localhost:3117/api/catalog/set?lang=en&id=base1');
+  const pullCard = (pullSet.cards || []).find((c) => c.id === 'base1-4');
+  check('pull: fresh install reports its remote database', pullCfg.remoteCatalog === 'http://localhost:3998/cards');
+  check('pull: boot auto-loads the master catalog', pullStats.cards > 10 && pullStats.sets >= 2);
+  check('pull: card images point at the bucket (R2), not a local /cdn path',
+    pullCard && pullCard.img && /^http:\/\/localhost:3998\/cards\//.test(pullCard.img.low || ''));
+  check('pull: the admin’s custom printing propagated through the master',
+    pullCard && pullCard.printings && pullCard.printings['cracked-ice-holo'] === 'Cracked Ice Holo' &&
+    pullCard.variantImages && /^http:\/\/localhost:3998\/cards\//.test((pullCard.variantImages['cracked-ice-holo'] || {}).low || ''));
+
+  // ---- versioning: install recorded v1, update-check agrees it's current ----
+  const catManifest = await jfetch('http://localhost:3998/cards/catalog.json');
+  check('publisher writes catalog.json manifest (version 1)', catManifest.version === 1 && !!catManifest.contentHash);
+  check('pull: install recorded the master version', pullCfg.masterVersion === 1);
+  const chk1 = await jfetch('http://localhost:3117/api/catalog/update-check');
+  check('update-check: up to date after the pull', chk1.configured && chk1.reachable && chk1.behind === false && chk1.localVersion === 1);
+
+  // ---- scanner works on a pulled-only install (index fetched from bucket) ----
+  const pulledScan = await jfetch('http://localhost:3117/api/catalog/scan-index?lang=en');
+  check('pull: scanner index served from the bucket on a pulled-only install',
+    Array.isArray(pulledScan.cards) && pulledScan.cards.length > 0);
+
+  // ---- master v2: local edit survives, master deletion propagates ----
+  // the pulled install makes a LOCAL edit (its own printing on base1-58)…
+  const pReg = await jfetch('http://localhost:3117/api/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'pulladmin', password: 'password123' }) });
+  const pAuth = { 'Content-Type': 'application/json', Authorization: 'Bearer ' + pReg.token };
+  await jfetch('http://localhost:3117/api/custom-variant', { method: 'POST', headers: pAuth, body: JSON.stringify({ cardId: 'base1-58', label: 'My Local Promo' }) });
+  // …meanwhile the MASTER hides one card (a deletion) and republishes
+  {
+    const { DatabaseSync } = require('node:sqlite');
+    const mdb = new DatabaseSync(path.join(ROOT, '.test-data', 'ptcg.db'));
+    mdb.exec("UPDATE cards SET hidden = 1 WHERE lang = 'en' AND id = 'base1-102'");
+    mdb.close();
+  }
+  const pub5 = spawnSync('node', ['scripts/publish-images.js'], { cwd: ROOT, env: { ...process.env, ...r2env }, encoding: 'utf8' });
+  const out5 = (pub5.stdout || '') + (pub5.stderr || '');
+  check('publisher bumps the version when master content changes', pub5.status === 0 && /version 2/.test(out5));
+  const chk2 = await jfetch('http://localhost:3117/api/catalog/update-check');
+  check('update-check: install reports it is behind (v1 → v2)', chk2.behind === true && chk2.remoteVersion === 2);
+  // the install updates via the admin endpoint (what the app button calls)
+  await jfetch('http://localhost:3117/api/catalog/pull', { method: 'POST', headers: pAuth, body: '{}' });
+  let upDone = null;
+  for (let i = 0; i < 120 && !upDone; i++) {
+    const st = await jfetch('http://localhost:3117/api/build-status');
+    if (!st.running) upDone = st; else await new Promise((r) => setTimeout(r, 300));
+  }
+  const pullCfg2 = await jfetch('http://localhost:3117/api/app-config');
+  const pullSet2 = await jfetch('http://localhost:3117/api/catalog/set?lang=en&id=base1');
+  const gone = (pullSet2.cards || []).find((c) => c.id === 'base1-102');
+  const pika = (pullSet2.cards || []).find((c) => c.id === 'base1-58');
+  const chk3 = await jfetch('http://localhost:3117/api/catalog/update-check');
+  check('update: install moved to master v2', pullCfg2.masterVersion === 2 && chk3.behind === false);
+  check('update: master deletion propagated (hidden card disappeared)', upDone && !upDone.error && !gone);
+  check('update: the install’s own local printing SURVIVED the master update',
+    pika && pika.printings && pika.printings['my-local-promo'] === 'My Local Promo');
+
+  const pullOk = catRes.ok && pullCfg.remoteCatalog === 'http://localhost:3998/cards' && pullStats.cards > 10 &&
+    pullCard && pullCard.printings && pullCard.printings['cracked-ice-holo'] === 'Cracked Ice Holo' &&
+    catManifest.version === 1 && chk2.behind === true && pullCfg2.masterVersion === 2 && !gone &&
+    !!(pika && pika.printings && pika.printings['my-local-promo']);
+  try { pullChild.kill(); } catch { /* gone */ }
+  try { fs.rmSync(pullRoot, { recursive: true, force: true }); } catch { /* best effort */ }
+
   cleanup();
   for (const d of ['.test-data', '.test-data-ro', '.test-data-mirror', '.test-data-ov', '.test-data-mig']) {
     fs.rmSync(path.join(ROOT, d), { recursive: true, force: true });
   }
   if (suite.status !== 0) { console.error('\nBrowser suite failed.'); process.exit(1); }
   if (!publishOk) { console.error('\nPublisher checks failed.'); process.exit(1); }
+  if (!pullOk) { console.error('\nMaster catalog.db pull round-trip failed.'); process.exit(1); }
   if (stageFails) { console.error(`\n${stageFails} importer/read-only/mirror check(s) failed.`); process.exit(1); }
 
   console.log('\nAll stages completed.');

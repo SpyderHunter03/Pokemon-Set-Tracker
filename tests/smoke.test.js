@@ -211,6 +211,8 @@ const { chromium } = require('playwright');
   // ---- debug page ----
   await page.goto('http://localhost:3111/#/debug');
   await page.waitForFunction(() => document.getElementById('view').textContent.includes('Cards in database'));
+  // the endpoint probes render asynchronously after the stats line — wait for them
+  await page.waitForFunction(() => (document.getElementById('view').textContent.match(/OK \(200\)/g) || []).length >= 3);
   const debugText = await page.textContent('#view');
   check('debug probes all green', (debugText.match(/OK \(200\)/g) || []).length >= 3);
   check('debug reports cards in the database', /Cards in database/.test(debugText) && !/Cards in database\D*\b0\b/.test(debugText));

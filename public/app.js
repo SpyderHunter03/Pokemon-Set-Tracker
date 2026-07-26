@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.14.0';
+const APP_VERSION = '3.16.0';
 
 /* ============================================================
  * Storage helpers
@@ -763,6 +763,11 @@ async function startDatabaseBuild() {
   return apiCall('build-data', { method: 'POST', body: JSON.stringify({}) });
 }
 
+// Pull the catalog from the configured remote database (R2) into this server's DB.
+async function startCatalogPull() {
+  return apiCall('catalog/pull', { method: 'POST', body: JSON.stringify({}) });
+}
+
 /** Live progress element; polls until the build finishes, then calls onDone. */
 function buildProgressView(onDone) {
   const barFill = h('div', {});
@@ -781,6 +786,9 @@ function buildProgressView(onDone) {
       if (status.phase === 'hashes') {
         line1.textContent = 'Building the card scanner index…';
         line2.textContent = 'almost done';
+      } else if (status.phase === 'import') {
+        line1.textContent = `Loading cards from your database: ${p.setsDone || 0} / ${p.setTotal || '…'} sets`;
+        line2.textContent = p.setName ? `now: ${p.setName}` : 'images stay on your CDN — this is quick';
       } else {
         line1.textContent = `Downloading sets: ${p.setsDone || 0} / ${p.setTotal || '…'}${p.langCount > 1 ? `  (language ${(p.langIndex || 0) + 1}/${p.langCount})` : ''}`;
         line2.textContent = `${(p.imagesDownloaded || 0).toLocaleString()} images downloaded${p.setName ? ` · now: ${p.setName}` : ''}`;
@@ -821,6 +829,31 @@ async function renderBootstrap() {
 
   if (status && status.running) {
     showProgress();
+  } else if (appConfig.remoteCatalog) {
+    // A shared card database (CDN) is configured — the fast path is to pull the
+    // catalog from it (card data into this DB; images stay on the CDN). No need
+    // to download hundreds of MB from TCGdex.
+    const buildFromSource = h('button', { class: 'btn ghost small', style: 'margin-top:10px', onclick: async (e) => {
+      e.target.disabled = true;
+      try { await startDatabaseBuild(); showProgress(); }
+      catch (err) { e.target.disabled = false; toast(err.message); }
+    } }, 'Or build a full local database from TCGdex');
+    panel.replaceChildren(
+      h('h2', {}, 'Welcome! Let’s load your cards'),
+      h('p', { class: 'muted' }, 'This tracker reads its cards from a shared card database. Load the catalog into this server and you’re ready — card images are served straight from that database.'),
+      h('button', { class: 'btn', style: 'margin-top:8px', onclick: async (e) => {
+        e.target.disabled = true;
+        try {
+          await startCatalogPull();
+          showProgress();
+        } catch (err) {
+          e.target.disabled = false;
+          toast(err.message);
+        }
+      } }, '⬇️ Load cards from the database'),
+      h('p', { class: 'muted small', style: 'margin-top:16px' }, 'Prefer to host every image on this server instead? You can download the full database later from the Administration panel.'),
+      buildFromSource,
+    );
   } else {
     panel.replaceChildren(
       h('h2', {}, 'Welcome! Let’s get your cards'),
@@ -1506,6 +1539,11 @@ async function renderAdminArea() {
   const content = h('div', {});
   area.append(h('hr'), h('h3', {}, 'Administration'), content);
 
+  if (appConfig.master) {
+    area.insertBefore(h('p', { class: 'muted small', style: 'border:1px solid var(--owned); border-radius:8px; padding:8px 10px' },
+      '🛠️ Master curation workspace — edits made here become the master database when you publish (scripts/publish-images.js). This is not a personal install.'), content);
+  }
+
   if (appConfig.readonly) {
     content.replaceChildren(h('p', { class: 'muted small' },
       'This server runs in read-only mode (PTCG_READONLY): the card database is managed centrally and cannot be changed from the app.'));
@@ -1527,8 +1565,40 @@ async function renderAdminArea() {
     let stats = {};
     try { stats = await catGet('stats'); } catch { /* ignore */ }
     const img = appConfig.images || {};   // { local, remote }
+
+    // master update check: ping the tiny catalog.json manifest and offer a
+    // data-only update when this install is behind (no images move — they
+    // stay wherever they are, on the CDN or already downloaded locally)
+    const updateArea = h('div', {});
+    if (appConfig.remoteCatalog) {
+      updateArea.append(h('p', { class: 'muted small' }, 'Checking the master database for updates…'));
+      (async () => {
+        let chk = null;
+        try { chk = await catGet('update-check'); } catch { /* offline */ }
+        if (!chk || !chk.configured) { updateArea.replaceChildren(); return; }
+        if (!chk.reachable) {
+          updateArea.replaceChildren(h('p', { class: 'muted small' }, 'Master database not reachable right now — update check skipped.'));
+        } else if (chk.behind) {
+          updateArea.replaceChildren(
+            h('p', { class: 'muted small' }, `A newer master database is available (you have v${chk.localVersion}, master is v${chk.remoteVersion}).`),
+            h('div', { class: 'row', style: 'margin-bottom:12px' },
+              h('button', { class: 'btn small', onclick: async (e) => {
+                e.target.disabled = true;
+                try { await startCatalogPull(); renderControls(); }
+                catch (err) { e.target.disabled = false; toast(err.message); }
+              } }, `⬇️ Update card database (v${chk.localVersion} → v${chk.remoteVersion})`),
+            ),
+          );
+        } else {
+          updateArea.replaceChildren(h('p', { class: 'muted small' },
+            `Card database is up to date with the master (v${chk.localVersion || chk.remoteVersion}).`));
+        }
+      })();
+    }
+
     content.replaceChildren(
       h('p', { class: 'muted small' }, `Database: ${stats.cards || 0} cards, ${stats.sets || 0} sets, ${stats.printings || 0} custom printings.`),
+      updateArea,
       // update the card catalogue from TCGdex
       h('div', { class: 'row', style: 'margin-bottom:12px' },
         h('button', { class: 'btn small', onclick: async (e) => {

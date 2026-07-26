@@ -4,7 +4,9 @@
 
 A lightweight, self-hostable web app (PWA) for tracking which Pokémon cards you own — with card images, per-variant tracking (holo, reverse, 1st edition…), a Pokémon-by-Pokémon view, multi-language card data, set-completion progress, and an offline card scanner.
 
-**Everything is self-hosted.** A one-time downloader script builds a static card database (JSON + images) that you host yourself — on the same server as the app, or on any CDN/static host. At runtime the app talks only to *your* server: no third-party APIs, ever. Sets are loaded lazily, so opening the app doesn't download the whole database — just the sets you actually view.
+**Everything is self-hosted.** At runtime the app talks only to *your* server — no third-party APIs, ever. Each install keeps its cards in a local SQLite database and the app reads from that.
+
+**How new installs get their cards — the master database.** You host one **master card database** (a single `catalog.db` SQLite file, plus the card images) on cheap object storage such as Cloudflare R2. Every install — your public site, a friend's Proxmox box, anyone's own server — pulls that master on first boot and ends up with an identical copy of all the cards, image locations, and any edits you've published. Nobody has to run the slow TCGdex download; they just pull your master. See [How the card database works](#how-the-card-database-works) below.
 
 ## Features
 
@@ -23,9 +25,130 @@ A lightweight, self-hostable web app (PWA) for tracking which Pokémon cards you
 - **Works offline** — installs as an app on your phone; visited sets and images are cached.
 - **Your data, three ways** — saved on-device automatically; JSON export/import backups; optional accounts + cloud sync via the bundled server.
 
-## Setup
+## How the card database works
 
-Requires Node.js 18+. The server has **zero dependencies**; only the optional scanner index needs one package.
+There are two roles, and they are deliberately kept apart:
+
+- **The maintainer workspace** manages the one authoritative copy of the card data. It is *not* a personal install — it's a dedicated workbench (see [The maintainer workspace](#the-maintainer-workspace) below) where the TCGdex download runs, edits are made (add printings, upload images, repoint pictures), and from which the master is **published** to object storage (Cloudflare R2 or any S3-compatible bucket). The master is a single file, `catalog.db`, holding only card information and the R2 locations of the images, plus a tiny `catalog.json` manifest carrying the **master version number**.
+- **Every install** (public site, Proxmox box, anyone's own server) is a **consumer**: on first boot it downloads `catalog.db` and loads it into its own local SQLite database, ending up an exact duplicate of the master — cards, image locations, and all published edits.
+
+**Versioning and updates.** Every publish that actually changes the data bumps the master version automatically. Installs check the version with one tiny request (`catalog.json`) — the admin panel shows whether you're up to date, and when you're behind, an **Update card database (vX → vY)** button pulls just the card data. Updating never re-downloads images: image files stay wherever they already are (on the bucket, or on your server if you used "Download all images"). Those are two independent things — keeping card *data* current, and choosing where *images* are served from.
+
+**The merge contract.** Updates flow strictly one way, master → installs, with two guarantees:
+
+- Nothing an install changes locally ever reaches the master — publishing only ever happens from the maintainer workspace.
+- The master never overrides an install's own changes. Every row carries a source marker: rows that came from the master are updated (and deleted) to match the master on every pull, while rows the install created or edited itself are never touched.
+
+Deletions propagate too: if a card or set is removed from the master, installs drop it on their next update (their own local additions are exempt).
+
+You point an install at a master by setting `cdnBase` in `public/config.js` (or the `PTCG_CDN_BASE` environment variable) to the bucket's public URL:
+
+```js
+self.PTCG_CONFIG = { cdnBase: 'https://pub-xxxx.r2.dev', defaultLanguage: 'en' };
+```
+
+The repository already ships with `cdnBase` pointing at the project's hosted master, so a fresh install pulls a full, ready-to-use card database with no configuration. Change it to your own bucket if you host your own master.
+
+## Installing
+
+### 1. Self-hosting on Proxmox (Helper-Scripts)
+
+Run the community Helper-Scripts one-liner (see **[DEPLOYMENT.md](DEPLOYMENT.md)**). It creates an LXC, installs the app as a service, and on first boot the app pulls the master database from the configured `cdnBase` — so the container comes up already showing every card. Nothing else to do.
+
+### 2. Installing on any other server (Docker)
+
+For a public site or any non-Proxmox server, Docker is the simplest path. Requires Docker + Docker Compose.
+
+```bash
+git clone https://github.com/SpyderHunter03/Pokemon-Set-Tracker.git
+cd Pokemon-Set-Tracker
+docker compose up -d
+# the app is now on http://<server>:3000
+```
+
+On first boot it pulls the master database from the `cdnBase` in `public/config.js` and loads every card. To point at *your own* master instead of the default, edit `public/config.js` before `up`, or set the environment variable in `docker-compose.yml`:
+
+```yaml
+    environment:
+      - PTCG_CDN_BASE=https://pub-xxxx.r2.dev   # your bucket's public URL
+```
+
+The SQLite database, accounts and synced collections live in a mounted `./data` volume — back that folder up and you've backed up everything user-specific (the cards themselves always come from the master).
+
+### 3. Installing on any other server (bare Node)
+
+No Docker? The server has zero dependencies and needs only Node.js 22+.
+
+```bash
+git clone https://github.com/SpyderHunter03/Pokemon-Set-Tracker.git
+cd Pokemon-Set-Tracker
+node server.js          # http://localhost:3000
+```
+
+On first boot it pulls the master from `cdnBase`. To run it as a background service, a minimal systemd unit:
+
+```ini
+# /etc/systemd/system/ptcg.service
+[Unit]
+Description=Pokemon TCG Tracker
+After=network.target
+
+[Service]
+WorkingDirectory=/opt/Pokemon-Set-Tracker
+ExecStart=/usr/bin/node server.js
+Environment=PORT=3000
+Environment=DATA_DIR=/opt/Pokemon-Set-Tracker/data
+# optional: point at your own master instead of the committed default
+# Environment=PTCG_CDN_BASE=https://pub-xxxx.r2.dev
+Restart=on-failure
+User=www-data
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl enable --now ptcg
+```
+
+> **Phones need HTTPS** for install, offline mode, and live camera scanning (`localhost` is exempt). Put a reverse proxy with automatic HTTPS (Caddy is the easiest) in front of `node server.js`.
+
+If an install ever comes up with no cards (for example the master wasn't reachable at first boot), the welcome screen has a **Load cards from the database** button — it pulls the master on demand. Once cards are loaded, the admin **Administration** panel checks the master version automatically and offers **Update card database** whenever a newer master has been published.
+
+## The maintainer workspace
+
+Skip this entire section if you're happy pulling the project's default master — it's only for running your own.
+
+The master database is managed **entirely separately from any install**. The workspace is just the same app run against a dedicated data directory with the `PTCG_MASTER=1` flag — it exists only to curate and publish the master; nobody tracks a personal collection on it. The app shows a "Master curation workspace" banner in the admin panel so it can't be mistaken for a real install.
+
+**One-time bucket setup (Cloudflare R2 shown; any S3-compatible storage works):** create a bucket, enable public access (you'll get a `pub-….r2.dev` URL or attach a custom domain), and create an API token with Object Read & Write. Point `cdnBase` in `public/config.js` at the public URL.
+
+**One-time workspace setup**, in a clone of this repo (your PC is fine):
+
+```bash
+mkdir master-data
+node scripts/build-data.js --langs en          # download card data + images from TCGdex
+node scripts/build-hashes.js                   # scanner fingerprints (needs sharp)
+PTCG_MASTER=1 DATA_DIR=./master-data node server.js   # open http://localhost:3000
+# register the workspace admin account, then edit: add printings, upload images…
+```
+
+(Windows PowerShell: `$env:PTCG_MASTER='1'; $env:DATA_DIR='.\master-data'; node server.js`)
+
+**Publish** — build `catalog.db` from the workspace database (so every edit rides along) and upload it, the manifest, and the images to the bucket:
+
+```bash
+R2_ACCOUNT_ID=xxxx R2_ACCESS_KEY_ID=xxxx R2_SECRET_ACCESS_KEY=xxxx \
+R2_BUCKET=pokemon-cards DATA_DIR=./master-data node scripts/publish-images.js
+```
+
+The publisher compares content, and only when something actually changed does it bump the master version and upload a new `catalog.db` + `catalog.json`. Unchanged images are skipped (they're immutable). Every install then sees the new version on its next update check. Re-run the publish after every editing session — that's your "save to master" step. Add `--prune` to also delete images you've removed.
+
+The day-to-day loop: start the workspace server → edit in the app → stop it → publish. Your personal installs stay pure consumers and get the changes through the normal update path.
+
+## Setup (bootstrapping the card data)
+
+Requires Node.js 22+. The server has **zero dependencies**; only the optional scanner index needs one package.
 
 ### 1. Run the app
 
@@ -61,7 +184,7 @@ Resumable: re-run any time — it skips what's already downloaded and picks up n
 
 The in-app download builds the scanner fingerprints automatically (it installs `sharp`, the one optional dependency, on the fly). Manual equivalent: `npm install --no-save sharp && node scripts/build-hashes.js`.
 
-Env vars: `PORT` (default 3000), `DATA_DIR` (default `./data` — user accounts & synced collections live there as JSON files; back up that folder and you've backed up everything).
+Env vars: `PORT` (default 3000), `DATA_DIR` (default `./data` — the local SQLite database `ptcg.db` holds the card catalog, user accounts and synced collections; back up that folder and you've backed up everything), `PTCG_CDN_BASE` (override the master database location from `public/config.js`).
 
 Or with Docker: `docker compose up -d`.
 
@@ -77,7 +200,7 @@ The CDN just needs the same layout the downloader produces — sync your `public
 
 ## Hosting the whole card database elsewhere
 
-`cdnBase` can also be a full URL — host the entire generated `public/cdn/` folder (data + images) on any static host and point `cdnBase` at it. Same CORS requirement.
+The publisher (`scripts/publish-images.js`) uploads the master `catalog.db` **and** the image files to your bucket, which is the normal way to host the whole database off-box — see [The maintainer workspace](#the-maintainer-workspace) above. Any S3-compatible object storage works; the bucket must be publicly readable and send `Access-Control-Allow-Origin: *`. Installs pull `catalog.db` from the bucket root and load images from it directly.
 
 ## Put it on your phone (as an app)
 
@@ -107,16 +230,19 @@ With the bundled server running, the 👤 button lets anyone create an account. 
 ## Project layout
 
 ```
-server.js                zero-dependency Node server (static files + auth/sync API)
-scripts/build-data.js    card database downloader (multi-language, resumable)
+server.js                zero-dependency Node server (static files, SQLite catalog + auth/sync API)
+scripts/build-data.js    card database downloader (multi-language, resumable) — maintainer only
 scripts/build-hashes.js  scan-index builder for the card scanner (needs sharp)
+scripts/publish-images.js  uploads images + the master catalog.db to your bucket — maintainer only
 public/                  the entire frontend (vanilla JS PWA, no build step)
-  config.js              database location + default language
+  config.js              master database location (cdnBase) + default language
   index.html, app.js, styles.css, sw.js, manifest.webmanifest, icons/
-  cdn/                   generated card database
-    languages.json
-    <lang>/index.json, sets/, images/, search-index.json, scan-index.json
-data/                    created at runtime: users.json, collections/, secret.key
+  cdn/                   generated card database (on the maintainer machine; published to the bucket)
+    <lang>/index.json, sets/, images/, scan-index.json
+data/                    created at runtime:
+  ptcg.db                SQLite — the local card catalog, accounts, and synced collections
+  secret.key             token-signing key
+your bucket (R2/S3)      catalog.db + catalog.json (versioned master every install pulls) + <lang>/images/…
 ```
 
 ## Collection data format

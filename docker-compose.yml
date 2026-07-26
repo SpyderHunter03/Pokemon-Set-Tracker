@@ -5,4 +5,7 @@ services:
       - "3000:3000"
     volumes:
       - ./data:/app/data
+    # environment:
+    #   # point at your own master database instead of the committed default:
+    #   - PTCG_CDN_BASE=https://pub-xxxx.r2.dev
     restart: unless-stopped
