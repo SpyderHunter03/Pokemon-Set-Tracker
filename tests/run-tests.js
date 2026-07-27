@@ -357,6 +357,8 @@ function fail(msg) {
   fs.writeFileSync(path.join(pullRoot, 'public', 'config.js'),
     "/* example:\n *   cdnBase: 'cdn'\n *   cdnBase: 'https://cards.example.com/cdn'\n */\n" +
     "self.PTCG_CONFIG = {\n  cdnBase: 'http://localhost:3998/cards',\n  defaultLanguage: 'en',\n  imageBase: null,\n};\n");
+  // the installer writes the deployed release tag next to the app
+  fs.writeFileSync(path.join(pullRoot, 'version.txt'), '9.9.9\n');
   const pullChild = spawn('node', ['server.js'], {
     cwd: pullRoot,
     env: { ...process.env, PORT: '3117', DATA_DIR: path.join(pullRoot, 'data') },
@@ -375,6 +377,7 @@ function fail(msg) {
   const pullSet = await jfetch('http://localhost:3117/api/catalog/set?lang=en&id=base1');
   const pullCard = (pullSet.cards || []).find((c) => c.id === 'base1-4');
   check('pull: fresh install reports its remote database', pullCfg.remoteCatalog === 'http://localhost:3998/cards');
+  check('app-config reports the deployed release tag (version.txt)', pullCfg.release === '9.9.9');
   check('pull: boot auto-loads the master catalog', pullStats.cards > 10 && pullStats.sets >= 2);
   check('pull: card images point at the bucket (R2), not a local /cdn path',
     pullCard && pullCard.img && /^http:\/\/localhost:3998\/cards\//.test(pullCard.img.low || ''));

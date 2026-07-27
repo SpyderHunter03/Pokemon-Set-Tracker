@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.16.1';
+const APP_VERSION = '3.17.0';
 
 /* ============================================================
  * Storage helpers
@@ -1586,7 +1586,7 @@ async function renderAdminArea() {
                 e.target.disabled = true;
                 try { await startCatalogPull(); renderControls(); }
                 catch (err) { e.target.disabled = false; toast(err.message); }
-              } }, `⬇️ Update card database (v${chk.localVersion} → v${chk.remoteVersion})`),
+              } }, `⬇️ Update cards from master (v${chk.localVersion} → v${chk.remoteVersion})`),
             ),
           );
         } else {
@@ -1599,14 +1599,17 @@ async function renderAdminArea() {
     content.replaceChildren(
       h('p', { class: 'muted small' }, `Database: ${stats.cards || 0} cards, ${stats.sets || 0} sets, ${stats.printings || 0} custom printings.`),
       updateArea,
-      // update the card catalogue from TCGdex
-      h('div', { class: 'row', style: 'margin-bottom:12px' },
+      // Update from TCGdex: only for installs WITHOUT a master (standalone)
+      // and for the maintainer workspace — that's where new sets come from.
+      // Consumer installs update via the master button above, which appears
+      // exactly when the master version is ahead of this install's.
+      (!appConfig.remoteCatalog || appConfig.master) ? h('div', { class: 'row', style: 'margin-bottom:12px' },
         h('button', { class: 'btn small', onclick: async (e) => {
           e.target.disabled = true;
           try { await startDatabaseBuild(); renderControls(); }
           catch (err) { e.target.disabled = false; toast(err.message); }
         } }, '🔄 Update cards from TCGdex'),
-      ),
+      ) : null,
       // download images locally + repoint rows to the local copies
       h('hr'),
       h('p', { class: 'muted small' }, img.remote
@@ -1629,6 +1632,11 @@ function renderAccountModal() {
   const formsEl = document.getElementById('account-forms');
   renderLanguageArea();
   renderAdminArea();
+  // backup (export/import) only makes sense for a signed-in collection
+  document.getElementById('backup-area').style.display = auth ? '' : 'none';
+  // show the deployed release (the GitHub tag) when the server knows it
+  document.getElementById('app-version').textContent =
+    appConfig.release ? `v${appConfig.release} (app ${APP_VERSION})` : APP_VERSION;
 
   if (!serverAvailable) {
     statusEl.replaceChildren(h('p', { class: 'muted' },

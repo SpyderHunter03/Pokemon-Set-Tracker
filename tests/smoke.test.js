@@ -42,6 +42,10 @@ const { chromium } = require('playwright');
   check('logged out: tapping a card does not track', Object.keys(guestColl).length === 0);
   check('logged out: modal offers sign-in', (await page.locator('#card-modal button', { hasText: 'Sign in' }).count()) >= 1);
   await page.click('#card-modal button:has-text("Close")');
+  check('logged out: backup section hidden', await page.evaluate(() => {
+    renderAccountModal();
+    return document.getElementById('backup-area').style.display === 'none';
+  }));
 
   // ---- sign in + old v1 data migration ----
   const uniq = 'smoke' + Math.floor(Math.random() * 1e6);
@@ -58,6 +62,10 @@ const { chromium } = require('playwright');
   const migrated = await coll();
   check('v1 → v2 migration', migrated && migrated['base1-58'] && migrated['base1-58'].normal === 2);
   check('signed in: stats banner shown', (await page.locator('#stats-banner').count()) === 1);
+  check('signed in: backup section shown', await page.evaluate(() => {
+    renderAccountModal();
+    return document.getElementById('backup-area').style.display !== 'none';
+  }));
   check('home shows sets', (await page.locator('.set-card').count()) === 2);
   check('TCG Pocket sets excluded from the database',
     !(await page.locator('.set-card').allTextContents()).join(' ').includes('Genetic Apex'));

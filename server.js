@@ -27,6 +27,10 @@ const PORT = parseInt(process.env.PORT || '3000', 10);
 const HOST = process.env.HOST || '0.0.0.0';
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, 'data'));
 const PUBLIC_DIR = path.join(__dirname, 'public');
+// The deployed release (GitHub tag) — version.txt is written next to the app
+// by the installer/updater (fetch_and_deploy_gh_release). Absent in dev.
+let RELEASE_VERSION = null;
+try { RELEASE_VERSION = fs.readFileSync(path.join(__dirname, 'version.txt'), 'utf8').trim().replace(/^v/, '') || null; } catch { /* not a release deploy */ }
 const USERS_FILE = path.join(DATA_DIR, 'users.json');           // legacy (pre-SQLite) — migrated on first run
 const COLLECTIONS_DIR = path.join(DATA_DIR, 'collections');     // legacy (pre-SQLite) — migrated on first run
 const DB_FILE = path.join(DATA_DIR, 'ptcg.db');
@@ -1062,6 +1066,7 @@ async function handleApi(req, res, pathname, ip, url) {
       masterVersion: s.masterVersion || null,
       masterPulledAt: s.masterPulledAt || null,
       master: MASTER_MODE,
+      release: RELEASE_VERSION,
       canPublish: !READONLY && !!(process.env.R2_ACCESS_KEY_ID && process.env.R2_SECRET_ACCESS_KEY && process.env.R2_BUCKET),
     });
   }
