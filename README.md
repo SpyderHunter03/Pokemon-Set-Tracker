@@ -53,7 +53,7 @@ The repository already ships with `cdnBase` pointing at the project's hosted mas
 
 ### 1. Self-hosting on Proxmox (Helper-Scripts)
 
-Run the community Helper-Scripts one-liner (see **[DEPLOYMENT.md](DEPLOYMENT.md)**). It creates an LXC, installs the app as a service, and on first boot the app pulls the master database from the configured `cdnBase` — so the container comes up already showing every card. Nothing else to do.
+Run the community Helper-Scripts one-liner (see **[DEPLOYMENT.md](DEPLOYMENT.md)**). It creates an LXC, installs the app as a service, and **loads the card database from the master as part of the install** (`node server.js --pull-master`) — so the container comes up already showing every card. If the master isn't reachable during install, the app retries automatically after boot. Nothing else to do.
 
 ### 2. Installing on any other server (Docker)
 
@@ -113,7 +113,7 @@ sudo systemctl enable --now ptcg
 
 > **Phones need HTTPS** for install, offline mode, and live camera scanning (`localhost` is exempt). Put a reverse proxy with automatic HTTPS (Caddy is the easiest) in front of `node server.js`.
 
-If an install ever comes up with no cards (for example the master wasn't reachable at first boot), the welcome screen has a **Load cards from the database** button — it pulls the master on demand. Once cards are loaded, the admin **Administration** panel checks the master version automatically and offers **Update card database** whenever a newer master has been published.
+If an install ever comes up with no cards (for example the master wasn't reachable at first boot), it retries on its own every 10 minutes, the welcome screen has a **Load cards from the database** button, and `node server.js --pull-master` does the same from the command line — any of the three pulls the master on demand. Once cards are loaded, the admin **Administration** panel checks the master version automatically and offers **Update card database** whenever a newer master has been published.
 
 ## The maintainer workspace
 

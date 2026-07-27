@@ -325,6 +325,15 @@ function fail(msg) {
       filter: (s) => !/[/\\](cdn|node_modules|\.git|\.test-data)/.test(s),
     });
   }
+  // ---- installer step: `node server.js --pull-master` loads the DB and exits
+  //      (what the LXC installer runs so a fresh install comes up with cards)
+  const cliPull = spawnSync('node', ['server.js', '--pull-master'], {
+    cwd: pullRoot, encoding: 'utf8',
+    env: { ...process.env, DATA_DIR: path.join(pullRoot, 'data-cli'), PTCG_CDN_BASE: 'http://localhost:3998/cards' },
+  });
+  check('installer CLI: --pull-master loads the database and exits cleanly',
+    cliPull.status === 0 && /Card database loaded: \d+ cards/.test((cliPull.stdout || '') + (cliPull.stderr || '')));
+
   const pullChild = spawn('node', ['server.js'], {
     cwd: pullRoot,
     env: { ...process.env, PORT: '3117', DATA_DIR: path.join(pullRoot, 'data'), PTCG_CDN_BASE: 'http://localhost:3998/cards' },

@@ -25,6 +25,13 @@ cd /opt/pokemon-set-tracker
 $STD npm install --no-save sharp || true
 msg_ok "Installed Pokemon Set Tracker"
 
+msg_info "Loading the card database from the master"
+if $STD env DATA_DIR=/opt/pokemon-set-tracker/data node server.js --pull-master; then
+  msg_ok "Loaded the card database"
+else
+  msg_ok "Card database not loaded yet — the app retries automatically after boot"
+fi
+
 msg_info "Creating Service"
 cat <<EOF >/etc/systemd/system/pokemon-set-tracker.service
 [Unit]

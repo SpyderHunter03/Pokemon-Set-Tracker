@@ -1469,18 +1469,55 @@ if (catalogStats().cards === 0 && dbExists()) {
   }
 }
 
-server.listen(PORT, HOST, () => {
-  console.log(`Pokemon TCG Tracker running at http://localhost:${PORT}`);
-  console.log(`Data directory: ${DATA_DIR}`);
+if (process.argv.includes('--pull-master')) {
+  // CLI mode (no web server): load the master card database into this
+  // install's DB and exit. Used by the installers so a fresh install comes
+  // up with every card already in place; safe to re-run any time (same
+  // merge as the in-app update — local edits survive).
+  (async () => {
+    const base = configCdnBase();
+    if (!base) {
+      console.error('No master database configured — set cdnBase in public/config.js (or PTCG_CDN_BASE) to the bucket URL.');
+      process.exit(2);
+    }
+    console.log(`Loading the card database from ${base} …`);
+    try {
+      const r = await importCatalogFromRemote(base, (p) => {
+        if (p.setsDone === 1 || p.setsDone % 25 === 0 || p.setsDone === p.setTotal) {
+          console.log(`  sets ${p.setsDone}/${p.setTotal}${p.setName ? ' — ' + p.setName : ''}`);
+        }
+      });
+      console.log(`Card database loaded: ${r.cards} cards, ${r.sets} sets, ${r.printings} printings` +
+        (r.version ? ` (master v${r.version})` : ''));
+      try { db.close(); } catch { /* already closed */ }
+      process.exit(0);
+    } catch (e) {
+      console.error('Loading the card database failed: ' + e.message + ' (safe to retry; the app also retries on boot)');
+      try { db.close(); } catch { /* already closed */ }
+      process.exit(1);
+    }
+  })();
+} else {
+  server.listen(PORT, HOST, () => {
+    console.log(`Pokemon TCG Tracker running at http://localhost:${PORT}`);
+    console.log(`Data directory: ${DATA_DIR}`);
 
-  // Fresh install with no local card build but a remote database configured
-  // (reads cards from a shared CDN): pull the catalog into the DB so cards show
-  // up without the admin having to click anything. Runs in the background.
-  if (!READONLY && catalogStats().cards === 0 && !dbExists() && configCdnBase() && !build.running) {
-    try { startCatalogPull(configCdnBase()); }
-    catch (e) { console.error('Auto-load from remote database failed to start: ' + e.message); }
-  }
-});
+    // Fresh install with no local card build but a remote database configured
+    // (reads cards from a shared CDN): pull the catalog into the DB so cards
+    // show up without the admin having to click anything. Runs in the
+    // background — and keeps retrying every 10 minutes while the database is
+    // still empty, so an install that boots before the master is reachable
+    // (or before it has been published) heals itself.
+    const tryMasterPull = () => {
+      if (READONLY || build.running) return;
+      if (catalogStats().cards > 0 || dbExists() || !configCdnBase()) return;
+      try { startCatalogPull(configCdnBase()); }
+      catch (e) { console.error('Auto-load from remote database failed to start: ' + e.message); }
+    };
+    tryMasterPull();
+    setInterval(tryMasterPull, 10 * 60 * 1000).unref();
+  });
+}
 
 // close the database cleanly on shutdown so SQLite checkpoints its WAL into
 // the main .db file (keeps backups of DATA_DIR/ptcg.db self-contained)
