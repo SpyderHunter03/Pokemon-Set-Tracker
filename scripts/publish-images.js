@@ -240,8 +240,9 @@ function publicCdnBase() {
   const envBase = (process.env.PTCG_CDN_BASE || '').trim();
   if (/^https?:\/\//.test(envBase)) return envBase.replace(/\/+$/, '');
   try {
+    // Anchored + multiline: match the real property, not the comment examples.
     const m = fs.readFileSync(path.join(__dirname, '..', 'public', 'config.js'), 'utf8')
-      .match(/cdnBase:\s*['"]([^'"]+)['"]/);
+      .match(/^\s*cdnBase:\s*['"]([^'"]+)['"]/m);
     return m && /^https?:\/\//.test(m[1]) ? m[1].replace(/\/+$/, '') : null;
   } catch { return null; }
 }

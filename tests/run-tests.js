@@ -350,9 +350,16 @@ function fail(msg) {
   check('installer CLI: --pull-master loads the database and exits cleanly',
     cliPull.status === 0 && /Card database loaded: \d+ cards/.test((cliPull.stdout || '') + (cliPull.stderr || '')));
 
+  // The boot server reads its master location from config.js — written here
+  // the way the REAL committed file looks, comment examples included. (An
+  // unanchored regex once matched `cdnBase: 'cdn'` inside the comment and
+  // silently disabled the remote master on every install.)
+  fs.writeFileSync(path.join(pullRoot, 'public', 'config.js'),
+    "/* example:\n *   cdnBase: 'cdn'\n *   cdnBase: 'https://cards.example.com/cdn'\n */\n" +
+    "self.PTCG_CONFIG = {\n  cdnBase: 'http://localhost:3998/cards',\n  defaultLanguage: 'en',\n  imageBase: null,\n};\n");
   const pullChild = spawn('node', ['server.js'], {
     cwd: pullRoot,
-    env: { ...process.env, PORT: '3117', DATA_DIR: path.join(pullRoot, 'data'), PTCG_CDN_BASE: 'http://localhost:3998/cards' },
+    env: { ...process.env, PORT: '3117', DATA_DIR: path.join(pullRoot, 'data') },
     stdio: 'inherit',
   });
   children.push(pullChild);

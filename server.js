@@ -721,7 +721,11 @@ function configCdnBase() {
   const envBase = (process.env.PTCG_CDN_BASE || '').trim();
   if (/^https?:\/\//.test(envBase)) return envBase.replace(/\/+$/, '');
   try {
-    const m = fs.readFileSync(path.join(PUBLIC_DIR, 'config.js'), 'utf8').match(/cdnBase:\s*['"]([^'"]+)['"]/);
+    // Anchored + multiline so it matches the real `cdnBase: '…'` property and
+    // NOT the examples in the file's comments (` *   cdnBase: 'cdn'`) — the
+    // unanchored version grabbed the comment first and silently disabled the
+    // remote master on every install.
+    const m = fs.readFileSync(path.join(PUBLIC_DIR, 'config.js'), 'utf8').match(/^\s*cdnBase:\s*['"]([^'"]+)['"]/m);
     return m && /^https?:\/\//.test(m[1]) ? m[1].replace(/\/+$/, '') : null;
   } catch { return null; }
 }
