@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.17.0';
+const APP_VERSION = '3.17.1';
 
 /* ============================================================
  * Storage helpers
@@ -1596,7 +1596,9 @@ async function renderAdminArea() {
       })();
     }
 
-    content.replaceChildren(
+    // NOTE: replaceChildren stringifies null into literal "null" text (unlike
+    // h(), which filters it) — always filter the child list.
+    content.replaceChildren(...[
       h('p', { class: 'muted small' }, `Database: ${stats.cards || 0} cards, ${stats.sets || 0} sets, ${stats.printings || 0} custom printings.`),
       updateArea,
       // Update from TCGdex: only for installs WITHOUT a master (standalone)
@@ -1622,7 +1624,7 @@ async function renderAdminArea() {
           catch (err) { e.target.disabled = false; toast(err.message); }
         } }, '⬇️ Download all images to this server'),
       ) : null,
-    );
+    ].filter(Boolean));
   }
   renderControls();
 }

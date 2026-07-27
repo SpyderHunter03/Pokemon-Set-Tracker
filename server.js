@@ -27,10 +27,16 @@ const PORT = parseInt(process.env.PORT || '3000', 10);
 const HOST = process.env.HOST || '0.0.0.0';
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, 'data'));
 const PUBLIC_DIR = path.join(__dirname, 'public');
-// The deployed release (GitHub tag) — version.txt is written next to the app
-// by the installer/updater (fetch_and_deploy_gh_release). Absent in dev.
+// The deployed release (GitHub tag). The deploy tooling records it in one of
+// two places depending on version: version.txt next to the app, or the
+// Helper-Scripts marker ~/.pokemon-set-tracker. Absent in dev.
 let RELEASE_VERSION = null;
-try { RELEASE_VERSION = fs.readFileSync(path.join(__dirname, 'version.txt'), 'utf8').trim().replace(/^v/, '') || null; } catch { /* not a release deploy */ }
+for (const f of [path.join(__dirname, 'version.txt'), path.join(require('os').homedir(), '.pokemon-set-tracker')]) {
+  try {
+    const v = fs.readFileSync(f, 'utf8').trim().replace(/^v/, '');
+    if (v) { RELEASE_VERSION = v; break; }
+  } catch { /* try next location */ }
+}
 const USERS_FILE = path.join(DATA_DIR, 'users.json');           // legacy (pre-SQLite) — migrated on first run
 const COLLECTIONS_DIR = path.join(DATA_DIR, 'collections');     // legacy (pre-SQLite) — migrated on first run
 const DB_FILE = path.join(DATA_DIR, 'ptcg.db');

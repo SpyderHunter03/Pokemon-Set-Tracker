@@ -47,6 +47,9 @@ const { chromium } = require('playwright');
   await page.waitForSelector('#account-status button:has-text("Sign out")');
   await page.waitForSelector('#admin-area button:has-text("Update cards from TCGdex")');
   check('first account sees the Administration section', true);
+  // hidden buttons must vanish, not render as literal "null" text
+  check('admin panel renders no stray "null" text',
+    !/\bnull\b/.test(await page.textContent('#admin-area')));
 
   // admin re-run: starts, runs, completes (resume makes it quick)
   await page.click('#admin-area button:has-text("Update cards from TCGdex")');
