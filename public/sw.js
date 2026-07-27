@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — service worker (offline support) */
 importScripts('config.js');
 
-const SHELL_CACHE = 'ptcg-shell-v20';
+const SHELL_CACHE = 'ptcg-shell-v21';
 const DATA_CACHE = 'ptcg-data-v2';
 const IMG_CACHE = 'ptcg-img-v1';
 
@@ -31,7 +31,14 @@ const IMAGE_URL = (self.PTCG_CONFIG && self.PTCG_CONFIG.imageBase)
 const LOCAL_CDN_URL = new URL('cdn/', self.registration.scope).href;
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(SHELL_CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  // cache:'reload' bypasses the browser's HTTP cache — otherwise a stale
+  // HTTP-cached app.js would get re-cached into the NEW shell cache and a
+  // version bump would never actually deliver the new app.
+  e.waitUntil(
+    caches.open(SHELL_CACHE)
+      .then((c) => c.addAll(SHELL.map((u) => new Request(u, { cache: 'reload' }))))
+      .then(() => self.skipWaiting())
+  );
 });
 
 self.addEventListener('activate', (e) => {

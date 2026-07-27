@@ -365,7 +365,13 @@ function serveStatic(req, res, urlPath) {
       return;
     }
     const ext = path.extname(file).toLowerCase();
-    const isShell = ext === '.html' || file.endsWith('sw.js') || file.endsWith('config.js');
+    // The ENTIRE app shell must always revalidate: a stale HTTP-cached app.js
+    // once kept showing an old UI for a day after an upgrade (the service
+    // worker's "network-first" fetch still goes through the HTTP cache, so a
+    // max-age here poisons even that path). Revalidation is cheap — 304s via
+    // Last-Modified below.
+    const isShell = ext === '.html' || file.endsWith('sw.js') || file.endsWith('config.js')
+      || file.endsWith('app.js') || file.endsWith('styles.css') || file.endsWith('manifest.webmanifest');
     const inCdn = file.startsWith(path.join(PUBLIC_DIR, 'cdn'));
     const isCardImage = inCdn && file.includes(`${path.sep}images${path.sep}`);
     // card images never change → cache hard; cdn JSON (indexes/sets/custom)
@@ -374,9 +380,16 @@ function serveStatic(req, res, urlPath) {
       : isCardImage ? 'public, max-age=2592000, immutable'
       : inCdn ? 'no-cache'
       : 'public, max-age=86400';
+    const lastModified = stat.mtime.toUTCString();
+    const ims = req.headers['if-modified-since'];
+    if (ims && !isNaN(Date.parse(ims)) && Date.parse(ims) >= Math.floor(stat.mtimeMs / 1000) * 1000) {
+      res.writeHead(304, { 'Cache-Control': cacheControl, 'Last-Modified': lastModified });
+      return res.end();
+    }
     const headers = {
       'Content-Type': MIME[ext] || 'application/octet-stream',
       'Cache-Control': cacheControl,
+      'Last-Modified': lastModified,
       'Content-Length': stat.size,
     };
     if (inCdn) headers['Access-Control-Allow-Origin'] = '*'; // card database is openly readable

@@ -118,6 +118,22 @@ function fail(msg) {
   const jfetch = async (url, opts) => fetch(url, opts).then((r) => r.json());
 
   console.log('=== 7/8 variant importer + read-only mode + offline mirror ===');
+
+  // ---- shell caching: app.js must ALWAYS revalidate (a max-age here once
+  //      kept browsers on an old UI for a day after an upgrade) ----
+  // (first fetch may land on a stale keep-alive socket idle-closed by the
+  //  server during the long browser stage — retry once on a fresh one)
+  const rfetch = async (url, opts) => { try { return await fetch(url, opts); } catch { await new Promise((r) => setTimeout(r, 150)); return fetch(url, opts); } };
+  {
+    const shellRes = await rfetch('http://localhost:3111/app.js');
+    const cc = shellRes.headers.get('cache-control') || '';
+    const lm = shellRes.headers.get('last-modified') || '';
+    check('app shell served with no-cache + Last-Modified', /no-cache/.test(cc) && !!lm);
+    const rev = await rfetch('http://localhost:3111/app.js', { headers: { 'If-Modified-Since': new Date(Date.now() + 60000).toUTCString() } });
+    check('app shell revalidation answers 304', rev.status === 304);
+    const imgHdr = (await rfetch('http://localhost:3111/cdn/en/index.json')).headers.get('cache-control') || '';
+    check('cdn data always revalidates too', /no-cache/.test(imgHdr));
+  }
   // ---- tcgcsv variant importer against a mock ----
   start('node', ['tests/mock-tcgcsv.js']);
   await waitForPort(3997).catch((e) => fail(e.message));
