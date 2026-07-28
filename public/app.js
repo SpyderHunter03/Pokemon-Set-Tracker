@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.22.0';
+const APP_VERSION = '3.22.1';
 
 /* ============================================================
  * Storage helpers
@@ -2225,6 +2225,24 @@ async function renderBinderPage(id) {
     return grid;
   }
 
+  /** render an unbounded result list in batches as the panel scrolls —
+   * no more "first 30 only" caps in the pickers */
+  function chunkedList(results, hits, rowOf, emptyMsg) {
+    results.replaceChildren();
+    if (!hits.length) { results.append(h('p', { class: 'muted small' }, emptyMsg)); return; }
+    results.append(h('p', { class: 'muted small' }, `${hits.length} card${hits.length === 1 ? '' : 's'}`));
+    let shown = 0;
+    const CHUNK = 40;
+    const renderMore = () => {
+      const upto = Math.min(shown + CHUNK, hits.length);
+      for (; shown < upto; shown++) results.append(rowOf(hits[shown]));
+    };
+    renderMore();
+    results.onscroll = () => {
+      if (shown < hits.length && results.scrollTop + results.clientHeight > results.scrollHeight - 300) renderMore();
+    };
+  }
+
   function openPocketPicker(i) {
     const input = h('input', { type: 'text', placeholder: 'Search cards by name\u2026' });
     const results = h('div', { class: 'picker-results' });
@@ -2251,31 +2269,27 @@ async function renderBinderPage(id) {
           h('button', { class: 'btn ghost small', onclick: () => fileIn.click() }, '\u2b06 Upload image'), fileIn),
         results,
       ));
+    const allCards = [...cardsById.values()].sort((a, b) => a.name.localeCompare(b.name) || String(a.localId).localeCompare(String(b.localId), undefined, { numeric: true }));
+    const rowOf = (c) => {
+      const chips = realVariants(c).map((vk) => h('button', { class: 'chip', onclick: async () => {
+        binder.slots[i] = { card: c.id, variant: vk, have: 0 };
+        overlay.remove();
+        await save();
+        renderHead(); renderBook();
+      } }, variantLabel(c, vk)));
+      const img = cardImg(c, 'low');
+      return h('div', { class: 'picker-row' },
+        img ? h('img', { src: img, loading: 'lazy' }) : h('div', { class: 'picker-thumb' }, '\ud83c\udccf'),
+        h('div', { class: 'picker-info' },
+          h('div', {}, c.name),
+          h('div', { class: 'muted small' }, setIdOf(c.id) + ' \u00b7 #' + c.localId),
+          h('div', { class: 'row', style: 'flex-wrap:wrap; gap:4px' }, ...chips)),
+      );
+    };
     const renderResults = () => {
       const q = input.value.trim().toLowerCase();
-      results.replaceChildren();
-      if (q.length < 2) { results.append(h('p', { class: 'muted small' }, 'Type at least 2 letters.')); return; }
-      const hits = [];
-      for (const c of cardsById.values()) {
-        if (c.name.toLowerCase().includes(q)) { hits.push(c); if (hits.length >= 40) break; }
-      }
-      if (!hits.length) { results.append(h('p', { class: 'muted small' }, 'No cards match.')); return; }
-      for (const c of hits) {
-        const chips = realVariants(c).map((vk) => h('button', { class: 'chip', onclick: async () => {
-          binder.slots[i] = { card: c.id, variant: vk, have: 0 };
-          overlay.remove();
-          await save();
-          renderHead(); renderBook();
-        } }, variantLabel(c, vk)));
-        const img = cardImg(c, 'low');
-        results.append(h('div', { class: 'picker-row' },
-          img ? h('img', { src: img, loading: 'lazy' }) : h('div', { class: 'picker-thumb' }, '\ud83c\udccf'),
-          h('div', { class: 'picker-info' },
-            h('div', {}, c.name),
-            h('div', { class: 'muted small' }, setIdOf(c.id) + ' \u00b7 #' + c.localId),
-            h('div', { class: 'row', style: 'flex-wrap:wrap; gap:4px' }, ...chips)),
-        ));
-      }
+      const hits = q ? allCards.filter((c) => c.name.toLowerCase().includes(q)) : allCards;
+      chunkedList(results, hits, rowOf, 'No cards match.');
     };
     input.addEventListener('input', renderResults);
     renderResults();
@@ -2428,20 +2442,15 @@ async function renderBinderPage(id) {
     const showCards = () => {
       const input = h('input', { type: 'text', placeholder: 'Search Pok\u00e9mon / cards by name\u2026' });
       const results = h('div', { class: 'picker-results' });
+      const allCards = [...cardsById.values()].filter((c) => cardImg(c, 'low'))
+        .sort((a, b) => a.name.localeCompare(b.name) || String(a.localId).localeCompare(String(b.localId), undefined, { numeric: true }));
+      const rowOf = (c) => h('div', { class: 'picker-row', onclick: () => setCover({ type: 'card', card: c.id }) },
+        h('img', { src: cardImg(c, 'low'), loading: 'lazy' }),
+        h('div', { class: 'picker-info' }, h('div', {}, c.name), h('div', { class: 'muted small' }, setIdOf(c.id) + ' \u00b7 #' + c.localId)));
       const rr = () => {
         const q = input.value.trim().toLowerCase();
-        results.replaceChildren();
-        if (q.length < 2) { results.append(h('p', { class: 'muted small' }, 'Type at least 2 letters.')); return; }
-        const hits = [];
-        for (const c of cardsById.values()) {
-          if (c.name.toLowerCase().includes(q) && cardImg(c, 'low')) { hits.push(c); if (hits.length >= 30) break; }
-        }
-        for (const c of hits) {
-          results.append(h('div', { class: 'picker-row', onclick: () => setCover({ type: 'card', card: c.id }) },
-            h('img', { src: cardImg(c, 'low'), loading: 'lazy' }),
-            h('div', { class: 'picker-info' }, h('div', {}, c.name), h('div', { class: 'muted small' }, setIdOf(c.id) + ' \u00b7 #' + c.localId))));
-        }
-        if (!hits.length) results.append(h('p', { class: 'muted small' }, 'No cards match.'));
+        const hits = q ? allCards.filter((c) => c.name.toLowerCase().includes(q)) : allCards;
+        chunkedList(results, hits, rowOf, 'No cards match.');
       };
       input.addEventListener('input', rr);
       content.replaceChildren(input, results);
