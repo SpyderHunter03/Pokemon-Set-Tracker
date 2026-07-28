@@ -253,19 +253,26 @@ const { chromium } = require('playwright');
     (await page.locator('.pocket[data-pocket="7"].filled').count()) === 1 &&
     (await page.locator('.pocket[data-pocket="4"].filled').count()) === 0);
 
-  // upload an image that SPANS pockets: new page, 2 wide x 2 tall
+  // upload an image and place it across chosen pockets via the editor
   await page.click('button:has-text("Add page")');
   await page.click('button:has-text("\u203a")');                       // -> page 3
   await page.waitForFunction(() => document.body.textContent.includes('Page 3 / 3'));
-  await page.click('.binder-grid .pocket:not(.filled):not(.art) >> nth=0');
+  await page.click('.binder-grid .pocket:not(.filled):not(.art) >> nth=0');   // idx8
   await page.waitForSelector('.picker-overlay input[type=file]', { state: 'attached' });
-  await page.selectOption('.picker-overlay select >> nth=0', '2');      // 2 wide
-  await page.selectOption('.picker-overlay select >> nth=1', '2');      // 2 tall
   await page.setInputFiles('.picker-overlay input[type=file]', require('path').join(__dirname, 'fixtures', 'base1-4.png'));
-  await page.waitForSelector('.binder-grid .pocket.art');
-  check('binder: uploaded image spans multiple pockets (2x2 fills the page)',
-    (await page.locator('.binder-grid .pocket').count()) === 1 &&
-    (await page.locator('.binder-grid .pocket.art').count()) === 1);
+  await page.waitForSelector('.art-editor .art-board img');
+  check('binder: placement editor shows the page grid overlay', (await page.locator('.art-editor .art-cell').count()) === 4);
+  check('binder: the tapped pocket starts selected', (await page.locator('.art-cell.sel').count()) === 1);
+  await page.click('.art-cell[data-cell="9"]');                         // include a second pocket
+  await page.waitForFunction(() => document.querySelectorAll('.art-cell.sel').length === 2);
+  await page.click('button:has-text("Cut: with pocket spacing")');      // toggle cut mode
+  await page.waitForSelector('button:has-text("Cut: without spacing")');
+  await page.click('.art-editor button:has-text("Save")');
+  await page.waitForFunction(() => {
+    const els = [...document.querySelectorAll('.binder-grid .pocket.art')];
+    return els.length === 2 && els.every((el) => (el.style.backgroundImage || '').includes('/bimg/'));
+  });
+  check('binder: picture sliced across the chosen pockets (each piece its own slice)', true);
 
   await page.goto('http://localhost:3111/#/binders');
   await page.waitForSelector('.binder-cover');

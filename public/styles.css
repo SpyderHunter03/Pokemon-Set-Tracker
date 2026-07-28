@@ -818,3 +818,19 @@ body.printing-proxies #print-area {
   -webkit-print-color-adjust: exact; print-color-adjust: exact;
 }
 .print-cell.print-art { outline: 0.3mm dashed #999; }
+
+/* ---------- art placement editor ---------- */
+.art-editor { max-width: 500px; }
+.art-board {
+  position: relative; overflow: hidden; margin: 0 auto;
+  background: #0b0e14; border: 1px solid var(--line, #333); border-radius: 8px;
+  touch-action: none; cursor: grab; user-select: none;
+}
+.art-board:active { cursor: grabbing; }
+.art-board > img { position: absolute; max-width: none; pointer-events: none; }
+.art-cells { position: absolute; inset: 0; }
+.art-cell { position: absolute; border: 1px dashed rgba(255,255,255,.45); border-radius: 4px; box-sizing: border-box; }
+.art-cell.sel { border: 2px solid var(--owned); box-shadow: inset 0 0 0 1px rgba(52,194,107,.4); }
+.art-cell.blocked { background: rgba(227,53,13,.18); border-color: rgba(227,53,13,.6); cursor: not-allowed; }
+.art-editor input[type=range] { flex: 1; }
+.pocket.art { background-color: #000; }

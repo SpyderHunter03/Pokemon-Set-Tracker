@@ -1576,8 +1576,24 @@ async function handleApi(req, res, pathname, ip, url) {
           if (!Number.isInteger(i) || i < 0 || i >= capacity) continue;
           if (!v || typeof v !== 'object') continue;
           if (typeof v.img === 'string') {
-            // user-uploaded art, spanning w×h pockets from this anchor
+            // user-uploaded art placed across an arbitrary set of pockets on
+            // one page, with a pan/zoom view transform and a gap-cutting mode
             if (!/^\/bimg\/[a-f0-9-]{36}\.webp$/.test(v.img)) continue;
+            if (Array.isArray(v.cells)) {
+              const perPage = row.size * row.size;
+              const cells = [...new Set(v.cells.filter((c) => Number.isInteger(c) && c >= 0 && c < capacity))].sort((a, b) => a - b);
+              if (!cells.length || cells.length > perPage) continue;
+              const pg = Math.floor(cells[0] / perPage);
+              if (!cells.every((c) => Math.floor(c / perPage) === pg)) continue;   // one page only
+              if (cells[0] !== i) continue;                                       // anchored at its lowest cell
+              const num = (n, lo, hi) => (Number.isFinite(n) ? Math.max(lo, Math.min(hi, n)) : null);
+              const view = (v.view && typeof v.view === 'object')
+                ? { x: num(v.view.x, -5000, 5000) ?? 0, y: num(v.view.y, -5000, 5000) ?? 0, s: num(v.view.s, 5, 10000) }
+                : null;
+              clean[i] = { img: v.img, cells, view: view && view.s ? view : null, gaps: v.gaps === 'without' ? 'without' : 'with' };
+              continue;
+            }
+            // legacy rectangular span { img, w, h } (pre-editor clients)
             const w = Number.isInteger(v.w) ? Math.min(Math.max(v.w, 1), row.size) : 1;
             const hh = Number.isInteger(v.h) ? Math.min(Math.max(v.h, 1), row.size) : 1;
             clean[i] = { img: v.img, w, h: hh };

@@ -284,6 +284,14 @@ function fail(msg) {
     bList2.binders[0].filled === 5 && upAnon === 401);
   const imgServe = await fetch('http://localhost:3115' + up.url);
   check('binder: uploaded art is served immutably', imgServe.status === 200 && /immutable/.test(imgServe.headers.get('cache-control') || ''));
+  // cells-based art: arbitrary pockets + pan/zoom view + cut mode
+  const artSlots2 = { ...bArt.binder.slots, '6': { img: up.url, cells: [6, 7], view: { x: -10.5, y: 4, s: 200 }, gaps: 'without' } };
+  await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { method: 'PUT', headers: buAuth, body: JSON.stringify({ slots: artSlots2 }) });
+  const bArt2 = await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { headers: buAuth });
+  const e6 = bArt2.binder.slots['6'] || {};
+  check('binder: cells-based art (arbitrary pockets + view + cut mode) persists',
+    Array.isArray(e6.cells) && e6.cells.join(',') === '6,7' && e6.gaps === 'without' &&
+    e6.view && Math.round(e6.view.s) === 200 && Math.round(e6.view.x * 2) === -21);
   const bDel = await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { method: 'DELETE', headers: buAuth });
   const bGone = (await fetch(`http://localhost:3115/api/binders/${bd.id}`, { headers: buAuth })).status;
   check('binder: delete removes it', bDel.ok === true && bGone === 404);

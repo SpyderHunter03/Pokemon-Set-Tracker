@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.20.0';
+const APP_VERSION = '3.21.0';
 
 /* ============================================================
  * Storage helpers
@@ -1879,6 +1879,64 @@ async function renderBinderPage(id) {
   const per = binder.size * binder.size;
   let page = 0, moveFrom = null;
 
+  // ---- art entries: your own picture across an arbitrary set of pockets ----
+  const GAP_MM = 4, CARD_W = 63, CARD_H = 88;   // physical card + pocket spacing
+  // migrate legacy rectangular spans {img,w,h} into the cells form
+  for (const [k, e] of Object.entries(binder.slots)) {
+    if (e.img && !e.cells) {
+      const a = parseInt(k, 10);
+      const col = (a % per) % binder.size, row = Math.floor((a % per) / binder.size);
+      const cells = [];
+      for (let dy = 0; dy < (e.h || 1) && row + dy < binder.size; dy++)
+        for (let dx = 0; dx < (e.w || 1) && col + dx < binder.size; dx++)
+          cells.push(a + dy * binder.size + dx);
+      binder.slots[k] = { img: e.img, cells, view: null, gaps: 'with' };
+    }
+  }
+  const _nat = new Map();   // img url -> natural size
+  const natSize = (src) => _nat.get(src) || null;
+  function loadNat(src) {
+    if (_nat.has(src)) return Promise.resolve(_nat.get(src));
+    return new Promise((resolve) => {
+      const im = new Image();
+      im.onload = () => { _nat.set(src, { w: im.naturalWidth || 1, h: im.naturalHeight || 1 }); resolve(_nat.get(src)); };
+      im.onerror = () => { _nat.set(src, { w: 1, h: 1 }); resolve(_nat.get(src)); };
+      im.src = src;
+    });
+  }
+  /** geometry of an art entry in card-mm space (gap depends on its cut mode) */
+  function artGeo(entry) {
+    const gap = entry.gaps === 'without' ? 0 : GAP_MM;
+    const pos = entry.cells.map((c) => ({ c, col: (c % per) % binder.size, row: Math.floor((c % per) / binder.size) }));
+    const minC = Math.min(...pos.map((q) => q.col)), minR = Math.min(...pos.map((q) => q.row));
+    const maxC = Math.max(...pos.map((q) => q.col)), maxR = Math.max(...pos.map((q) => q.row));
+    return { gap, pos, minC, minR,
+      bw: (maxC - minC + 1) * CARD_W + (maxC - minC) * gap,
+      bh: (maxR - minR + 1) * CARD_H + (maxR - minR) * gap };
+  }
+  /** the stored view, or a centered cover of the selection's bounding box */
+  function artView(entry, geo) {
+    if (entry.view && entry.view.s) return entry.view;
+    const nat = natSize(entry.img) || { w: 1, h: 1 };
+    const sCover = Math.max(geo.bw, geo.bh * (nat.w / nat.h));
+    return { x: (geo.bw - sCover) / 2, y: (geo.bh - sCover * (nat.h / nat.w)) / 2, s: sCover };
+  }
+  /** paint one pocket's slice of the picture (unit: 'px' on screen, 'mm' in print) */
+  function artPieceCss(el, entry, cellIdx, perMm, unit) {
+    loadNat(entry.img).then(() => {
+      const geo = artGeo(entry);
+      const v = artView(entry, geo);
+      const pc = geo.pos.find((q) => q.c === cellIdx);
+      if (!pc) return;
+      const ox = (pc.col - geo.minC) * (CARD_W + geo.gap);
+      const oy = (pc.row - geo.minR) * (CARD_H + geo.gap);
+      el.style.backgroundImage = `url("${entry.img}")`;
+      el.style.backgroundRepeat = 'no-repeat';
+      el.style.backgroundSize = (v.s * perMm) + unit + ' auto';
+      el.style.backgroundPosition = ((v.x - ox) * perMm) + unit + ' ' + ((v.y - oy) * perMm) + unit;
+    });
+  }
+
   const save = async (extra = {}) => {
     try { await apiCall('binders/' + id, { method: 'PUT', body: JSON.stringify({ slots: binder.slots, pages: binder.pages, ...extra }) }); }
     catch (e) { toast('Save failed: ' + e.message); }
@@ -1938,6 +1996,17 @@ async function renderBinderPage(id) {
 
   function pocketActions(i) {
     const s = binder.slots[i];
+    if (s && s.img) {
+      actions.replaceChildren(h('div', { class: 'pocket-actions' },
+        h('span', { class: 'muted small' }, `Your image \u2014 ${s.cells.length} pocket${s.cells.length === 1 ? '' : 's'}`),
+        h('button', { class: 'btn small', onclick: () => openArtEditor(i) }, '\u270e Adjust'),
+        h('button', { class: 'btn small', onclick: async () => {
+          delete binder.slots[i]; await save(); actions.replaceChildren(); renderHead(); renderGrid();
+        } }, '\u2715 Remove'),
+        h('button', { class: 'btn ghost small', onclick: () => actions.replaceChildren() }, 'Cancel'),
+      ));
+      return;
+    }
     const card = s && cardsById.get(s.card);
     actions.replaceChildren(h('div', { class: 'pocket-actions' },
       h('span', { class: 'muted small' }, card ? `${card.name} \u2014 ${variantLabel(card, s.variant)}` : 'Pocket ' + (i + 1)),
@@ -1954,28 +2023,6 @@ async function renderBinderPage(id) {
     ));
   }
 
-  /** Pockets covered by an art span anchored at index a (excluding a). */
-  function coveredBy(a, entry) {
-    const out = [];
-    const col = (a % per) % binder.size, row = Math.floor((a % per) / binder.size);
-    for (let dy = 0; dy < (entry.h || 1); dy++) {
-      for (let dx = 0; dx < (entry.w || 1); dx++) {
-        if (dx === 0 && dy === 0) continue;
-        if (col + dx >= binder.size || row + dy >= binder.size) continue;
-        out.push(a + dy * binder.size + dx);
-      }
-    }
-    return out;
-  }
-  function coveredSet(base) {
-    const covered = new Set();
-    for (let p = 0; p < per; p++) {
-      const e = binder.slots[base + p];
-      if (e && e.img) coveredBy(base + p, e).forEach((x) => covered.add(x));
-    }
-    return covered;
-  }
-
   async function moveEntry(from, to) {
     if (from === to) return;
     const a = binder.slots[from], b = binder.slots[to];
@@ -1988,18 +2035,29 @@ async function renderBinderPage(id) {
   function renderGrid() {
     grid.replaceChildren();
     const base = page * per;
-    const covered = coveredSet(base);
+    const pieces = {};   // pocket idx -> art anchor idx
+    for (const [k, e] of Object.entries(binder.slots)) {
+      if (e.img && e.cells) for (const c of e.cells) pieces[c] = parseInt(k, 10);
+    }
     for (let p = 0; p < per; p++) {
       const i = base + p;
-      if (covered.has(i)) continue;                 // hidden under an art span
+      const anchor = pieces[i];
       const s = binder.slots[i];
       let pocket;
-      if (s && s.img) {
+      if (anchor !== undefined) {
+        // one slice of a placed picture
+        const entry = binder.slots[anchor];
         pocket = h('div', { class: 'pocket art', 'data-pocket': String(i) },
-          h('img', { src: s.img, loading: 'lazy', alt: 'binder art' }),
-          h('button', { class: 'pocket-edit', onclick: (e) => { e.stopPropagation(); pocketActions(i); } }, '\u22ef'),
-        );
-      } else if (s) {
+          h('button', { class: 'pocket-edit', onclick: (e) => { e.stopPropagation(); pocketActions(anchor); } }, '\u22ef'));
+        pocket.addEventListener('click', () => {
+          if (moveFrom !== null) { moveFrom = null; actions.replaceChildren(); renderGrid(); return; }
+          pocketActions(anchor);
+        });
+        requestAnimationFrame(() => artPieceCss(pocket, entry, i, pocket.clientWidth / CARD_W, 'px'));
+        grid.append(pocket);
+        continue;
+      }
+      if (s) {
         const card = cardsById.get(s.card);
         const img = card && cardImg(card, 'low', s.variant);
         pocket = h('div', { class: 'pocket filled' + (s.have ? ' have' : '') + (moveFrom === i ? ' moving' : ''), 'data-pocket': String(i), draggable: 'true' },
@@ -2021,33 +2079,25 @@ async function renderBinderPage(id) {
         pocket = h('div', { class: 'pocket' + (moveFrom === i ? ' moving' : ''), 'data-pocket': String(i) },
           h('div', { class: 'pocket-plus' }, '\uff0b'));
       }
-      // explicit grid placement (spans reshape the page)
-      const col = p % binder.size, row = Math.floor(p / binder.size);
-      pocket.style.gridColumn = (col + 1) + (s && s.img && s.w > 1 ? ' / span ' + Math.min(s.w, binder.size - col) : '');
-      pocket.style.gridRow = (row + 1) + (s && s.img && s.h > 1 ? ' / span ' + Math.min(s.h, binder.size - row) : '');
-      if (!(s && s.img)) {
-        // any pocket (filled or empty) accepts a dropped card
-        pocket.addEventListener('dragover', (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; pocket.classList.add('drag-over'); });
-        pocket.addEventListener('dragleave', () => pocket.classList.remove('drag-over'));
-        pocket.addEventListener('drop', async (e) => {
-          e.preventDefault();
-          const from = parseInt(e.dataTransfer.getData('text/plain'), 10);
-          if (!Number.isInteger(from) || !binder.slots[from] || binder.slots[from].img) return;
-          await moveEntry(from, i);
-          renderGrid(); renderHead();
-        });
-      }
+      // any card/empty pocket accepts a dropped card
+      pocket.addEventListener('dragover', (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; pocket.classList.add('drag-over'); });
+      pocket.addEventListener('dragleave', () => pocket.classList.remove('drag-over'));
+      pocket.addEventListener('drop', async (e) => {
+        e.preventDefault();
+        const from = parseInt(e.dataTransfer.getData('text/plain'), 10);
+        if (!Number.isInteger(from) || !binder.slots[from] || binder.slots[from].img) return;
+        await moveEntry(from, i);
+        renderGrid(); renderHead();
+      });
       pocket.addEventListener('click', async () => {
         if (moveFrom !== null) {
-          if (!(s && s.img)) await moveEntry(moveFrom, i);
+          await moveEntry(moveFrom, i);
           moveFrom = null;
           actions.replaceChildren();
           renderGrid(); renderHead();
           return;
         }
-        if (s && s.img) {
-          pocketActions(i);
-        } else if (s) {
+        if (s) {
           s.have = s.have ? 0 : 1;
           await save();
           renderGrid(); renderHead();
@@ -2062,28 +2112,17 @@ async function renderBinderPage(id) {
   function openPocketPicker(i) {
     const input = h('input', { type: 'text', placeholder: 'Search cards by name\u2026' });
     const results = h('div', { class: 'picker-results' });
-    // upload your own image into this pocket \u2014 it can span multiple pockets
-    const maxW = binder.size - ((i % per) % binder.size);
-    const maxH = binder.size - Math.floor((i % per) / binder.size);
-    const wSel = h('select', {}, ...Array.from({ length: maxW }, (_, n) => h('option', { value: String(n + 1) }, (n + 1) + ' wide')));
-    const hSel = h('select', {}, ...Array.from({ length: maxH }, (_, n) => h('option', { value: String(n + 1) }, (n + 1) + ' tall')));
+    // upload your own image into this pocket \u2014 the placement editor opens next
     const fileIn = h('input', { type: 'file', accept: 'image/*', hidden: '' });
     fileIn.addEventListener('change', async (e) => {
       const f = e.target.files && e.target.files[0];
       if (!f) return;
-      const w = parseInt(wSel.value, 10), hh = parseInt(hSel.value, 10);
-      for (let dy = 0; dy < hh; dy++) for (let dx = 0; dx < w; dx++) {
-        const t = i + dy * binder.size + dx;
-        if (t !== i && binder.slots[t]) { toast('That span would overlap an occupied pocket'); e.target.value = ''; return; }
-      }
       try {
         const res = await fetch('api/binder-image', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': f.type || 'application/octet-stream' }, body: f });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || 'Upload failed');
-        binder.slots[i] = { img: data.url, w, h: hh };
         overlay.remove();
-        await save();
-        renderHead(); renderGrid();
+        openArtEditor(null, { img: data.url, cells: [i], view: null, gaps: 'with' });
       } catch (err) { toast(err.message); }
       e.target.value = '';
     });
@@ -2092,7 +2131,7 @@ async function renderBinderPage(id) {
         h('div', { class: 'row', style: 'gap:8px' }, input,
           h('button', { class: 'btn ghost small', onclick: () => overlay.remove() }, 'Close')),
         h('div', { class: 'row', style: 'gap:8px; align-items:center; flex-wrap:wrap' },
-          h('span', { class: 'muted small' }, 'Or place your own image:'), wSel, hSel,
+          h('span', { class: 'muted small' }, 'Or place your own image:'),
           h('button', { class: 'btn ghost small', onclick: () => fileIn.click() }, '\u2b06 Upload image'), fileIn),
         results,
       ));
@@ -2129,6 +2168,128 @@ async function renderBinderPage(id) {
   }
 
 
+  /** Interactive placement editor: the full picture with the page's pocket
+   * grid overlaid. Drag to shift, slider to resize, tap pockets to choose
+   * which slices exist, and pick whether cuts include the between-pocket
+   * spacing (continuous across the binder) or not (nothing lost to gaps). */
+  async function openArtEditor(anchor, draft) {
+    const entry = draft || JSON.parse(JSON.stringify(binder.slots[anchor]));
+    const pageIdx = Math.floor(entry.cells[0] / per);
+    const base = pageIdx * per;
+    const nat = await loadNat(entry.img);
+    let gaps = entry.gaps === 'without' ? 'without' : 'with';
+    const selected = new Set(entry.cells);
+    const gapMm = () => (gaps === 'without' ? 0 : GAP_MM);
+    const pageW = () => binder.size * CARD_W + (binder.size - 1) * gapMm();
+    const pageH = () => binder.size * CARD_H + (binder.size - 1) * gapMm();
+    // image placement in page-mm space (origin = top-left pocket corner)
+    let imgW, imgX, imgY;
+    {
+      const geo = artGeo({ ...entry, gaps });
+      const v = artView(entry, geo);
+      imgW = v.s;
+      imgX = v.x + geo.minC * (CARD_W + gapMm());
+      imgY = v.y + geo.minR * (CARD_H + gapMm());
+    }
+    // pockets taken by cards or by OTHER pictures
+    const blocked = new Set();
+    for (const [k, e] of Object.entries(binder.slots)) {
+      const ki = parseInt(k, 10);
+      if (anchor !== null && ki === anchor) continue;
+      if (e.img && e.cells) e.cells.forEach((c) => blocked.add(c));
+      else if (e.card) blocked.add(ki);
+    }
+
+    const board = h('div', { class: 'art-board' });
+    const im = h('img', { src: entry.img, draggable: 'false', alt: '' });
+    const cellLayer = h('div', { class: 'art-cells' });
+    board.append(im, cellLayer);
+    const scale = h('input', { type: 'range', min: '25', max: '300', step: '1' });
+    const gapBtn = h('button', { class: 'btn ghost small' });
+    const status = h('div', { class: 'muted small', style: 'margin-top:4px' });
+
+    let pxPerMm = 1;
+    function layout() {
+      const bw = Math.min(430, Math.max(240, (view.clientWidth || 320) - 70));
+      pxPerMm = bw / pageW();
+      board.style.width = bw + 'px';
+      board.style.height = (pageH() * pxPerMm) + 'px';
+      im.style.width = (imgW * pxPerMm) + 'px';
+      im.style.left = (imgX * pxPerMm) + 'px';
+      im.style.top = (imgY * pxPerMm) + 'px';
+      cellLayer.replaceChildren();
+      for (let pp = 0; pp < per; pp++) {
+        const abs = base + pp;
+        const col = pp % binder.size, row = Math.floor(pp / binder.size);
+        const cell = h('div', { class: 'art-cell' + (selected.has(abs) ? ' sel' : '') + (blocked.has(abs) ? ' blocked' : ''), 'data-cell': String(abs) });
+        cell.style.left = (col * (CARD_W + gapMm()) * pxPerMm) + 'px';
+        cell.style.top = (row * (CARD_H + gapMm()) * pxPerMm) + 'px';
+        cell.style.width = (CARD_W * pxPerMm) + 'px';
+        cell.style.height = (CARD_H * pxPerMm) + 'px';
+        cellLayer.append(cell);
+      }
+      gapBtn.textContent = gaps === 'with' ? '\u2702 Cut: with pocket spacing' : '\u2702 Cut: without spacing';
+      status.textContent = `${selected.size} pocket${selected.size === 1 ? '' : 's'} selected \u2014 drag the picture to shift it, tap pockets to include them`;
+      scale.value = String(Math.round((imgW / pageW()) * 100));
+    }
+
+    // drag = pan; a short press-without-movement toggles the pocket under it
+    let drag = null;
+    board.addEventListener('pointerdown', (e) => {
+      drag = { x: e.clientX, y: e.clientY, ix: imgX, iy: imgY, moved: false };
+      try { board.setPointerCapture(e.pointerId); } catch { /* synthetic events */ }
+    });
+    board.addEventListener('pointermove', (e) => {
+      if (!drag) return;
+      const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+      if (Math.abs(dx) + Math.abs(dy) > 6) drag.moved = true;
+      if (drag.moved) { imgX = drag.ix + dx / pxPerMm; imgY = drag.iy + dy / pxPerMm; layout(); }
+    });
+    board.addEventListener('pointerup', (e) => {
+      if (drag && !drag.moved) {
+        const el = document.elementFromPoint(e.clientX, e.clientY);
+        const c = el && el.dataset && el.dataset.cell !== undefined ? parseInt(el.dataset.cell, 10) : null;
+        if (c !== null && !blocked.has(c)) { if (selected.has(c)) selected.delete(c); else selected.add(c); layout(); }
+        else if (c !== null) toast('That pocket is occupied');
+      }
+      drag = null;
+    });
+    scale.addEventListener('input', () => {
+      const cx = imgX + imgW / 2, cy = imgY + (imgW * nat.h / nat.w) / 2;
+      imgW = (parseInt(scale.value, 10) / 100) * pageW();
+      imgX = cx - imgW / 2;
+      imgY = cy - (imgW * nat.h / nat.w) / 2;
+      layout();
+    });
+    gapBtn.addEventListener('click', () => { gaps = gaps === 'with' ? 'without' : 'with'; layout(); });
+
+    const overlay = h('div', { class: 'picker-overlay' },
+      h('div', { class: 'picker-panel art-editor' },
+        h('h3', {}, 'Place your image'),
+        board,
+        h('div', { class: 'row', style: 'gap:8px; align-items:center' }, h('span', { class: 'muted small' }, 'Size'), scale),
+        h('div', { class: 'row', style: 'gap:8px; flex-wrap:wrap; align-items:center' }, gapBtn,
+          h('span', { class: 'muted small' }, 'With: the picture flows continuously across the binder. Without: slices are cut edge-to-edge.')),
+        status,
+        h('div', { class: 'row', style: 'justify-content:flex-end; gap:8px; margin-top:6px' },
+          h('button', { class: 'btn ghost small', onclick: () => overlay.remove() }, 'Cancel'),
+          h('button', { class: 'btn small', onclick: async () => {
+            if (!selected.size) { toast('Pick at least one pocket'); return; }
+            const cells = [...selected].sort((a, b) => a - b);
+            const geo = artGeo({ img: entry.img, cells, gaps });
+            binder.slots[cells[0]] = { img: entry.img, cells,
+              view: { x: imgX - geo.minC * (CARD_W + gapMm()), y: imgY - geo.minR * (CARD_H + gapMm()), s: imgW }, gaps };
+            if (anchor !== null && anchor !== cells[0]) delete binder.slots[anchor];
+            overlay.remove();
+            await save();
+            renderHead(); renderGrid();
+          } }, 'Save'),
+        ),
+      ));
+    view.append(overlay);
+    layout();
+  }
+
   function openProxyPrintDialog() {
     let which = 'missing', frame = 'color', paper = 'letter';
     const optRow = (label, opts, get, set) => h('div', { class: 'row', style: 'gap:6px; flex-wrap:wrap; align-items:center' },
@@ -2161,12 +2322,13 @@ async function renderBinderPage(id) {
     const area = h('div', { id: 'print-area', class: 'frame-' + frame });
     for (const [, v] of entries) {
       if (v.img) {
-        // uploaded art: print at its spanned physical size (63/88mm pockets + 4mm gaps)
-        const w = Math.min(v.w || 1, binder.size), hh = Math.min(v.h || 1, binder.size);
-        const cell = h('div', { class: 'print-cell print-art b-' + binder.color }, h('img', { src: v.img, alt: 'binder art' }));
-        cell.style.width = (w * 63 + (w - 1) * 4) + 'mm';
-        cell.style.height = (hh * 88 + (hh - 1) * 4) + 'mm';
-        area.append(cell);
+        // your picture: one 63×88mm piece per chosen pocket, cut with or
+        // without the between-pocket spacing (exactly as placed in the editor)
+        for (const c of v.cells || []) {
+          const cell = h('div', { class: 'print-cell print-art b-' + binder.color });
+          area.append(cell);
+          artPieceCss(cell, v, c, 1, 'mm');
+        }
         continue;
       }
       const card = cardsById.get(v.card);
@@ -2198,8 +2360,9 @@ async function renderBinderPage(id) {
     window.addEventListener('afterprint', cleanup);
     // let the images land before the print dialog snapshots the page
     const imgs = [...area.querySelectorAll('img')];
-    Promise.all(imgs.map((im) => im.complete ? null : new Promise((r) => { im.onload = im.onerror = r; })))
-      .then(() => setTimeout(() => window.print(), 60));
+    const natWaits = entries.filter(([, v]) => v.img).map(([, v]) => loadNat(v.img));
+    Promise.all([...imgs.map((im) => im.complete ? null : new Promise((r) => { im.onload = im.onerror = r; })), ...natWaits])
+      .then(() => setTimeout(() => window.print(), 120));
   }
 
   renderHead(); renderPager(); renderGrid();
