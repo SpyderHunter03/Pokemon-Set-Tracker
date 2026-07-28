@@ -116,6 +116,7 @@ function fail(msg) {
   const check = (name, cond) => { console.log((cond ? 'PASS' : 'FAIL') + ' — ' + name); if (!cond) stageFails++; };
   let stageFails = 0;
   const jfetch = async (url, opts) => fetch(url, opts).then((r) => r.json());
+  const CARD_OK = (id) => typeof id === 'string' && /^[a-zA-Z0-9.-]+$/.test(id);
 
   console.log('=== 7/8 variant importer + read-only mode + offline mirror ===');
 
@@ -245,6 +246,32 @@ function fail(msg) {
   const cpColl = await jfetch('http://localhost:3115/api/collection', { headers: { Authorization: 'Bearer ' + cpChange.token } });
   check('change-password kills old sessions, keeps new one', cpChange.ok === true && oldTokStatus === 401 && newTokStatus === 200);
   check('collection survives a password change', cpColl.collection['base1-4'] && cpColl.collection['base1-4'].holo === 3);
+
+  // ---- binders API: create (fill-from-set), checklist, move, delete ----
+  const buReg = await jfetch('http://localhost:3115/api/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'binderuser', password: 'password123' }) });
+  const buAuth = { 'Content-Type': 'application/json', Authorization: 'Bearer ' + buReg.token };
+  const bCreate = await jfetch('http://localhost:3115/api/binders', { method: 'POST', headers: buAuth, body: JSON.stringify({ name: 'Base Set Binder', size: 2, color: 'blue', fillFromSet: 'base1', lang: 'en' }) });
+  const bd = bCreate.binder || {};
+  check('binder: create + fill-from-set places every card of the set',
+    bCreate.ok === true && bd.size === 2 && bd.color === 'blue' &&
+    Object.keys(bd.slots).length === 5 && bd.pages === 2 && bd.slots['0'] && CARD_OK(bd.slots['0'].card));
+  // toggle have on pocket 0 + swap pockets 0 and 4 (across pages)
+  const slots2 = { ...bd.slots };
+  slots2['0'] = { ...slots2['0'], have: 1 };
+  const tmpSwap = slots2['4']; slots2['4'] = slots2['0']; slots2['0'] = tmpSwap;
+  const bPut = await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { method: 'PUT', headers: buAuth, body: JSON.stringify({ slots: slots2 }) });
+  const bGet = await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { headers: buAuth });
+  check('binder: checklist + cross-page move persist',
+    bPut.ok === true && bGet.binder.slots['4'].have === 1 && bGet.binder.slots['0'].have === 0 &&
+    bGet.binder.slots['4'].card === bd.slots['0'].card);
+  const bList = await jfetch('http://localhost:3115/api/binders', { headers: buAuth });
+  check('binder: list reports progress', bList.binders.length === 1 && bList.binders[0].filled === 5 && bList.binders[0].have === 1);
+  const bAnon = (await fetch('http://localhost:3115/api/binders')).status;
+  const bOther = (await fetch(`http://localhost:3115/api/binders/${bd.id}`, { headers: { Authorization: 'Bearer ' + cpChange.token } })).status;
+  check('binder: auth required and binders are private per account', bAnon === 401 && bOther === 404);
+  const bDel = await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { method: 'DELETE', headers: buAuth });
+  const bGone = (await fetch(`http://localhost:3115/api/binders/${bd.id}`, { headers: buAuth })).status;
+  check('binder: delete removes it', bDel.ok === true && bGone === 404);
 
   // ---- SQLite migration: a pre-SQLite JSON install imports on first boot ----
   const migDir = path.join(ROOT, '.test-data-mig');

@@ -83,6 +83,21 @@ db.exec(`
     data       TEXT NOT NULL,               -- JSON: { cardId: { variant: qty } }
     updated_at INTEGER NOT NULL
   );
+  -- Binders: a user's physical binders, tracked pocket by pocket. Pages of
+  -- size×size pockets; slots is a sparse JSON map of pocket index →
+  -- { card, variant, have } with its own independent have/need checklist.
+  CREATE TABLE IF NOT EXISTS binders (
+    user_id TEXT NOT NULL,
+    id      TEXT NOT NULL,
+    name    TEXT NOT NULL,
+    size    INTEGER NOT NULL,               -- pockets per side: 2, 3, 4 or 5
+    color   TEXT NOT NULL,
+    pages   INTEGER NOT NULL,
+    slots   TEXT NOT NULL,                  -- JSON: { "17": { card, variant, have } }
+    created TEXT NOT NULL,
+    updated INTEGER NOT NULL,
+    PRIMARY KEY (user_id, id)
+  );
 
   -- ---- card catalog (the app reads cards from here, not from R2 JSON) ----
   -- Every card and printing is a row. Image fields hold a full location: a
@@ -195,6 +210,17 @@ function getCollectionOf(userId) {
 function putCollectionOf(userId, collection, updatedAt) {
   _upsertCollection.run(userId, JSON.stringify(collection), updatedAt);
 }
+
+// ---------- binders ----------
+const BINDER_SIZES = [2, 3, 4, 5];               // pockets per side
+const BINDER_COLORS = ['red', 'blue', 'green', 'purple', 'black'];
+const _bindersOf = db.prepare('SELECT id, name, size, color, pages, slots FROM binders WHERE user_id = ? ORDER BY created');
+const _binderGet = db.prepare('SELECT * FROM binders WHERE user_id = ? AND id = ?');
+const _binderPut = db.prepare(`INSERT INTO binders (user_id, id, name, size, color, pages, slots, created, updated)
+  VALUES (?,?,?,?,?,?,?,?,?)
+  ON CONFLICT(user_id, id) DO UPDATE SET name=excluded.name, color=excluded.color,
+    pages=excluded.pages, slots=excluded.slots, updated=excluded.updated`);
+const _binderDel = db.prepare('DELETE FROM binders WHERE user_id = ? AND id = ?');
 
 /** First-run migration: import any pre-SQLite JSON accounts/collections. */
 function migrateJsonToDb() {
@@ -1464,6 +1490,89 @@ async function handleApi(req, res, pathname, ip, url) {
     const updatedAt = Date.now();
     putCollectionOf(user.id, clean, updatedAt);
     return sendJSON(res, 200, { ok: true, updatedAt, count: Object.keys(clean).length });
+  }
+
+  // ---------- binders (per-account; independent have/need checklist) ----------
+  if (pathname === '/api/binders' && req.method === 'GET') {
+    const rows = _bindersOf.all(user.id).map((b) => {
+      const slots = JSON.parse(b.slots);
+      const entries = Object.values(slots);
+      return { id: b.id, name: b.name, size: b.size, color: b.color, pages: b.pages,
+        filled: entries.length, have: entries.filter((s) => s.have).length };
+    });
+    return sendJSON(res, 200, { binders: rows });
+  }
+
+  if (pathname === '/api/binders' && req.method === 'POST') {
+    const body = await readBody(req);
+    const name = typeof body.name === 'string' ? body.name.trim().slice(0, 40) : '';
+    const size = BINDER_SIZES.includes(body.size) ? body.size : null;
+    const color = BINDER_COLORS.includes(body.color) ? body.color : BINDER_COLORS[0];
+    if (!name || !size) return sendJSON(res, 400, { error: 'A name and a pocket size (2–5) are required' });
+    if (_bindersOf.all(user.id).length >= 100) return sendJSON(res, 400, { error: 'Binder limit reached (100)' });
+    const perPage = size * size;
+    let slots = {}, pages = 1;
+    if (body.fillFromSet && SET_ID_RE.test(body.fillFromSet)) {
+      const flang = LANG_RE.test(body.lang || '') ? body.lang : 'en';
+      const cards = _cardsOfSet.all(flang, body.fillFromSet);
+      if (!cards.length) return sendJSON(res, 400, { error: 'That set has no cards to fill from' });
+      cards.forEach((c, i) => {
+        const primary = (c.variants_csv ? c.variants_csv.split(',') : ['normal'])[0] || 'normal';
+        slots[i] = { card: c.id, variant: primary, have: 0 };
+      });
+      pages = Math.max(1, Math.ceil(cards.length / perPage));
+    }
+    const binder = {
+      id: crypto.randomUUID(), name, size, color, pages,
+      slots, created: new Date().toISOString(), updated: Date.now(),
+    };
+    _binderPut.run(user.id, binder.id, binder.name, binder.size, binder.color, binder.pages,
+      JSON.stringify(binder.slots), binder.created, binder.updated);
+    return sendJSON(res, 200, { ok: true, binder });
+  }
+
+  const binderMatch = pathname.match(/^\/api\/binders\/([a-f0-9-]{36})$/);
+  if (binderMatch) {
+    const row = _binderGet.get(user.id, binderMatch[1]);
+    if (!row) return sendJSON(res, 404, { error: 'Binder not found' });
+    if (req.method === 'GET') {
+      return sendJSON(res, 200, { binder: { id: row.id, name: row.name, size: row.size, color: row.color,
+        pages: row.pages, slots: JSON.parse(row.slots), updated: row.updated } });
+    }
+    if (req.method === 'PUT') {
+      const body = await readBody(req);
+      const name = typeof body.name === 'string' && body.name.trim() ? body.name.trim().slice(0, 40) : row.name;
+      const color = BINDER_COLORS.includes(body.color) ? body.color : row.color;
+      let pages = Number.isInteger(body.pages) ? Math.min(Math.max(body.pages, 1), 60) : row.pages;
+      let slots = JSON.parse(row.slots);
+      if (body.slots !== undefined) {
+        if (typeof body.slots !== 'object' || body.slots === null || Array.isArray(body.slots)) {
+          return sendJSON(res, 400, { error: 'slots must be an object of pocket index -> card entry' });
+        }
+        const capacity = pages * row.size * row.size;
+        const clean = {};
+        for (const [k, v] of Object.entries(body.slots)) {
+          const i = parseInt(k, 10);
+          if (!Number.isInteger(i) || i < 0 || i >= capacity) continue;
+          if (!v || typeof v !== 'object') continue;
+          if (typeof v.card !== 'string' || !CARD_ID_RE.test(v.card)) continue;
+          const variant = typeof v.variant === 'string' && VARIANT_KEY_RE.test(v.variant) ? v.variant : 'normal';
+          clean[i] = { card: v.card, variant, have: v.have ? 1 : 0 };
+        }
+        slots = clean;
+      } else {
+        // shrinking pages must not orphan filled pockets
+        const capacity = pages * row.size * row.size;
+        for (const k of Object.keys(slots)) if (parseInt(k, 10) >= capacity) { pages = row.pages; break; }
+      }
+      const updated = Date.now();
+      _binderPut.run(user.id, row.id, name, row.size, color, pages, JSON.stringify(slots), row.created, updated);
+      return sendJSON(res, 200, { ok: true, updated });
+    }
+    if (req.method === 'DELETE') {
+      _binderDel.run(user.id, row.id);
+      return sendJSON(res, 200, { ok: true });
+    }
   }
 
   return sendJSON(res, 404, { error: 'Unknown API endpoint' });

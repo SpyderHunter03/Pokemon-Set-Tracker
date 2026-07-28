@@ -179,6 +179,35 @@ const { chromium } = require('playwright');
   check('pokemon page sorts oldest-set first', (await page.locator('.tcg-card >> nth=0').getAttribute('data-card-id')) === 'base1-4');
   await page.selectOption('.chips select', 'newest');
 
+  // ---- binders: create (fill from set), checklist, picker ----
+  await page.goto('http://localhost:3111/#/binders');
+  await page.waitForSelector('.binder-create');
+  await page.fill('.binder-create input[type=text]', 'My Binder');
+  await page.selectOption('.binder-create select >> nth=0', '2');       // 2×2 pockets
+  await page.selectOption('.binder-create select >> nth=1', 'base1');   // fill from Base Set
+  await page.click('.binder-create .swatch.b-green');
+  await page.click('button:has-text("Create binder")');
+  await page.waitForSelector('.binder-grid .pocket');
+  check('binder: 2×2 page shows 4 pockets', (await page.locator('.binder-grid .pocket').count()) === 4);
+  check('binder: fill-from-set filled page 1', (await page.locator('.binder-grid .pocket.filled').count()) === 4);
+  check('binder: 5 cards → 2 pages', (await page.textContent('#view')).includes('Page 1 / 2'));
+  check('binder: starts with none in hand', (await page.textContent('#view')).includes('0 / 5 in hand'));
+  await page.click('.binder-grid .pocket >> nth=0');                    // tap = "I have this one"
+  await page.waitForSelector('.binder-grid .pocket.have');
+  check('binder: tap marks a pocket as in hand', (await page.textContent('#view')).includes('1 / 5 in hand'));
+  await page.click('button:has-text("›")');                             // page 2: 1 filled, 3 empty
+  await page.waitForFunction(() => document.querySelectorAll('.binder-grid .pocket.filled').length === 1);
+  await page.click('.binder-grid .pocket:not(.filled) >> nth=0');       // empty pocket → picker
+  await page.waitForSelector('.picker-overlay input');
+  await page.fill('.picker-overlay input', 'Pikachu');
+  await page.waitForSelector('.picker-row .chip');
+  await page.click('.picker-row .chip >> nth=0');
+  await page.waitForFunction(() => document.querySelectorAll('.binder-grid .pocket.filled').length === 2);
+  check('binder: picker places a card into the chosen pocket', (await page.textContent('#view')).includes('1 / 6 in hand'));
+  await page.goto('http://localhost:3111/#/binders');
+  await page.waitForSelector('.binder-cover');
+  check('binder: cover shows live progress', (await page.textContent('.binder-cover')).includes('1 / 6 in hand'));
+
   // ---- language switching ----
   await page.click('#account-btn');
   await page.waitForSelector('#language-area select');

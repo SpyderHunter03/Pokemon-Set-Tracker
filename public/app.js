@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.17.2';
+const APP_VERSION = '3.18.0';
 
 /* ============================================================
  * Storage helpers
@@ -736,7 +736,38 @@ async function openCardModal(brief, { variant, onOwnershipChange } = {}) {
     chipsWrap,
     counterWrap,
     adminWrap,
-    h('div', { class: 'row', style: 'margin-top:14px; justify-content:flex-end' },
+    h('div', { class: 'row', style: 'margin-top:14px; justify-content:flex-end; gap:8px' },
+      auth ? h('button', { class: 'btn ghost', onclick: async (e) => {
+        const btn = e.target;
+        btn.disabled = true;
+        try {
+          const list = (await apiCall('binders')).binders;
+          if (!list.length) { toast('No binders yet — create one in the Binders tab'); return; }
+          const addTo = async (b) => {
+            const full = (await apiCall('binders/' + b.id)).binder;
+            const per = full.size * full.size;
+            const cap = full.pages * per;
+            let slot = -1;
+            for (let i = 0; i < cap; i++) if (!full.slots[i]) { slot = i; break; }
+            if (slot === -1) { full.pages += 1; slot = cap; }   // binder full → new page
+            full.slots[slot] = { card: card.id, variant: active, have: 0 };
+            await apiCall('binders/' + b.id, { method: 'PUT', body: JSON.stringify({ pages: full.pages, slots: full.slots }) });
+            toast(`Added to ${b.name} (page ${Math.floor(slot / per) + 1})`);
+          };
+          if (list.length === 1) await addTo(list[0]);
+          else {
+            const chooser = h('div', { class: 'row', style: 'flex-wrap:wrap; gap:6px; margin-top:8px' },
+              h('span', { class: 'muted small' }, 'Add to binder:'),
+              ...list.map((b) => h('button', { class: 'chip', onclick: async () => {
+                try { await addTo(b); } catch (err) { toast(err.message); }
+                chooser.remove();
+              } }, b.name)),
+              h('button', { class: 'chip', onclick: () => chooser.remove() }, 'Cancel'));
+            btn.parentElement.before(chooser);
+          }
+        } catch (err) { toast(err.message); }
+        finally { btn.disabled = false; }
+      } }, '📒 Add to binder') : null,
       h('button', { class: 'btn ghost', onclick: () => cardModal.close() }, 'Close'),
     ),
   );
@@ -1764,6 +1795,254 @@ function importCollection(file) {
 /* ============================================================
  * Router & init
  * ============================================================ */
+/* ============================================================
+ * Pages — Binders (physical binders, tracked pocket by pocket)
+ * ============================================================ */
+const BINDER_COLORS = ['red', 'blue', 'green', 'purple', 'black'];
+const BINDER_SIZES = [2, 3, 4, 5];
+
+function binderGate() {
+  view.replaceChildren(h('div', { class: 'center', style: 'max-width:440px; margin:40px auto' },
+    h('h2', {}, 'Binders'),
+    h('p', { class: 'muted' }, 'Build digital versions of your real binders — pick a pocket size and color, place cards pocket by pocket, and track which ones you have.'),
+    serverAvailable
+      ? h('button', { class: 'btn', onclick: () => { renderAccountModal(); accountModal.showModal(); } }, 'Sign in to start')
+      : h('p', { class: 'muted small' }, 'Binders need an account on the bundled server.'),
+  ));
+}
+
+async function renderBindersPage() {
+  if (!auth) return binderGate();
+  view.replaceChildren(spinner());
+  let list;
+  try { list = (await apiCall('binders')).binders; }
+  catch (e) { view.replaceChildren(dbErrorView('Could not load your binders.', e, renderBindersPage)); return; }
+
+  const grid = h('div', { class: 'binder-list' });
+  for (const b of list) {
+    grid.append(h('a', { class: `binder-cover b-${b.color}`, href: '#/binder/' + b.id },
+      h('div', { class: 'binder-name' }, b.name),
+      h('div', { class: 'binder-meta' }, `${b.size}\u00d7${b.size} \u00b7 ${b.pages} page${b.pages === 1 ? '' : 's'}`),
+      h('div', { class: 'binder-meta' }, b.filled ? `${b.have} / ${b.filled} in hand` : 'empty'),
+    ));
+  }
+
+  let color = BINDER_COLORS[0];
+  const nameIn = h('input', { type: 'text', placeholder: 'Binder name', maxlength: '40' });
+  const sizeSel = h('select', {}, ...BINDER_SIZES.map((s) => h('option', { value: String(s) }, `${s}\u00d7${s} pockets`)));
+  sizeSel.value = '3';
+  const swatches = h('div', { class: 'row', style: 'gap:8px; margin:10px 0' }, ...BINDER_COLORS.map((c) =>
+    h('button', { class: 'swatch b-' + c + (c === color ? ' active' : ''), title: c, onclick: (e) => {
+      color = c;
+      swatches.querySelectorAll('.swatch').forEach((el) => el.classList.toggle('active', el === e.target));
+    } })));
+  const setSel = h('select', {}, h('option', { value: '' }, 'Start empty'));
+  try {
+    const idx = await getIndex();
+    for (const s of [...idx.sets].reverse()) setSel.append(h('option', { value: s.id }, 'Fill from: ' + s.name));
+  } catch { /* empty-start only */ }
+  const createBtn = h('button', { class: 'btn', onclick: async () => {
+    const name = nameIn.value.trim();
+    if (!name) { toast('Give the binder a name'); return; }
+    createBtn.disabled = true;
+    try {
+      const r = await apiCall('binders', { method: 'POST', body: JSON.stringify({
+        name, size: parseInt(sizeSel.value, 10), color, fillFromSet: setSel.value || undefined, lang,
+      }) });
+      location.hash = '#/binder/' + r.binder.id;
+    } catch (e) { createBtn.disabled = false; toast(e.message); }
+  } }, '\uff0b Create binder');
+
+  view.replaceChildren(
+    h('div', { class: 'page-head' }, h('h1', {}, 'Binders'),
+      h('div', { class: 'muted' }, list.length ? `${list.length} binder${list.length === 1 ? '' : 's'}` : 'No binders yet')),
+    grid,
+    h('div', { class: 'binder-create' },
+      h('h3', {}, 'New binder'),
+      h('div', { class: 'row', style: 'flex-wrap:wrap; gap:8px' }, nameIn, sizeSel, setSel),
+      swatches,
+      createBtn,
+    ),
+  );
+}
+
+async function renderBinderPage(id) {
+  if (!auth) return binderGate();
+  view.replaceChildren(spinner());
+  let binder, cardsById;
+  try {
+    const [bRes, idx] = await Promise.all([apiCall('binders/' + id), getSearchIndex()]);
+    binder = bRes.binder;
+    cardsById = new Map(idx.cards.map((c) => [c.id, c]));
+  } catch (e) { view.replaceChildren(dbErrorView('Could not load that binder.', e, () => renderBinderPage(id))); return; }
+
+  const per = binder.size * binder.size;
+  let page = 0, moveFrom = null;
+
+  const save = async (extra = {}) => {
+    try { await apiCall('binders/' + id, { method: 'PUT', body: JSON.stringify({ slots: binder.slots, pages: binder.pages, ...extra }) }); }
+    catch (e) { toast('Save failed: ' + e.message); }
+  };
+  const filledCount = () => Object.keys(binder.slots).length;
+  const haveCount = () => Object.values(binder.slots).filter((s) => s.have).length;
+
+  const head = h('div', {});
+  const pager = h('div', { class: 'row', style: 'justify-content:center; align-items:center; gap:12px; margin:10px 0' });
+  const grid = h('div', { class: 'binder-grid' });
+  grid.style.gridTemplateColumns = `repeat(${binder.size}, 1fr)`;
+  const actions = h('div', {});
+
+  function renderHead() {
+    const total = filledCount(), got = haveCount();
+    head.replaceChildren(...[
+      h('a', { class: 'back-link', href: '#/binders' }, '\u2190 Binders'),
+      h('div', { class: 'page-head' },
+        h('h1', {}, h('span', { class: 'binder-dot b-' + binder.color }), ' ' + binder.name),
+        h('div', { class: 'muted' }, `${binder.size}\u00d7${binder.size} \u00b7 ${got} / ${total} in hand`),
+      ),
+      total ? h('div', { class: 'progress', style: 'height:8px; margin-bottom:10px' },
+        h('div', { style: `width:${Math.round((got / total) * 100)}%` })) : null,
+      h('div', { class: 'row', style: 'gap:8px; flex-wrap:wrap' },
+        h('button', { class: 'btn ghost small', onclick: async () => {
+          const name = prompt('Binder name', binder.name);
+          if (!name || !name.trim()) return;
+          binder.name = name.trim().slice(0, 40);
+          try { await apiCall('binders/' + id, { method: 'PUT', body: JSON.stringify({ name: binder.name }) }); } catch (e) { toast(e.message); }
+          renderHead();
+        } }, '\u270e Rename'),
+        h('button', { class: 'btn ghost small', onclick: async () => {
+          binder.color = BINDER_COLORS[(BINDER_COLORS.indexOf(binder.color) + 1) % BINDER_COLORS.length];
+          try { await apiCall('binders/' + id, { method: 'PUT', body: JSON.stringify({ color: binder.color }) }); } catch (e) { toast(e.message); }
+          renderHead();
+        } }, '\ud83c\udfa8 Color'),
+        h('button', { class: 'btn ghost small', onclick: async () => {
+          binder.pages += 1; await save(); renderPager(); renderGrid();
+        } }, '\uff0b Add page'),
+        h('button', { class: 'btn ghost small', onclick: async () => {
+          if (!confirm(`Delete "${binder.name}"? This cannot be undone.`)) return;
+          try { await apiCall('binders/' + id, { method: 'DELETE' }); location.hash = '#/binders'; }
+          catch (e) { toast(e.message); }
+        } }, '\ud83d\uddd1 Delete'),
+      ),
+    ].filter(Boolean));
+  }
+
+  function renderPager() {
+    pager.replaceChildren(
+      h('button', { class: 'btn ghost small', onclick: () => { if (page > 0) { page--; renderPager(); renderGrid(); } } }, '\u2039'),
+      h('span', { class: 'muted' }, `Page ${page + 1} / ${binder.pages}`),
+      h('button', { class: 'btn ghost small', onclick: () => { if (page < binder.pages - 1) { page++; renderPager(); renderGrid(); } } }, '\u203a'),
+    );
+  }
+
+  function pocketActions(i) {
+    const s = binder.slots[i];
+    const card = s && cardsById.get(s.card);
+    actions.replaceChildren(h('div', { class: 'pocket-actions' },
+      h('span', { class: 'muted small' }, card ? `${card.name} \u2014 ${variantLabel(card, s.variant)}` : 'Pocket ' + (i + 1)),
+      h('button', { class: 'btn small', onclick: () => {
+        moveFrom = i;
+        actions.replaceChildren(h('p', { class: 'muted small' }, 'Tap the destination pocket (any page). Tap the same pocket to cancel.'));
+        renderGrid();
+      } }, '\u2194 Move'),
+      card ? h('button', { class: 'btn small', onclick: () => openCardModal(card, { variant: s.variant }) }, '\u24d8 Details') : null,
+      h('button', { class: 'btn small', onclick: async () => {
+        delete binder.slots[i]; await save(); actions.replaceChildren(); renderHead(); renderGrid();
+      } }, '\u2715 Remove'),
+      h('button', { class: 'btn ghost small', onclick: () => actions.replaceChildren() }, 'Cancel'),
+    ));
+  }
+
+  function renderGrid() {
+    grid.replaceChildren();
+    const base = page * per;
+    for (let p = 0; p < per; p++) {
+      const i = base + p;
+      const s = binder.slots[i];
+      let pocket;
+      if (s) {
+        const card = cardsById.get(s.card);
+        const img = card && cardImg(card, 'low', s.variant);
+        pocket = h('div', { class: 'pocket filled' + (s.have ? ' have' : '') + (moveFrom === i ? ' moving' : ''), 'data-pocket': String(i) },
+          img ? h('img', { src: img, loading: 'lazy', alt: (card && card.name) || s.card })
+              : h('div', { class: 'pocket-name' }, (card && card.name) || s.card),
+          s.have ? h('div', { class: 'pocket-badge' }, '\u2713') : null,
+          h('button', { class: 'pocket-edit', onclick: (e) => { e.stopPropagation(); pocketActions(i); } }, '\u22ef'),
+        );
+      } else {
+        pocket = h('div', { class: 'pocket' + (moveFrom === i ? ' moving' : ''), 'data-pocket': String(i) },
+          h('div', { class: 'pocket-plus' }, '\uff0b'));
+      }
+      pocket.addEventListener('click', async () => {
+        if (moveFrom !== null) {
+          if (moveFrom !== i) {
+            const a = binder.slots[moveFrom], b = binder.slots[i];
+            if (b) binder.slots[moveFrom] = b; else delete binder.slots[moveFrom];
+            binder.slots[i] = a;
+            await save();
+          }
+          moveFrom = null;
+          actions.replaceChildren();
+          renderGrid(); renderHead();
+          return;
+        }
+        if (s) {
+          s.have = s.have ? 0 : 1;
+          await save();
+          renderGrid(); renderHead();
+        } else {
+          openPocketPicker(i);
+        }
+      });
+      grid.append(pocket);
+    }
+  }
+
+  function openPocketPicker(i) {
+    const input = h('input', { type: 'text', placeholder: 'Search cards by name\u2026' });
+    const results = h('div', { class: 'picker-results' });
+    const overlay = h('div', { class: 'picker-overlay' },
+      h('div', { class: 'picker-panel' },
+        h('div', { class: 'row', style: 'gap:8px' }, input,
+          h('button', { class: 'btn ghost small', onclick: () => overlay.remove() }, 'Close')),
+        results,
+      ));
+    const renderResults = () => {
+      const q = input.value.trim().toLowerCase();
+      results.replaceChildren();
+      if (q.length < 2) { results.append(h('p', { class: 'muted small' }, 'Type at least 2 letters.')); return; }
+      const hits = [];
+      for (const c of cardsById.values()) {
+        if (c.name.toLowerCase().includes(q)) { hits.push(c); if (hits.length >= 40) break; }
+      }
+      if (!hits.length) { results.append(h('p', { class: 'muted small' }, 'No cards match.')); return; }
+      for (const c of hits) {
+        const chips = realVariants(c).map((vk) => h('button', { class: 'chip', onclick: async () => {
+          binder.slots[i] = { card: c.id, variant: vk, have: 0 };
+          overlay.remove();
+          await save();
+          renderHead(); renderGrid();
+        } }, variantLabel(c, vk)));
+        const img = cardImg(c, 'low');
+        results.append(h('div', { class: 'picker-row' },
+          img ? h('img', { src: img, loading: 'lazy' }) : h('div', { class: 'picker-thumb' }, '\ud83c\udccf'),
+          h('div', { class: 'picker-info' },
+            h('div', {}, c.name),
+            h('div', { class: 'muted small' }, setIdOf(c.id) + ' \u00b7 #' + c.localId),
+            h('div', { class: 'row', style: 'flex-wrap:wrap; gap:4px' }, ...chips)),
+        ));
+      }
+    };
+    input.addEventListener('input', renderResults);
+    renderResults();
+    view.append(overlay);
+    input.focus();
+  }
+
+  renderHead(); renderPager(); renderGrid();
+  view.replaceChildren(head, pager, grid, actions);
+}
+
 function route() {
   const hash = location.hash.slice(1) || '/';
   stopScanner(); // release the camera when leaving the scan page
@@ -1776,6 +2055,8 @@ function route() {
   else if (searchMatch) renderSearchPage(searchMatch[1]);
   else if (hash === '/pokemon') { nav = 'pokemon'; renderPokemonList(); }
   else if (pokeMatch) { nav = 'pokemon'; renderPokemonPage(pokeMatch[1]); }
+  else if (hash === '/binders') { nav = 'binders'; renderBindersPage(); }
+  else if (hash.startsWith('/binder/')) { nav = 'binders'; renderBinderPage(hash.slice('/binder/'.length)); }
   else if (hash === '/scan') { nav = 'scan'; renderScanPage(); }
   else if (hash === '/debug') renderDebugPage();
   else renderHome();

@@ -687,3 +687,70 @@ body { padding-bottom: calc(64px + env(safe-area-inset-bottom)); }
   .stats-banner { gap: 8px; }
   .stat .num { font-size: 18px; }
 }
+
+/* ---------- binders ---------- */
+.binder-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; margin-bottom: 20px; }
+.binder-cover {
+  aspect-ratio: 3 / 4; border-radius: 10px 14px 14px 10px; padding: 14px 12px 12px 20px;
+  display: flex; flex-direction: column; justify-content: flex-end; gap: 4px;
+  color: #fff; position: relative; border: 1px solid rgba(255,255,255,.14);
+  box-shadow: inset 10px 0 14px -10px rgba(0,0,0,.65);
+}
+.binder-cover::before { /* spine rings */
+  content: ''; position: absolute; left: 6px; top: 12%; bottom: 12%; width: 3px;
+  border-radius: 3px; background: repeating-linear-gradient(rgba(255,255,255,.55) 0 6px, transparent 6px 18px);
+}
+.binder-cover:hover { filter: brightness(1.12); }
+.binder-name { font-weight: 700; font-size: 15px; line-height: 1.2; word-break: break-word; }
+.binder-meta { font-size: 12px; opacity: .85; }
+.b-red    { background: linear-gradient(145deg, #b3271e, #7c1712); }
+.b-blue   { background: linear-gradient(145deg, #2456b3, #16336e); }
+.b-green  { background: linear-gradient(145deg, #1e8a4c, #135631); }
+.b-purple { background: linear-gradient(145deg, #6d3fb3, #45266f); }
+.b-black  { background: linear-gradient(145deg, #3a3f47, #17191d); }
+.binder-dot { display: inline-block; width: 14px; height: 14px; border-radius: 4px; vertical-align: baseline; }
+.swatch { width: 30px; height: 30px; border-radius: 8px; border: 2px solid transparent; cursor: pointer; }
+.swatch.active { border-color: #fff; outline: 2px solid var(--accent-soft); }
+.binder-create { border: 1px solid var(--line, #333); border-radius: 12px; padding: 14px; max-width: 560px; }
+.binder-create input[type=text], .binder-create select {
+  background: var(--card, #1c2333); color: inherit; border: 1px solid var(--line, #333);
+  border-radius: 8px; padding: 8px 10px; font-size: 14px;
+}
+.binder-grid { display: grid; gap: 8px; max-width: 720px; margin: 0 auto; }
+.pocket {
+  aspect-ratio: 63 / 88; border: 2px dashed var(--line, #3a4157); border-radius: 8px;
+  position: relative; overflow: hidden; cursor: pointer;
+  display: flex; align-items: center; justify-content: center; background: rgba(255,255,255,.02);
+}
+.pocket:hover { border-color: var(--accent-soft); }
+.pocket.filled { border-style: solid; }
+.pocket.filled img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.pocket.filled:not(.have) img { filter: grayscale(.85) brightness(.55); }
+.pocket.have { border-color: var(--owned); }
+.pocket.moving { outline: 3px solid var(--accent-soft); }
+.pocket-plus { font-size: 26px; color: var(--line, #3a4157); }
+.pocket-name { font-size: 11px; padding: 4px; text-align: center; }
+.pocket-badge {
+  position: absolute; top: 4px; left: 4px; background: var(--owned); color: #fff;
+  border-radius: 50%; width: 20px; height: 20px; font-size: 12px;
+  display: flex; align-items: center; justify-content: center;
+}
+.pocket-edit {
+  position: absolute; top: 2px; right: 2px; background: rgba(0,0,0,.55); color: #fff;
+  border: 0; border-radius: 6px; padding: 2px 7px; font-size: 13px; cursor: pointer;
+}
+.pocket-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; justify-content: center; margin: 12px 0; }
+.picker-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,.65); z-index: 60;
+  display: flex; align-items: flex-start; justify-content: center; padding: 30px 12px;
+}
+.picker-panel {
+  background: var(--card, #1c2333); border: 1px solid var(--line, #333); border-radius: 12px;
+  padding: 14px; width: 100%; max-width: 480px; max-height: 80vh; display: flex; flex-direction: column; gap: 10px;
+}
+.picker-panel input { flex: 1; background: transparent; color: inherit; border: 1px solid var(--line, #333); border-radius: 8px; padding: 8px 10px; }
+.picker-results { overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+.picker-row { display: flex; gap: 10px; align-items: flex-start; border-bottom: 1px solid var(--line, #2a3040); padding-bottom: 8px; }
+.picker-row img, .picker-thumb { width: 46px; aspect-ratio: 63/88; object-fit: cover; border-radius: 4px; flex-shrink: 0; }
+.picker-thumb { display: flex; align-items: center; justify-content: center; background: rgba(255,255,255,.05); }
+.picker-info { flex: 1; min-width: 0; }
