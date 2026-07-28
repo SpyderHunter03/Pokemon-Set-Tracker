@@ -431,6 +431,25 @@ function fail(msg) {
   check('update: the install’s own local printing SURVIVED the master update',
     pika && pika.printings && pika.printings['my-local-promo'] === 'My Local Promo');
 
+  // ---- a workspace seeded by PULLING the master (no local image tree)
+  //      can still publish — catalog only, images stay on the bucket ----
+  // (the scan-index fallback caches into public/cdn, so clear it to get the
+  //  true "just pulled, never built" state — and --prune must refuse even
+  //  when a stray cached file exists, since there are no local images)
+  const wsPrune = spawnSync('node', ['scripts/publish-images.js', '--prune'], {
+    cwd: pullRoot, encoding: 'utf8',
+    env: { ...process.env, ...r2env, DATA_DIR: path.join(pullRoot, 'data') },
+  });
+  check('image-less workspace refuses --prune (would delete every bucket image)', wsPrune.status === 1);
+  fs.rmSync(path.join(pullRoot, 'public', 'cdn'), { recursive: true, force: true });
+  const wsPub = spawnSync('node', ['scripts/publish-images.js'], {
+    cwd: pullRoot, encoding: 'utf8',
+    env: { ...process.env, ...r2env, DATA_DIR: path.join(pullRoot, 'data'), PTCG_CDN_BASE: 'http://localhost:3998/cards' },
+  });
+  const wsOut = (wsPub.stdout || '') + (wsPub.stderr || '');
+  check('image-less workspace publishes the master catalog (no public/cdn needed)',
+    wsPub.status === 0 && /publishing the master catalog only/.test(wsOut) && /version 3/.test(wsOut));
+
   const pullOk = catRes.ok && pullCfg.remoteCatalog === 'http://localhost:3998/cards' && pullStats.cards > 10 &&
     pullCard && pullCard.printings && pullCard.printings['cracked-ice-holo'] === 'Cracked Ice Holo' &&
     catManifest.version === 1 && chk2.behind === true && pullCfg2.masterVersion === 2 && !gone &&

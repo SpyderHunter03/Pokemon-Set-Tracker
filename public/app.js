@@ -1569,9 +1569,11 @@ async function renderAdminArea() {
 
     // master update check: ping the tiny catalog.json manifest and offer a
     // data-only update when this install is behind (no images move — they
-    // stay wherever they are, on the CDN or already downloaded locally)
+    // stay wherever they are, on the CDN or already downloaded locally).
+    // Not in the maintainer workspace: it PRODUCES the master — pulling its
+    // own published output back would be circular.
     const updateArea = h('div', {});
-    if (appConfig.remoteCatalog) {
+    if (appConfig.remoteCatalog && !appConfig.master) {
       updateArea.append(h('p', { class: 'muted small' }, 'Checking the master database for updates…'));
       (async () => {
         let chk = null;

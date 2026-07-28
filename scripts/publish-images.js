@@ -173,8 +173,19 @@ function localFiles() {
   try {
     langs = fs.readdirSync(CDN_DIR, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name);
   } catch {
-    console.error(`No card database found at ${CDN_DIR} — run the downloader first.`);
-    process.exit(1);
+    // No local public/cdn tree. Normal for a maintainer workspace that was
+    // seeded by pulling the master (images already live on the bucket) —
+    // publish the master catalog only. Fatal only where it makes no sense:
+    if (IMAGES_ONLY) {
+      console.error(`No local card images at ${CDN_DIR} and --images-only was given — nothing to do.`);
+      process.exit(1);
+    }
+    if (PRUNE) {
+      console.error(`No local files at ${CDN_DIR} — refusing --prune (it would delete every remote object).`);
+      process.exit(1);
+    }
+    console.warn(`No local card database at ${CDN_DIR} — publishing the master catalog only.`);
+    return files;
   }
   for (const lang of langs) {
     if (ONLY_LANGS && !ONLY_LANGS.includes(lang)) continue;
@@ -369,6 +380,13 @@ async function pool(items, size, worker) {
   const localSet = new Set(keys);
   if (catalog) { localSet.add('catalog.db'); localSet.add('catalog.json'); }   // never prune the master database
   const stale = [...remote.keys()].filter((k) => !localSet.has(k));
+  // --prune from a machine with no local card images (e.g. a maintainer
+  // workspace seeded by pulling the master) would delete every image on the
+  // bucket. Pruning requires a full local image tree.
+  if (PRUNE && !keys.some(isImageKey)) {
+    console.error('No local card images found — refusing --prune (it would delete every image on the bucket).');
+    process.exit(1);
+  }
   if (PRUNE) console.log(`To delete (remote only): ${stale.length}`);
   else if (stale.length && !ONLY_LANGS && !IMAGES_ONLY) {
     console.log(`Note: ${stale.length} remote object(s) no longer exist locally — re-run with --prune to delete them.`);

@@ -146,6 +146,25 @@ The publisher compares content, and only when something actually changed does it
 
 The day-to-day loop: start the workspace server → edit in the app → stop it → publish. Your personal installs stay pure consumers and get the changes through the normal update path.
 
+### Running the workspace in its own container
+
+The workspace doesn't have to live on your PC — a dedicated LXC/VM works well (always on, editable from any device). Install the app the normal way (e.g. the Proxmox one-liner), then flip that install into master mode: `systemctl edit pokemon-set-tracker` and add
+
+```ini
+[Service]
+Environment=PTCG_MASTER=1
+```
+
+then `systemctl restart pokemon-set-tracker`. The install seeds itself by pulling the current master, so it starts as an exact continuation of it. Register the workspace admin, edit in the app, and publish from inside the container:
+
+```bash
+cd /opt/pokemon-set-tracker
+set -a; . /root/r2.env; set +a     # your R2 credentials (keep them OUTSIDE /opt — app updates wipe it)
+DATA_DIR=./data node scripts/publish-images.js
+```
+
+A workspace seeded this way has no local image tree — the publisher handles that (it publishes the master catalog, plus any images you've uploaded since). In master mode the app doesn't offer "Update cards from master" (it *produces* the master); new sets come in via **Update cards from TCGdex**.
+
 ## Setup (bootstrapping the card data)
 
 Requires Node.js 22+. The server has **zero dependencies**; only the optional scanner index needs one package.
