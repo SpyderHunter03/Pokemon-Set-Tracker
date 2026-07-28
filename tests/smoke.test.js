@@ -187,10 +187,14 @@ const { chromium } = require('playwright');
   await page.selectOption('.binder-create select >> nth=1', 'base1');   // fill from Base Set
   await page.click('.binder-create .swatch.b-green');
   await page.click('button:has-text("Create binder")');
+  await page.waitForSelector('.binder-cover-page');                     // the binder opens on its COVER
+  check('binder: cover shows first with the binder name', (await page.textContent('.binder-cover-page')).includes('My Binder'));
+  check('binder: nav starts at Cover', (await page.textContent('#view')).includes('Cover'));
+  await page.click('.binder-cover-page');                               // open the binder
   await page.waitForSelector('.binder-grid .pocket');
   check('binder: 2×2 page shows 4 pockets', (await page.locator('.binder-grid .pocket').count()) === 4);
   check('binder: fill-from-set filled page 1', (await page.locator('.binder-grid .pocket.filled').count()) === 4);
-  check('binder: 5 cards → 2 pages', (await page.textContent('#view')).includes('Page 1 / 2'));
+  check('binder: 5 cards → 2 pages', (await page.textContent('#view')).includes('Page 1 of 2'));
   check('binder: starts with none in hand', (await page.textContent('#view')).includes('0 / 5 in hand'));
   await page.click('.binder-grid .pocket >> nth=0');                    // tap = "I have this one"
   await page.waitForSelector('.binder-grid .pocket.have');
@@ -253,11 +257,12 @@ const { chromium } = require('playwright');
     (await page.locator('.pocket[data-pocket="7"].filled').count()) === 1 &&
     (await page.locator('.pocket[data-pocket="4"].filled').count()) === 0);
 
-  // upload an image and place it across chosen pockets via the editor
+  // upload an image and place it across chosen pockets via the editor.
+  // adding a page turns this spread into [page 2 | page 3] — both sides visible
   await page.click('button:has-text("Add page")');
-  await page.click('button:has-text("\u203a")');                       // -> page 3
-  await page.waitForFunction(() => document.body.textContent.includes('Page 3 / 3'));
-  await page.click('.binder-grid .pocket:not(.filled):not(.art) >> nth=0');   // idx8
+  await page.waitForSelector('.pocket[data-pocket="8"]');
+  check('binder: desktop spread shows both sides of the sheet', (await page.textContent('#view')).includes('Pages 2\u20133 of 3'));
+  await page.click('.pocket[data-pocket="8"]');
   await page.waitForSelector('.picker-overlay input[type=file]', { state: 'attached' });
   await page.setInputFiles('.picker-overlay input[type=file]', require('path').join(__dirname, 'fixtures', 'base1-4.png'));
   await page.waitForSelector('.art-editor .art-board img');
@@ -274,9 +279,17 @@ const { chromium } = require('playwright');
   });
   check('binder: picture sliced across the chosen pockets (each piece its own slice)', true);
 
+  // pick a set logo as the binder cover
+  await page.click('button:has-text("Cover")');
+  await page.waitForSelector('.picker-row:has-text("Base Set")');
+  await page.click('.picker-row:has-text("Base Set")');
+  await page.waitForSelector('.binder-cover-page img.cover-logo');
+  check('binder: set-logo cover applied and shown on the cover page', true);
+
   await page.goto('http://localhost:3111/#/binders');
   await page.waitForSelector('.binder-cover');
   check('binder: cover shows live progress (art not counted)', (await page.textContent('.binder-cover')).includes('1 / 7 in hand'));
+  check('binder: list cover carries the chosen image', (await page.locator('.binder-cover .binder-cover-img').count()) === 1);
 
   // ---- language switching ----
   await page.click('#account-btn');

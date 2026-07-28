@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.21.0';
+const APP_VERSION = '3.22.0';
 
 /* ============================================================
  * Storage helpers
@@ -1818,9 +1818,28 @@ async function renderBindersPage() {
   try { list = (await apiCall('binders')).binders; }
   catch (e) { view.replaceChildren(dbErrorView('Could not load your binders.', e, renderBindersPage)); return; }
 
+  // covers may reference set logos or card pictures — resolve them if needed
+  let coverIdx = null, coverCards = null;
+  if (list.some((b) => b.cover && (b.cover.type === 'set' || b.cover.type === 'card'))) {
+    try {
+      const [ix, sx] = await Promise.all([getIndex(), getSearchIndex()]);
+      coverIdx = new Map(ix.sets.map((x) => [x.id, x]));
+      coverCards = new Map(sx.cards.map((c) => [c.id, c]));
+    } catch { /* color covers still render */ }
+  }
+  const coverSrcOf = (b) => {
+    const c = b.cover;
+    if (!c) return null;
+    if (c.type === 'art') return c.img;
+    if (c.type === 'set' && coverIdx) { const st = coverIdx.get(c.set); return st && st.logo; }
+    if (c.type === 'card' && coverCards) { const cd = coverCards.get(c.card); return cd && cardImg(cd, 'low'); }
+    return null;
+  };
   const grid = h('div', { class: 'binder-list' });
   for (const b of list) {
+    const src = coverSrcOf(b);
     grid.append(h('a', { class: `binder-cover b-${b.color}`, href: '#/binder/' + b.id },
+      src ? h('img', { class: 'binder-cover-img' + (b.cover.type === 'set' ? ' logo' : ''), src, loading: 'lazy', alt: '' }) : null,
       h('div', { class: 'binder-name' }, b.name),
       h('div', { class: 'binder-meta' }, `${b.size}\u00d7${b.size} \u00b7 ${b.pages} page${b.pages === 1 ? '' : 's'}`),
       h('div', { class: 'binder-meta' }, b.filled ? `${b.have} / ${b.filled} in hand` : 'empty'),
@@ -1869,15 +1888,16 @@ async function renderBindersPage() {
 async function renderBinderPage(id) {
   if (!auth) return binderGate();
   view.replaceChildren(spinner());
-  let binder, cardsById;
+  let binder, cardsById, setsById;
   try {
-    const [bRes, idx] = await Promise.all([apiCall('binders/' + id), getSearchIndex()]);
+    const [bRes, idx, setIdx] = await Promise.all([apiCall('binders/' + id), getSearchIndex(), getIndex()]);
     binder = bRes.binder;
     cardsById = new Map(idx.cards.map((c) => [c.id, c]));
+    setsById = new Map(setIdx.sets.map((x) => [x.id, x]));
   } catch (e) { view.replaceChildren(dbErrorView('Could not load that binder.', e, () => renderBinderPage(id))); return; }
 
   const per = binder.size * binder.size;
-  let page = 0, moveFrom = null;
+  let moveFrom = null;
 
   // ---- art entries: your own picture across an arbitrary set of pockets ----
   const GAP_MM = 4, CARD_W = 63, CARD_H = 88;   // physical card + pocket spacing
@@ -1945,10 +1965,111 @@ async function renderBinderPage(id) {
   const haveCount = () => Object.values(binder.slots).filter((e) => e.card && e.have).length;
 
   const head = h('div', {});
-  const pager = h('div', { class: 'row', style: 'justify-content:center; align-items:center; gap:12px; margin:10px 0' });
-  const grid = h('div', { class: 'binder-grid' });
-  grid.style.gridTemplateColumns = `repeat(${binder.size}, 1fr)`;
+  const nav = h('div', { class: 'row', style: 'justify-content:center; align-items:center; gap:12px; margin:10px 0' });
+  const book = h('div', { class: 'binder-book' });
   const actions = h('div', {});
+
+  // ---- book state: view 0 = the cover; then spreads (desktop) or pages ----
+  const spreadMq = window.matchMedia('(min-width: 700px)');
+  const isSpread = () => spreadMq.matches;
+  let viewIdx = 0;
+  const maxView = () => (isSpread() ? Math.floor(binder.pages / 2) + 1 : binder.pages);
+  /** pages shown by a view: [leftPageIdx|null, rightPageIdx|null] (0-based; null = blank/none) */
+  function viewPages(v) {
+    if (v === 0) return [null, null];
+    if (!isSpread()) return [null, v - 1];
+    const L = 2 * v - 3, R = 2 * v - 2;
+    return [L >= 0 && L < binder.pages ? L : null, R < binder.pages ? R : null];
+  }
+  function navLabel() {
+    const P = binder.pages;
+    if (viewIdx === 0) return 'Cover';
+    const [L, R] = viewPages(viewIdx);
+    if (L !== null && R !== null) return `Pages ${L + 1}\u2013${R + 1} of ${P}`;
+    return `Page ${(R !== null ? R : L) + 1} of ${P}`;
+  }
+  function coverImgSrc() {
+    const c = binder.cover;
+    if (!c) return null;
+    if (c.type === 'art') return c.img;
+    if (c.type === 'set') { const st = setsById.get(c.set); return (st && st.logo) ? st.logo : null; }
+    if (c.type === 'card') { const cd = cardsById.get(c.card); return cd ? (cardImg(cd, 'high', c.variant || null) || cardImg(cd, 'low', c.variant || null)) : null; }
+    return null;
+  }
+  function coverFace() {
+    const src = coverImgSrc();
+    const el = h('div', { class: 'binder-cover-page b-' + binder.color },
+      src ? h('img', { src, alt: '', class: binder.cover.type === 'set' ? 'cover-logo' : 'cover-photo' }) : null,
+      h('div', { class: 'cover-name' }, binder.name),
+      h('div', { class: 'cover-hint muted small' }, 'Open \u2192'),
+    );
+    el.addEventListener('click', () => navTo(1, 1));
+    return el;
+  }
+  const blankPanel = (inside) => h('div', { class: 'book-blank' + (inside ? ' inside' : '') });
+  function sideContent(pIdx, insideBlank) {
+    if (pIdx !== null) return renderPageGrid(pIdx);
+    return blankPanel(insideBlank);
+  }
+  function renderBook() {
+    book.classList.toggle('spread', isSpread() && viewIdx !== 0);
+    book.replaceChildren();
+    if (viewIdx === 0) { book.append(coverFace()); return; }
+    const [L, R] = viewPages(viewIdx);
+    if (isSpread()) {
+      book.append(
+        h('div', { class: 'book-page left' }, sideContent(L, true)),
+        h('div', { class: 'book-page right' }, sideContent(R, true)),
+      );
+    } else {
+      book.append(h('div', { class: 'book-page single' }, sideContent(R, true)));
+    }
+  }
+  /** animated page turn between adjacent views; falls back to a plain render */
+  function navTo(idx, dir) {
+    idx = Math.max(0, Math.min(maxView(), idx));
+    if (idx === viewIdx) return;
+    const adjacent = Math.abs(idx - viewIdx) === 1;
+    const from = viewIdx;
+    viewIdx = idx;
+    renderNav();
+    if (!adjacent) { renderBook(); return; }
+    flipAnimate(from, idx, dir || (idx > from ? 1 : -1));
+  }
+  function flipAnimate(from, to, dir) {
+    const [fL, fR] = viewPages(from);
+    const [tL, tR] = viewPages(to);
+    const single = !isSpread();
+    // the underlying book shows the NEW view's static side(s) immediately;
+    // a 3D sheet carries the outgoing face and lands as the incoming one
+    const sheet = h('div', { class: 'flip-sheet ' + (single ? 'single' : (dir > 0 ? 'right' : 'left')) });
+    const face = (content) => h('div', { class: 'flip-face' }, content);
+    let front, back;
+    if (dir > 0) {
+      front = from === 0 ? coverFace() : sideContent(single ? fR : fR, true);
+      back = single ? sideContent(tR, true) : sideContent(tL, true);
+    } else {
+      front = single ? sideContent(fR, true) : sideContent(fL, true);
+      back = to === 0 ? coverFace() : (single ? sideContent(tR, true) : sideContent(tR, true));
+    }
+    const f1 = face(front); const f2 = face(back); f2.classList.add('back');
+    sheet.append(f1, f2);
+    renderBook();
+    book.append(sheet);
+    let done = false;
+    const finish = () => { if (done) return; done = true; sheet.remove(); renderBook(); };
+    sheet.addEventListener('transitionend', finish);
+    setTimeout(finish, 650);   // safety net if transitionend never fires
+    requestAnimationFrame(() => requestAnimationFrame(() => sheet.classList.add('go')));
+  }
+  function renderNav() {
+    nav.replaceChildren(
+      h('button', { class: 'btn ghost small', onclick: () => navTo(viewIdx - 1, -1) }, '\u2039'),
+      h('span', { class: 'muted', style: 'min-width:130px; text-align:center' }, navLabel()),
+      h('button', { class: 'btn ghost small', onclick: () => navTo(viewIdx + 1, 1) }, '\u203a'),
+    );
+  }
+  spreadMq.addEventListener('change', () => { viewIdx = Math.min(viewIdx, maxView()); renderNav(); renderBook(); });
 
   function renderHead() {
     const total = filledCount(), got = haveCount();
@@ -1974,8 +2095,9 @@ async function renderBinderPage(id) {
           renderHead();
         } }, '\ud83c\udfa8 Color'),
         h('button', { class: 'btn ghost small', onclick: async () => {
-          binder.pages += 1; await save(); renderPager(); renderGrid();
+          binder.pages += 1; await save(); renderNav(); renderBook();
         } }, '\uff0b Add page'),
+        h('button', { class: 'btn ghost small', onclick: openCoverPicker }, '\ud83d\uddbc Cover'),
         h('button', { class: 'btn ghost small', onclick: openProxyPrintDialog }, '\ud83d\udda8 Print proxies'),
         h('button', { class: 'btn ghost small', onclick: async () => {
           if (!confirm(`Delete "${binder.name}"? This cannot be undone.`)) return;
@@ -1986,14 +2108,6 @@ async function renderBinderPage(id) {
     ].filter(Boolean));
   }
 
-  function renderPager() {
-    pager.replaceChildren(
-      h('button', { class: 'btn ghost small', onclick: () => { if (page > 0) { page--; renderPager(); renderGrid(); } } }, '\u2039'),
-      h('span', { class: 'muted' }, `Page ${page + 1} / ${binder.pages}`),
-      h('button', { class: 'btn ghost small', onclick: () => { if (page < binder.pages - 1) { page++; renderPager(); renderGrid(); } } }, '\u203a'),
-    );
-  }
-
   function pocketActions(i) {
     const s = binder.slots[i];
     if (s && s.img) {
@@ -2001,7 +2115,7 @@ async function renderBinderPage(id) {
         h('span', { class: 'muted small' }, `Your image \u2014 ${s.cells.length} pocket${s.cells.length === 1 ? '' : 's'}`),
         h('button', { class: 'btn small', onclick: () => openArtEditor(i) }, '\u270e Adjust'),
         h('button', { class: 'btn small', onclick: async () => {
-          delete binder.slots[i]; await save(); actions.replaceChildren(); renderHead(); renderGrid();
+          delete binder.slots[i]; await save(); actions.replaceChildren(); renderHead(); renderBook();
         } }, '\u2715 Remove'),
         h('button', { class: 'btn ghost small', onclick: () => actions.replaceChildren() }, 'Cancel'),
       ));
@@ -2013,11 +2127,11 @@ async function renderBinderPage(id) {
       h('button', { class: 'btn small', onclick: () => {
         moveFrom = i;
         actions.replaceChildren(h('p', { class: 'muted small' }, 'Tap the destination pocket (any page). Tap the same pocket to cancel.'));
-        renderGrid();
+        renderBook();
       } }, '\u2194 Move'),
       card ? h('button', { class: 'btn small', onclick: () => openCardModal(card, { variant: s.variant }) }, '\u24d8 Details') : null,
       h('button', { class: 'btn small', onclick: async () => {
-        delete binder.slots[i]; await save(); actions.replaceChildren(); renderHead(); renderGrid();
+        delete binder.slots[i]; await save(); actions.replaceChildren(); renderHead(); renderBook();
       } }, '\u2715 Remove'),
       h('button', { class: 'btn ghost small', onclick: () => actions.replaceChildren() }, 'Cancel'),
     ));
@@ -2032,9 +2146,10 @@ async function renderBinderPage(id) {
     await save();
   }
 
-  function renderGrid() {
-    grid.replaceChildren();
-    const base = page * per;
+  function renderPageGrid(pIdx) {
+    const grid = h('div', { class: 'binder-grid' });
+    grid.style.gridTemplateColumns = `repeat(${binder.size}, 1fr)`;
+    const base = pIdx * per;
     const pieces = {};   // pocket idx -> art anchor idx
     for (const [k, e] of Object.entries(binder.slots)) {
       if (e.img && e.cells) for (const c of e.cells) pieces[c] = parseInt(k, 10);
@@ -2050,7 +2165,7 @@ async function renderBinderPage(id) {
         pocket = h('div', { class: 'pocket art', 'data-pocket': String(i) },
           h('button', { class: 'pocket-edit', onclick: (e) => { e.stopPropagation(); pocketActions(anchor); } }, '\u22ef'));
         pocket.addEventListener('click', () => {
-          if (moveFrom !== null) { moveFrom = null; actions.replaceChildren(); renderGrid(); return; }
+          if (moveFrom !== null) { moveFrom = null; actions.replaceChildren(); renderBook(); return; }
           pocketActions(anchor);
         });
         requestAnimationFrame(() => artPieceCss(pocket, entry, i, pocket.clientWidth / CARD_W, 'px'));
@@ -2087,26 +2202,27 @@ async function renderBinderPage(id) {
         const from = parseInt(e.dataTransfer.getData('text/plain'), 10);
         if (!Number.isInteger(from) || !binder.slots[from] || binder.slots[from].img) return;
         await moveEntry(from, i);
-        renderGrid(); renderHead();
+        renderBook(); renderHead();
       });
       pocket.addEventListener('click', async () => {
         if (moveFrom !== null) {
           await moveEntry(moveFrom, i);
           moveFrom = null;
           actions.replaceChildren();
-          renderGrid(); renderHead();
+          renderBook(); renderHead();
           return;
         }
         if (s) {
           s.have = s.have ? 0 : 1;
           await save();
-          renderGrid(); renderHead();
+          renderBook(); renderHead();
         } else {
           openPocketPicker(i);
         }
       });
       grid.append(pocket);
     }
+    return grid;
   }
 
   function openPocketPicker(i) {
@@ -2149,7 +2265,7 @@ async function renderBinderPage(id) {
           binder.slots[i] = { card: c.id, variant: vk, have: 0 };
           overlay.remove();
           await save();
-          renderHead(); renderGrid();
+          renderHead(); renderBook();
         } }, variantLabel(c, vk)));
         const img = cardImg(c, 'low');
         results.append(h('div', { class: 'picker-row' },
@@ -2282,12 +2398,89 @@ async function renderBinderPage(id) {
             if (anchor !== null && anchor !== cells[0]) delete binder.slots[anchor];
             overlay.remove();
             await save();
-            renderHead(); renderGrid();
+            renderHead(); renderBook();
           } }, 'Save'),
         ),
       ));
     view.append(overlay);
     layout();
+  }
+
+  /** choose the binder's cover: a set logo, a card's picture, or your own art */
+  function openCoverPicker() {
+    const content = h('div', { class: 'picker-results' });
+    const setCover = async (cover) => {
+      binder.cover = cover;
+      try { await apiCall('binders/' + id, { method: 'PUT', body: JSON.stringify({ cover }) }); } catch (e) { toast(e.message); }
+      overlay.remove();
+      viewIdx = 0;
+      renderNav(); renderBook();
+      toast(cover ? 'Cover updated' : 'Cover cleared');
+    };
+    const modes = h('div', { class: 'row', style: 'gap:6px; flex-wrap:wrap' });
+    const mode = (label, fn) => h('button', { class: 'chip', onclick: fn }, label);
+    const showSets = () => {
+      content.replaceChildren(...[...setsById.values()].reverse().map((st) =>
+        h('div', { class: 'picker-row', onclick: () => setCover({ type: 'set', set: st.id, lang }) },
+          st.logo ? h('img', { src: st.logo, loading: 'lazy', style: 'object-fit:contain' }) : h('div', { class: 'picker-thumb' }, '\ud83d\uddc2'),
+          h('div', { class: 'picker-info' }, h('div', {}, st.name)))));
+    };
+    const showCards = () => {
+      const input = h('input', { type: 'text', placeholder: 'Search Pok\u00e9mon / cards by name\u2026' });
+      const results = h('div', { class: 'picker-results' });
+      const rr = () => {
+        const q = input.value.trim().toLowerCase();
+        results.replaceChildren();
+        if (q.length < 2) { results.append(h('p', { class: 'muted small' }, 'Type at least 2 letters.')); return; }
+        const hits = [];
+        for (const c of cardsById.values()) {
+          if (c.name.toLowerCase().includes(q) && cardImg(c, 'low')) { hits.push(c); if (hits.length >= 30) break; }
+        }
+        for (const c of hits) {
+          results.append(h('div', { class: 'picker-row', onclick: () => setCover({ type: 'card', card: c.id }) },
+            h('img', { src: cardImg(c, 'low'), loading: 'lazy' }),
+            h('div', { class: 'picker-info' }, h('div', {}, c.name), h('div', { class: 'muted small' }, setIdOf(c.id) + ' \u00b7 #' + c.localId))));
+        }
+        if (!hits.length) results.append(h('p', { class: 'muted small' }, 'No cards match.'));
+      };
+      input.addEventListener('input', rr);
+      content.replaceChildren(input, results);
+      rr();
+      input.focus();
+    };
+    const showUpload = () => {
+      const fileIn = h('input', { type: 'file', accept: 'image/*', hidden: '' });
+      fileIn.addEventListener('change', async (e) => {
+        const f = e.target.files && e.target.files[0];
+        if (!f) return;
+        try {
+          const res = await fetch('api/binder-image', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': f.type || 'application/octet-stream' }, body: f });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || 'Upload failed');
+          await setCover({ type: 'art', img: data.url });
+        } catch (err) { toast(err.message); }
+        e.target.value = '';
+      });
+      content.replaceChildren(
+        h('p', { class: 'muted small' }, 'Use one of your own pictures as the cover.'),
+        h('button', { class: 'btn small', onclick: () => fileIn.click() }, '\u2b06 Upload image'), fileIn);
+    };
+    modes.append(
+      mode('Set logo', showSets),
+      mode('Pok\u00e9mon card', showCards),
+      mode('My image', showUpload),
+      mode('Color only', () => setCover(null)),
+    );
+    const overlay = h('div', { class: 'picker-overlay' },
+      h('div', { class: 'picker-panel' },
+        h('div', { class: 'row', style: 'justify-content:space-between; align-items:center' },
+          h('h3', { style: 'margin:0' }, 'Binder cover'),
+          h('button', { class: 'btn ghost small', onclick: () => overlay.remove() }, 'Close')),
+        modes,
+        content,
+      ));
+    view.append(overlay);
+    showSets();
   }
 
   function openProxyPrintDialog() {
@@ -2365,8 +2558,8 @@ async function renderBinderPage(id) {
       .then(() => setTimeout(() => window.print(), 120));
   }
 
-  renderHead(); renderPager(); renderGrid();
-  view.replaceChildren(head, pager, grid, actions);
+  renderHead(); renderNav(); renderBook();
+  view.replaceChildren(head, nav, book, actions);
 }
 
 function route() {

@@ -152,6 +152,7 @@ db.exec(`
 `);
 // migrate older catalog schemas (add columns introduced after first release)
 try { db.exec('ALTER TABLE sets ADD COLUMN official_count INTEGER'); } catch { /* already present */ }
+try { db.exec('ALTER TABLE binders ADD COLUMN cover TEXT'); } catch { /* already present */ }
 
 // ---------- storage helpers ----------
 
@@ -215,12 +216,27 @@ function putCollectionOf(userId, collection, updatedAt) {
 const BINDER_SIZES = [2, 3, 4, 5];               // pockets per side
 const BINDER_IMG_DIR = path.join(DATA_DIR, 'binder-images');   // user-uploaded slot art
 const BINDER_COLORS = ['red', 'blue', 'green', 'purple', 'black'];
-const _bindersOf = db.prepare('SELECT id, name, size, color, pages, slots FROM binders WHERE user_id = ? ORDER BY created');
+const _bindersOf = db.prepare('SELECT id, name, size, color, pages, slots, cover FROM binders WHERE user_id = ? ORDER BY created');
 const _binderGet = db.prepare('SELECT * FROM binders WHERE user_id = ? AND id = ?');
-const _binderPut = db.prepare(`INSERT INTO binders (user_id, id, name, size, color, pages, slots, created, updated)
-  VALUES (?,?,?,?,?,?,?,?,?)
+const _binderPut = db.prepare(`INSERT INTO binders (user_id, id, name, size, color, pages, slots, cover, created, updated)
+  VALUES (?,?,?,?,?,?,?,?,?,?)
   ON CONFLICT(user_id, id) DO UPDATE SET name=excluded.name, color=excluded.color,
-    pages=excluded.pages, slots=excluded.slots, updated=excluded.updated`);
+    pages=excluded.pages, slots=excluded.slots, cover=excluded.cover, updated=excluded.updated`);
+/** validate a binder cover choice: a set logo, a card's picture, or uploaded art */
+function cleanBinderCover(c) {
+  if (!c || typeof c !== 'object') return null;
+  if (c.type === 'set' && typeof c.set === 'string' && SET_ID_RE.test(c.set)) {
+    return { type: 'set', set: c.set, lang: LANG_RE.test(c.lang || '') ? c.lang : 'en' };
+  }
+  if (c.type === 'card' && typeof c.card === 'string' && CARD_ID_RE.test(c.card)) {
+    const v = typeof c.variant === 'string' && VARIANT_KEY_RE.test(c.variant) ? c.variant : null;
+    return v ? { type: 'card', card: c.card, variant: v } : { type: 'card', card: c.card };
+  }
+  if (c.type === 'art' && typeof c.img === 'string' && /^\/bimg\/[a-f0-9-]{36}\.webp$/.test(c.img)) {
+    return { type: 'art', img: c.img };
+  }
+  return null;
+}
 const _binderDel = db.prepare('DELETE FROM binders WHERE user_id = ? AND id = ?');
 
 /** First-run migration: import any pre-SQLite JSON accounts/collections. */
@@ -1499,6 +1515,7 @@ async function handleApi(req, res, pathname, ip, url) {
       const slots = JSON.parse(b.slots);
       const entries = Object.values(slots).filter((e) => e.card);   // art spans don't track
       return { id: b.id, name: b.name, size: b.size, color: b.color, pages: b.pages,
+        cover: b.cover ? JSON.parse(b.cover) : null,
         filled: entries.length, have: entries.filter((s) => s.have).length };
     });
     return sendJSON(res, 200, { binders: rows });
@@ -1528,7 +1545,7 @@ async function handleApi(req, res, pathname, ip, url) {
       slots, created: new Date().toISOString(), updated: Date.now(),
     };
     _binderPut.run(user.id, binder.id, binder.name, binder.size, binder.color, binder.pages,
-      JSON.stringify(binder.slots), binder.created, binder.updated);
+      JSON.stringify(binder.slots), null, binder.created, binder.updated);
     return sendJSON(res, 200, { ok: true, binder });
   }
 
@@ -1557,7 +1574,7 @@ async function handleApi(req, res, pathname, ip, url) {
     if (!row) return sendJSON(res, 404, { error: 'Binder not found' });
     if (req.method === 'GET') {
       return sendJSON(res, 200, { binder: { id: row.id, name: row.name, size: row.size, color: row.color,
-        pages: row.pages, slots: JSON.parse(row.slots), updated: row.updated } });
+        pages: row.pages, slots: JSON.parse(row.slots), cover: row.cover ? JSON.parse(row.cover) : null, updated: row.updated } });
     }
     if (req.method === 'PUT') {
       const body = await readBody(req);
@@ -1609,8 +1626,13 @@ async function handleApi(req, res, pathname, ip, url) {
         const capacity = pages * row.size * row.size;
         for (const k of Object.keys(slots)) if (parseInt(k, 10) >= capacity) { pages = row.pages; break; }
       }
+      let cover = row.cover;
+      if (body.cover !== undefined) {
+        const cc = cleanBinderCover(body.cover);
+        cover = cc ? JSON.stringify(cc) : null;
+      }
       const updated = Date.now();
-      _binderPut.run(user.id, row.id, name, row.size, color, pages, JSON.stringify(slots), row.created, updated);
+      _binderPut.run(user.id, row.id, name, row.size, color, pages, JSON.stringify(slots), cover, row.created, updated);
       return sendJSON(res, 200, { ok: true, updated });
     }
     if (req.method === 'DELETE') {
