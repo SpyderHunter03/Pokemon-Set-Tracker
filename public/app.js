@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.17.1';
+const APP_VERSION = '3.17.2';
 
 /* ============================================================
  * Storage helpers
@@ -1457,6 +1457,7 @@ async function renderDebugPage() {
     h('span', {}, label),
     h('span', { style: ok === false ? 'color:#ff7b6b' : (ok === true ? 'color:var(--owned)' : '') }, String(value))));
 
+  if (appConfig.release) line('Release', 'v' + appConfig.release);
   line('App version', APP_VERSION);
   line('Card source', 'server database');
   line('Language', lang);
@@ -1636,9 +1637,10 @@ function renderAccountModal() {
   renderAdminArea();
   // backup (export/import) only makes sense for a signed-in collection
   document.getElementById('backup-area').style.display = auth ? '' : 'none';
-  // show the deployed release (the GitHub tag) when the server knows it
+  // show the deployed release (the GitHub tag); the internal frontend build
+  // number (APP_VERSION) lives on the Debug page, not here
   document.getElementById('app-version').textContent =
-    appConfig.release ? `v${appConfig.release} (app ${APP_VERSION})` : APP_VERSION;
+    appConfig.release ? `v${appConfig.release}` : APP_VERSION;
 
   if (!serverAvailable) {
     statusEl.replaceChildren(h('p', { class: 'muted' },
