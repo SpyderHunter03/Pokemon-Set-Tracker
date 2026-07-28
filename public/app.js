@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.18.0';
+const APP_VERSION = '3.19.0';
 
 /* ============================================================
  * Storage helpers
@@ -1918,6 +1918,7 @@ async function renderBinderPage(id) {
         h('button', { class: 'btn ghost small', onclick: async () => {
           binder.pages += 1; await save(); renderPager(); renderGrid();
         } }, '\uff0b Add page'),
+        h('button', { class: 'btn ghost small', onclick: openProxyPrintDialog }, '\ud83d\udda8 Print proxies'),
         h('button', { class: 'btn ghost small', onclick: async () => {
           if (!confirm(`Delete "${binder.name}"? This cannot be undone.`)) return;
           try { await apiCall('binders/' + id, { method: 'DELETE' }); location.hash = '#/binders'; }
@@ -2037,6 +2038,65 @@ async function renderBinderPage(id) {
     renderResults();
     view.append(overlay);
     input.focus();
+  }
+
+
+  function openProxyPrintDialog() {
+    let which = 'missing', frame = 'color', paper = 'letter';
+    const optRow = (label, opts, get, set) => h('div', { class: 'row', style: 'gap:6px; flex-wrap:wrap; align-items:center' },
+      h('span', { class: 'muted small', style: 'min-width:64px' }, label),
+      ...opts.map(([v, txt]) => h('button', { class: 'chip' + (v === get() ? ' active' : ''), onclick: (e) => {
+        set(v);
+        [...e.target.parentElement.querySelectorAll('.chip')].forEach((c) => c.classList.toggle('active', c === e.target));
+      } }, txt)));
+    const overlay = h('div', { class: 'picker-overlay' },
+      h('div', { class: 'picker-panel' },
+        h('h3', {}, 'Print proxies'),
+        h('p', { class: 'muted small' }, 'Prints cards at real size (63\u2009\u00d7\u200988\u2009mm) with cut guides \u2014 stand-ins for your physical binder\u2019s pockets until the real card arrives. Artwork adds a decorative frame around each card.'),
+        optRow('Cards', [['missing', 'Missing only'], ['all', 'All pockets']], () => which, (v) => which = v),
+        optRow('Artwork', [['none', 'None'], ['color', 'Binder color'], ['gold', 'Gold'], ['pokeball', 'Pok\u00e9ball']], () => frame, (v) => frame = v),
+        optRow('Paper', [['letter', 'Letter'], ['a4', 'A4']], () => paper, (v) => paper = v),
+        h('div', { class: 'row', style: 'justify-content:flex-end; gap:8px; margin-top:6px' },
+          h('button', { class: 'btn ghost small', onclick: () => overlay.remove() }, 'Cancel'),
+          h('button', { class: 'btn small', onclick: () => { overlay.remove(); printProxies(which, frame, paper); } }, '\ud83d\udda8 Print'),
+        ),
+      ));
+    view.append(overlay);
+  }
+
+  function printProxies(which, frame, paper) {
+    const entries = Object.entries(binder.slots)
+      .map(([k, v]) => [parseInt(k, 10), v])
+      .sort((a, b) => a[0] - b[0])
+      .filter(([, v]) => which === 'all' || !v.have);
+    if (!entries.length) { toast('Nothing to print \u2014 every pocket is already in hand'); return; }
+    const area = h('div', { id: 'print-area', class: 'frame-' + frame });
+    for (const [, v] of entries) {
+      const card = cardsById.get(v.card);
+      const img = card && (cardImg(card, 'high', v.variant) || cardImg(card, 'low', v.variant));
+      area.append(h('div', { class: 'print-cell b-' + binder.color },
+        img ? h('img', { src: img, alt: (card && card.name) || v.card })
+            : h('div', { class: 'print-fallback' },
+                h('div', { class: 'pf-name' }, (card && card.name) || v.card),
+                h('div', { class: 'pf-meta' }, setIdOf(v.card) + ' \u00b7 #' + ((card && card.localId) || '?') +
+                  (card ? ' \u00b7 ' + variantLabel(card, v.variant) : '')),
+              ),
+      ));
+    }
+    const pageStyle = h('style', {}, `@page { size: ${paper === 'a4' ? 'A4' : 'letter'}; margin: 8mm; }`);
+    document.head.append(pageStyle);
+    document.body.append(area);
+    document.body.classList.add('printing-proxies');
+    const cleanup = () => {
+      area.remove(); pageStyle.remove();
+      document.body.classList.remove('printing-proxies');
+      window.removeEventListener('afterprint', cleanup);
+    };
+    window.addEventListener('afterprint', cleanup);
+    // let the images land before the print dialog snapshots the page
+    const imgs = [...area.querySelectorAll('img')];
+    Promise.all(imgs.map((im) => im.complete ? null : new Promise((r) => { im.onload = im.onerror = r; })))
+      .then(() => setTimeout(() => window.print(), 60));
   }
 
   renderHead(); renderPager(); renderGrid();

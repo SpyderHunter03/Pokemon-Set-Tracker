@@ -204,6 +204,22 @@ const { chromium } = require('playwright');
   await page.click('.picker-row .chip >> nth=0');
   await page.waitForFunction(() => document.querySelectorAll('.binder-grid .pocket.filled').length === 2);
   check('binder: picker places a card into the chosen pocket', (await page.textContent('#view')).includes('1 / 6 in hand'));
+  // proxy printing: missing-only sheet at real card size, with a frame
+  await page.evaluate(() => { window.print = () => { document.body.dataset.printed = '1'; }; });
+  await page.click('button:has-text("Print proxies")');
+  await page.waitForSelector('.picker-panel h3:has-text("Print proxies")');
+  await page.click('.picker-panel .chip:has-text("Pokéball")');
+  await page.click('.picker-panel .btn:has-text("Print")');
+  await page.waitForFunction(() => document.body.dataset.printed === '1');
+  check('proxies: prints only the missing pockets (6 filled, 1 in hand → 5)',
+    (await page.locator('#print-area .print-cell').count()) === 5);
+  check('proxies: chosen artwork frame applied', (await page.locator('#print-area.frame-pokeball').count()) === 1);
+  check('proxies: card images + text fallbacks for imageless cards',
+    (await page.locator('#print-area .print-cell img').count()) === 3 &&
+    (await page.locator('#print-area .print-fallback').count()) === 2);
+  await page.evaluate(() => window.dispatchEvent(new Event('afterprint')));
+  check('proxies: sheet cleans up after printing', (await page.locator('#print-area').count()) === 0);
+
   await page.goto('http://localhost:3111/#/binders');
   await page.waitForSelector('.binder-cover');
   check('binder: cover shows live progress', (await page.textContent('.binder-cover')).includes('1 / 6 in hand'));

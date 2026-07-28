@@ -754,3 +754,49 @@ body { padding-bottom: calc(64px + env(safe-area-inset-bottom)); }
 .picker-row img, .picker-thumb { width: 46px; aspect-ratio: 63/88; object-fit: cover; border-radius: 4px; flex-shrink: 0; }
 .picker-thumb { display: flex; align-items: center; justify-content: center; background: rgba(255,255,255,.05); }
 .picker-info { flex: 1; min-width: 0; }
+
+/* ---------- proxy printing ---------- */
+#print-area { display: none; }
+body.printing-proxies #print-area {
+  display: flex; flex-wrap: wrap; gap: 4mm; align-content: flex-start;
+  background: #fff; padding: 4mm;
+}
+@media print {
+  body.printing-proxies > :not(#print-area) { display: none !important; }
+  body.printing-proxies { background: #fff !important; margin: 0; }
+  body.printing-proxies #print-area { padding: 0; }
+}
+.print-cell {
+  width: 63mm; height: 88mm; box-sizing: border-box; position: relative; overflow: hidden;
+  break-inside: avoid; page-break-inside: avoid;
+  outline: 0.3mm dashed #999;               /* cut guide */
+  background: #fff; border-radius: 0;
+  -webkit-print-color-adjust: exact; print-color-adjust: exact;
+}
+.print-cell img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.print-fallback {
+  width: 100%; height: 100%; display: flex; flex-direction: column; align-items: center;
+  justify-content: center; gap: 2mm; border: 0.5mm solid #444; color: #111; text-align: center; padding: 3mm;
+}
+.pf-name { font-weight: 700; font-size: 12pt; }
+.pf-meta { font-size: 8pt; color: #555; }
+/* decorative frames: the card stays 63×88; the frame surrounds it */
+#print-area.frame-color .print-cell,
+#print-area.frame-gold .print-cell,
+#print-area.frame-pokeball .print-cell {
+  width: 69mm; height: 94mm; padding: 3mm; outline: none; border-radius: 2mm;
+}
+#print-area.frame-gold .print-cell {
+  background: linear-gradient(135deg, #f9e8a0, #d4a017 30%, #f6d365 50%, #b8860b 75%, #f9e8a0) !important;
+}
+#print-area.frame-pokeball .print-cell {
+  background:
+    radial-gradient(circle at 50% 50%, #fff 0 1.6mm, #1c1c1c 1.6mm 2.6mm, transparent 2.6mm),
+    linear-gradient(180deg, #d92818 0 45%, #1c1c1c 45% 55%, #f2f2f2 55% 100%) !important;
+}
+/* frame-color reuses the binder cover palette via the .b-* class on the cell */
+#print-area.frame-color .print-cell.b-red    { background: linear-gradient(145deg, #b3271e, #7c1712) !important; }
+#print-area.frame-color .print-cell.b-blue   { background: linear-gradient(145deg, #2456b3, #16336e) !important; }
+#print-area.frame-color .print-cell.b-green  { background: linear-gradient(145deg, #1e8a4c, #135631) !important; }
+#print-area.frame-color .print-cell.b-purple { background: linear-gradient(145deg, #6d3fb3, #45266f) !important; }
+#print-area.frame-color .print-cell.b-black  { background: linear-gradient(145deg, #3a3f47, #17191d) !important; }
