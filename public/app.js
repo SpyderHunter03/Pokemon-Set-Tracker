@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.19.0';
+const APP_VERSION = '3.20.0';
 
 /* ============================================================
  * Storage helpers
@@ -1883,8 +1883,8 @@ async function renderBinderPage(id) {
     try { await apiCall('binders/' + id, { method: 'PUT', body: JSON.stringify({ slots: binder.slots, pages: binder.pages, ...extra }) }); }
     catch (e) { toast('Save failed: ' + e.message); }
   };
-  const filledCount = () => Object.keys(binder.slots).length;
-  const haveCount = () => Object.values(binder.slots).filter((s) => s.have).length;
+  const filledCount = () => Object.values(binder.slots).filter((e) => e.card).length;
+  const haveCount = () => Object.values(binder.slots).filter((e) => e.card && e.have).length;
 
   const head = h('div', {});
   const pager = h('div', { class: 'row', style: 'justify-content:center; align-items:center; gap:12px; margin:10px 0' });
@@ -1954,40 +1954,100 @@ async function renderBinderPage(id) {
     ));
   }
 
+  /** Pockets covered by an art span anchored at index a (excluding a). */
+  function coveredBy(a, entry) {
+    const out = [];
+    const col = (a % per) % binder.size, row = Math.floor((a % per) / binder.size);
+    for (let dy = 0; dy < (entry.h || 1); dy++) {
+      for (let dx = 0; dx < (entry.w || 1); dx++) {
+        if (dx === 0 && dy === 0) continue;
+        if (col + dx >= binder.size || row + dy >= binder.size) continue;
+        out.push(a + dy * binder.size + dx);
+      }
+    }
+    return out;
+  }
+  function coveredSet(base) {
+    const covered = new Set();
+    for (let p = 0; p < per; p++) {
+      const e = binder.slots[base + p];
+      if (e && e.img) coveredBy(base + p, e).forEach((x) => covered.add(x));
+    }
+    return covered;
+  }
+
+  async function moveEntry(from, to) {
+    if (from === to) return;
+    const a = binder.slots[from], b = binder.slots[to];
+    if (!a) return;
+    if (b) binder.slots[from] = b; else delete binder.slots[from];
+    binder.slots[to] = a;
+    await save();
+  }
+
   function renderGrid() {
     grid.replaceChildren();
     const base = page * per;
+    const covered = coveredSet(base);
     for (let p = 0; p < per; p++) {
       const i = base + p;
+      if (covered.has(i)) continue;                 // hidden under an art span
       const s = binder.slots[i];
       let pocket;
-      if (s) {
+      if (s && s.img) {
+        pocket = h('div', { class: 'pocket art', 'data-pocket': String(i) },
+          h('img', { src: s.img, loading: 'lazy', alt: 'binder art' }),
+          h('button', { class: 'pocket-edit', onclick: (e) => { e.stopPropagation(); pocketActions(i); } }, '\u22ef'),
+        );
+      } else if (s) {
         const card = cardsById.get(s.card);
         const img = card && cardImg(card, 'low', s.variant);
-        pocket = h('div', { class: 'pocket filled' + (s.have ? ' have' : '') + (moveFrom === i ? ' moving' : ''), 'data-pocket': String(i) },
+        pocket = h('div', { class: 'pocket filled' + (s.have ? ' have' : '') + (moveFrom === i ? ' moving' : ''), 'data-pocket': String(i), draggable: 'true' },
           img ? h('img', { src: img, loading: 'lazy', alt: (card && card.name) || s.card })
               : h('div', { class: 'pocket-name' }, (card && card.name) || s.card),
           s.have ? h('div', { class: 'pocket-badge' }, '\u2713') : null,
           h('button', { class: 'pocket-edit', onclick: (e) => { e.stopPropagation(); pocketActions(i); } }, '\u22ef'),
         );
+        // drag & drop between pockets (desktop; mobile keeps \u2194 Move)
+        pocket.addEventListener('dragstart', (e) => {
+          e.dataTransfer.setData('text/plain', String(i));
+          e.dataTransfer.effectAllowed = 'move';
+          pocket.classList.add('dragging');
+        });
+        pocket.addEventListener('dragend', () => {
+          grid.querySelectorAll('.drag-over, .dragging').forEach((el) => el.classList.remove('drag-over', 'dragging'));
+        });
       } else {
         pocket = h('div', { class: 'pocket' + (moveFrom === i ? ' moving' : ''), 'data-pocket': String(i) },
           h('div', { class: 'pocket-plus' }, '\uff0b'));
       }
+      // explicit grid placement (spans reshape the page)
+      const col = p % binder.size, row = Math.floor(p / binder.size);
+      pocket.style.gridColumn = (col + 1) + (s && s.img && s.w > 1 ? ' / span ' + Math.min(s.w, binder.size - col) : '');
+      pocket.style.gridRow = (row + 1) + (s && s.img && s.h > 1 ? ' / span ' + Math.min(s.h, binder.size - row) : '');
+      if (!(s && s.img)) {
+        // any pocket (filled or empty) accepts a dropped card
+        pocket.addEventListener('dragover', (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; pocket.classList.add('drag-over'); });
+        pocket.addEventListener('dragleave', () => pocket.classList.remove('drag-over'));
+        pocket.addEventListener('drop', async (e) => {
+          e.preventDefault();
+          const from = parseInt(e.dataTransfer.getData('text/plain'), 10);
+          if (!Number.isInteger(from) || !binder.slots[from] || binder.slots[from].img) return;
+          await moveEntry(from, i);
+          renderGrid(); renderHead();
+        });
+      }
       pocket.addEventListener('click', async () => {
         if (moveFrom !== null) {
-          if (moveFrom !== i) {
-            const a = binder.slots[moveFrom], b = binder.slots[i];
-            if (b) binder.slots[moveFrom] = b; else delete binder.slots[moveFrom];
-            binder.slots[i] = a;
-            await save();
-          }
+          if (!(s && s.img)) await moveEntry(moveFrom, i);
           moveFrom = null;
           actions.replaceChildren();
           renderGrid(); renderHead();
           return;
         }
-        if (s) {
+        if (s && s.img) {
+          pocketActions(i);
+        } else if (s) {
           s.have = s.have ? 0 : 1;
           await save();
           renderGrid(); renderHead();
@@ -2002,10 +2062,38 @@ async function renderBinderPage(id) {
   function openPocketPicker(i) {
     const input = h('input', { type: 'text', placeholder: 'Search cards by name\u2026' });
     const results = h('div', { class: 'picker-results' });
+    // upload your own image into this pocket \u2014 it can span multiple pockets
+    const maxW = binder.size - ((i % per) % binder.size);
+    const maxH = binder.size - Math.floor((i % per) / binder.size);
+    const wSel = h('select', {}, ...Array.from({ length: maxW }, (_, n) => h('option', { value: String(n + 1) }, (n + 1) + ' wide')));
+    const hSel = h('select', {}, ...Array.from({ length: maxH }, (_, n) => h('option', { value: String(n + 1) }, (n + 1) + ' tall')));
+    const fileIn = h('input', { type: 'file', accept: 'image/*', hidden: '' });
+    fileIn.addEventListener('change', async (e) => {
+      const f = e.target.files && e.target.files[0];
+      if (!f) return;
+      const w = parseInt(wSel.value, 10), hh = parseInt(hSel.value, 10);
+      for (let dy = 0; dy < hh; dy++) for (let dx = 0; dx < w; dx++) {
+        const t = i + dy * binder.size + dx;
+        if (t !== i && binder.slots[t]) { toast('That span would overlap an occupied pocket'); e.target.value = ''; return; }
+      }
+      try {
+        const res = await fetch('api/binder-image', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': f.type || 'application/octet-stream' }, body: f });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Upload failed');
+        binder.slots[i] = { img: data.url, w, h: hh };
+        overlay.remove();
+        await save();
+        renderHead(); renderGrid();
+      } catch (err) { toast(err.message); }
+      e.target.value = '';
+    });
     const overlay = h('div', { class: 'picker-overlay' },
       h('div', { class: 'picker-panel' },
         h('div', { class: 'row', style: 'gap:8px' }, input,
           h('button', { class: 'btn ghost small', onclick: () => overlay.remove() }, 'Close')),
+        h('div', { class: 'row', style: 'gap:8px; align-items:center; flex-wrap:wrap' },
+          h('span', { class: 'muted small' }, 'Or place your own image:'), wSel, hSel,
+          h('button', { class: 'btn ghost small', onclick: () => fileIn.click() }, '\u2b06 Upload image'), fileIn),
         results,
       ));
     const renderResults = () => {
@@ -2068,12 +2156,26 @@ async function renderBinderPage(id) {
     const entries = Object.entries(binder.slots)
       .map(([k, v]) => [parseInt(k, 10), v])
       .sort((a, b) => a[0] - b[0])
-      .filter(([, v]) => which === 'all' || !v.have);
+      .filter(([, v]) => which === 'all' ? true : (v.card && !v.have));
     if (!entries.length) { toast('Nothing to print \u2014 every pocket is already in hand'); return; }
     const area = h('div', { id: 'print-area', class: 'frame-' + frame });
     for (const [, v] of entries) {
+      if (v.img) {
+        // uploaded art: print at its spanned physical size (63/88mm pockets + 4mm gaps)
+        const w = Math.min(v.w || 1, binder.size), hh = Math.min(v.h || 1, binder.size);
+        const cell = h('div', { class: 'print-cell print-art b-' + binder.color }, h('img', { src: v.img, alt: 'binder art' }));
+        cell.style.width = (w * 63 + (w - 1) * 4) + 'mm';
+        cell.style.height = (hh * 88 + (hh - 1) * 4) + 'mm';
+        area.append(cell);
+        continue;
+      }
       const card = cardsById.get(v.card);
       const img = card && (cardImg(card, 'high', v.variant) || cardImg(card, 'low', v.variant));
+      // same printing-name banner as the collection tiles: shown when this
+      // printing has no dedicated scan and isn't what the base scan depicts
+      const needsLabel = card && img &&
+        !(card.variantImages && card.variantImages[v.variant]) &&
+        realVariants(card)[0] !== v.variant;
       area.append(h('div', { class: 'print-cell b-' + binder.color },
         img ? h('img', { src: img, alt: (card && card.name) || v.card })
             : h('div', { class: 'print-fallback' },
@@ -2081,6 +2183,7 @@ async function renderBinderPage(id) {
                 h('div', { class: 'pf-meta' }, setIdOf(v.card) + ' \u00b7 #' + ((card && card.localId) || '?') +
                   (card ? ' \u00b7 ' + variantLabel(card, v.variant) : '')),
               ),
+        needsLabel ? h('div', { class: 'print-fx' }, variantLabel(card, v.variant)) : null,
       ));
     }
     const pageStyle = h('style', {}, `@page { size: ${paper === 'a4' ? 'A4' : 'letter'}; margin: 8mm; }`);

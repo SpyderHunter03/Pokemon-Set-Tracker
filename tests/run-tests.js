@@ -269,6 +269,21 @@ function fail(msg) {
   const bAnon = (await fetch('http://localhost:3115/api/binders')).status;
   const bOther = (await fetch(`http://localhost:3115/api/binders/${bd.id}`, { headers: { Authorization: 'Bearer ' + cpChange.token } })).status;
   check('binder: auth required and binders are private per account', bAnon === 401 && bOther === 404);
+  // uploaded art spanning pockets: upload -> place {img,w,h} -> excluded from progress
+  const pngBuf = fs.readFileSync(path.join(__dirname, 'fixtures', 'base1-4.png'));
+  const upRes = await fetch('http://localhost:3115/api/binder-image', { method: 'POST', headers: { Authorization: 'Bearer ' + buReg.token, 'Content-Type': 'image/png' }, body: pngBuf });
+  const up = await upRes.json();
+  const artSlots = { ...bGet.binder.slots, '6': { img: up.url, w: 2, h: 1 } };
+  await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { method: 'PUT', headers: buAuth, body: JSON.stringify({ slots: artSlots }) });
+  const bArt = await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { headers: buAuth });
+  const bList2 = await jfetch('http://localhost:3115/api/binders', { headers: buAuth });
+  const upAnon = (await fetch('http://localhost:3115/api/binder-image', { method: 'POST', body: pngBuf })).status;
+  check('binder: image upload + art span persists, art excluded from progress',
+    upRes.status === 200 && /^\/bimg\/[a-f0-9-]+\.webp$/.test(up.url || '') &&
+    bArt.binder.slots['6'] && bArt.binder.slots['6'].img === up.url && bArt.binder.slots['6'].w === 2 &&
+    bList2.binders[0].filled === 5 && upAnon === 401);
+  const imgServe = await fetch('http://localhost:3115' + up.url);
+  check('binder: uploaded art is served immutably', imgServe.status === 200 && /immutable/.test(imgServe.headers.get('cache-control') || ''));
   const bDel = await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { method: 'DELETE', headers: buAuth });
   const bGone = (await fetch(`http://localhost:3115/api/binders/${bd.id}`, { headers: buAuth })).status;
   check('binder: delete removes it', bDel.ok === true && bGone === 404);

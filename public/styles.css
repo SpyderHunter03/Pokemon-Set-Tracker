@@ -800,3 +800,21 @@ body.printing-proxies #print-area {
 #print-area.frame-color .print-cell.b-green  { background: linear-gradient(145deg, #1e8a4c, #135631) !important; }
 #print-area.frame-color .print-cell.b-purple { background: linear-gradient(145deg, #6d3fb3, #45266f) !important; }
 #print-area.frame-color .print-cell.b-black  { background: linear-gradient(145deg, #3a3f47, #17191d) !important; }
+
+/* ---------- binder art spans + drag & drop ---------- */
+.pocket.art { border-style: solid; border-color: var(--line, #3a4157); background: #000; }
+.pocket.art img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.pocket.dragging { opacity: .45; }
+.pocket.drag-over { border-color: var(--accent-soft); border-style: solid; box-shadow: 0 0 0 2px var(--accent-soft) inset; }
+.picker-panel select { background: var(--card, #1c2333); color: inherit; border: 1px solid var(--line, #333); border-radius: 8px; padding: 6px 8px; }
+/* printing-name banner on proxies — same look as the collection tiles */
+.print-cell { position: relative; }
+.print-fx {
+  position: absolute; left: -20%; width: 140%; top: 50%;
+  transform: translateY(-50%) rotate(-24deg);
+  background: rgba(255, 255, 255, 0.82); color: #111;
+  font-weight: 800; font-size: 10pt; letter-spacing: 0.06em; text-transform: uppercase;
+  text-align: center; padding: 1.6mm 0; border-top: 0.3mm solid #111; border-bottom: 0.3mm solid #111;
+  -webkit-print-color-adjust: exact; print-color-adjust: exact;
+}
+.print-cell.print-art { outline: 0.3mm dashed #999; }

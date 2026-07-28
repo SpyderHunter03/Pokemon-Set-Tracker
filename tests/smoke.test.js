@@ -220,9 +220,56 @@ const { chromium } = require('playwright');
   await page.evaluate(() => window.dispatchEvent(new Event('afterprint')));
   check('proxies: sheet cleans up after printing', (await page.locator('#print-area').count()) === 0);
 
+  // a NON-primary printing gets the collection-style name banner on its proxy
+  await page.click('.binder-grid .pocket:not(.filled) >> nth=0');       // empty pocket idx6
+  await page.waitForSelector('.picker-overlay input[type=text]');
+  await page.fill('.picker-overlay input[type=text]', 'Charizard');
+  await page.waitForSelector('.picker-row .chip');
+  await page.click('.picker-row .chip >> nth=1');                       // 1st Edition (no dedicated scan)
+  await page.waitForFunction(() => document.querySelectorAll('.binder-grid .pocket.filled').length === 3);
+  await page.evaluate(() => { delete document.body.dataset.printed; });
+  await page.click('button:has-text("Print proxies")');
+  await page.waitForSelector('.picker-panel h3:has-text("Print proxies")');
+  await page.click('.picker-panel .btn:has-text("Print")');
+  await page.waitForFunction(() => document.body.dataset.printed === '1');
+  check('proxies: non-primary printings carry the collection-style name banner',
+    (await page.locator('#print-area .print-fx').count()) === 1 &&
+    (await page.textContent('#print-area .print-fx')).includes('1st Edition'));
+  await page.evaluate(() => window.dispatchEvent(new Event('afterprint')));
+
+  // drag & drop a card between pockets (idx4 -> empty idx7) — dispatch the
+  // HTML5 drag events directly (headless mouse-drag doesn't start native DnD)
+  await page.evaluate(() => {
+    const src = document.querySelector('.pocket[data-pocket="4"]');
+    const dst = document.querySelector('.pocket[data-pocket="7"]');
+    const dt = new DataTransfer();
+    src.dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: dt }));
+    dst.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: dt }));
+    dst.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt }));
+    src.dispatchEvent(new DragEvent('dragend', { bubbles: true, dataTransfer: dt }));
+  });
+  await page.waitForSelector('.pocket[data-pocket="7"].filled');
+  check('binder: drag & drop moves a card to an empty pocket',
+    (await page.locator('.pocket[data-pocket="7"].filled').count()) === 1 &&
+    (await page.locator('.pocket[data-pocket="4"].filled').count()) === 0);
+
+  // upload an image that SPANS pockets: new page, 2 wide x 2 tall
+  await page.click('button:has-text("Add page")');
+  await page.click('button:has-text("\u203a")');                       // -> page 3
+  await page.waitForFunction(() => document.body.textContent.includes('Page 3 / 3'));
+  await page.click('.binder-grid .pocket:not(.filled):not(.art) >> nth=0');
+  await page.waitForSelector('.picker-overlay input[type=file]', { state: 'attached' });
+  await page.selectOption('.picker-overlay select >> nth=0', '2');      // 2 wide
+  await page.selectOption('.picker-overlay select >> nth=1', '2');      // 2 tall
+  await page.setInputFiles('.picker-overlay input[type=file]', require('path').join(__dirname, 'fixtures', 'base1-4.png'));
+  await page.waitForSelector('.binder-grid .pocket.art');
+  check('binder: uploaded image spans multiple pockets (2x2 fills the page)',
+    (await page.locator('.binder-grid .pocket').count()) === 1 &&
+    (await page.locator('.binder-grid .pocket.art').count()) === 1);
+
   await page.goto('http://localhost:3111/#/binders');
   await page.waitForSelector('.binder-cover');
-  check('binder: cover shows live progress', (await page.textContent('.binder-cover')).includes('1 / 6 in hand'));
+  check('binder: cover shows live progress (art not counted)', (await page.textContent('.binder-cover')).includes('1 / 7 in hand'));
 
   // ---- language switching ----
   await page.click('#account-btn');

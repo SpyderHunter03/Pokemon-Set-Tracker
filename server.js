@@ -213,6 +213,7 @@ function putCollectionOf(userId, collection, updatedAt) {
 
 // ---------- binders ----------
 const BINDER_SIZES = [2, 3, 4, 5];               // pockets per side
+const BINDER_IMG_DIR = path.join(DATA_DIR, 'binder-images');   // user-uploaded slot art
 const BINDER_COLORS = ['red', 'blue', 'green', 'purple', 'black'];
 const _bindersOf = db.prepare('SELECT id, name, size, color, pages, slots FROM binders WHERE user_id = ? ORDER BY created');
 const _binderGet = db.prepare('SELECT * FROM binders WHERE user_id = ? AND id = ?');
@@ -1496,7 +1497,7 @@ async function handleApi(req, res, pathname, ip, url) {
   if (pathname === '/api/binders' && req.method === 'GET') {
     const rows = _bindersOf.all(user.id).map((b) => {
       const slots = JSON.parse(b.slots);
-      const entries = Object.values(slots);
+      const entries = Object.values(slots).filter((e) => e.card);   // art spans don't track
       return { id: b.id, name: b.name, size: b.size, color: b.color, pages: b.pages,
         filled: entries.length, have: entries.filter((s) => s.have).length };
     });
@@ -1531,6 +1532,25 @@ async function handleApi(req, res, pathname, ip, url) {
     return sendJSON(res, 200, { ok: true, binder });
   }
 
+  // upload an image to place in binder pockets (any signed-in user's own art)
+  if (pathname === '/api/binder-image' && req.method === 'POST') {
+    let sharp;
+    try { sharp = require('sharp'); } catch {
+      return sendJSON(res, 501, { error: 'Image processing needs the sharp package on the server: npm install --no-save sharp' });
+    }
+    const raw = await readRawBody(req, 8 * 1024 * 1024).catch(() => null);
+    if (!raw || !raw.length) return sendJSON(res, 400, { error: 'Send the image file as the request body (8 MB max)' });
+    fs.mkdirSync(BINDER_IMG_DIR, { recursive: true });
+    const name = crypto.randomUUID() + '.webp';
+    try {
+      await sharp(raw).rotate().resize({ width: 1600, height: 1600, fit: 'inside', withoutEnlargement: true })
+        .webp({ quality: 85 }).toFile(path.join(BINDER_IMG_DIR, name));
+    } catch (e) {
+      return sendJSON(res, 400, { error: 'Could not process that image: ' + e.message });
+    }
+    return sendJSON(res, 200, { ok: true, url: '/bimg/' + name });
+  }
+
   const binderMatch = pathname.match(/^\/api\/binders\/([a-f0-9-]{36})$/);
   if (binderMatch) {
     const row = _binderGet.get(user.id, binderMatch[1]);
@@ -1555,6 +1575,14 @@ async function handleApi(req, res, pathname, ip, url) {
           const i = parseInt(k, 10);
           if (!Number.isInteger(i) || i < 0 || i >= capacity) continue;
           if (!v || typeof v !== 'object') continue;
+          if (typeof v.img === 'string') {
+            // user-uploaded art, spanning w×h pockets from this anchor
+            if (!/^\/bimg\/[a-f0-9-]{36}\.webp$/.test(v.img)) continue;
+            const w = Number.isInteger(v.w) ? Math.min(Math.max(v.w, 1), row.size) : 1;
+            const hh = Number.isInteger(v.h) ? Math.min(Math.max(v.h, 1), row.size) : 1;
+            clean[i] = { img: v.img, w, h: hh };
+            continue;
+          }
           if (typeof v.card !== 'string' || !CARD_ID_RE.test(v.card)) continue;
           const variant = typeof v.variant === 'string' && VARIANT_KEY_RE.test(v.variant) ? v.variant : 'normal';
           clean[i] = { card: v.card, variant, have: v.have ? 1 : 0 };
@@ -1586,6 +1614,17 @@ const server = http.createServer(async (req, res) => {
   try {
     if (url.pathname.startsWith('/api/')) {
       await handleApi(req, res, url.pathname, ip, url);
+    } else if (url.pathname.startsWith('/bimg/') && (req.method === 'GET' || req.method === 'HEAD')) {
+      // user-uploaded binder images (stored under DATA_DIR, not public/)
+      const m = url.pathname.match(/^\/bimg\/([a-f0-9-]{36}\.webp)$/);
+      const file = m && path.join(BINDER_IMG_DIR, m[1]);
+      fs.stat(file || '', (err, stat) => {
+        if (err || !stat.isFile()) { res.writeHead(404); res.end('Not found'); return; }
+        res.writeHead(200, { 'Content-Type': 'image/webp', 'Content-Length': stat.size,
+          'Cache-Control': 'public, max-age=31536000, immutable' });
+        if (req.method === 'HEAD') return res.end();
+        fs.createReadStream(file).pipe(res);
+      });
     } else if (req.method === 'GET' || req.method === 'HEAD') {
       serveStatic(req, res, url.pathname);
     } else {
