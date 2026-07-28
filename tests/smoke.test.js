@@ -199,8 +199,29 @@ const { chromium } = require('playwright');
   await page.click('.binder-grid .pocket >> nth=0');                    // tap = "I have this one"
   await page.waitForSelector('.binder-grid .pocket.have');
   check('binder: tap marks a pocket as in hand', (await page.textContent('#view')).includes('1 / 5 in hand'));
+
+  // view mode tracks copy counts: ⋯ on the in-hand pocket → ＋ → small ×2
+  await page.click('.binder-grid .pocket.have .pocket-edit');
+  await page.waitForSelector('.pocket-actions');
+  await page.click('.pocket-actions button:has-text("＋")');
+  await page.waitForSelector('.binder-grid .pocket.have .pocket-qty');
+  check('binder: copy count shows as a small ×2 on the pocket',
+    (await page.textContent('.binder-grid .pocket.have .pocket-qty')) === '×2');
+  await page.click('.pocket-actions button:has-text("Close")');
+
   await page.click('button:has-text("›")');                             // page 2: 1 filled, 3 empty
   await page.waitForFunction(() => document.querySelectorAll('.binder-grid .pocket.filled').length === 1);
+
+  // view mode is for tracking only — empty pockets are inert until you Edit
+  await page.click('.binder-grid .pocket:not(.filled):not(.art) >> nth=0');
+  await page.waitForTimeout(300);
+  check('binder: view mode does not open the picker on empty pockets',
+    (await page.locator('.picker-overlay').count()) === 0);
+  await page.click('button:has-text("Edit binder")');
+  await page.waitForSelector('button:has-text("✓ Done")');
+  check('binder: edit mode unlocks the layout tools',
+    (await page.locator('button:has-text("Size")').count()) === 1);
+
   await page.click('.binder-grid .pocket:not(.filled) >> nth=0');       // empty pocket → picker
   await page.waitForSelector('.picker-overlay input');
   await page.fill('.picker-overlay input', 'Pikachu');
@@ -285,6 +306,23 @@ const { chromium } = require('playwright');
   await page.click('.picker-row:has-text("Base Set")');
   await page.waitForSelector('.binder-cover-page img.cover-logo');
   check('binder: set-logo cover applied and shown on the cover page', true);
+
+  // resize 2×2 → 3×3: cards keep their page + row/column, counts survive
+  await page.click('button:has-text("Size")');
+  await page.waitForSelector('.picker-panel h3:has-text("Binder size")');
+  await page.click('.picker-panel .chip:has-text("3×3")');
+  await page.waitForFunction(() => (document.querySelector('#view').textContent || '').includes('3×3'));
+  check('binder: resize keeps the in-hand tally', (await page.textContent('#view')).includes('1 / 7 in hand'));
+  await page.click('.binder-cover-page');                               // open page 1 in the new size
+  await page.waitForSelector('.binder-grid .pocket');
+  check('binder: resized page shows 9 pockets', (await page.locator('.binder-grid .pocket').count()) === 9);
+  check('binder: cards kept their row/column (4 filled, top row + start of row 2)',
+    (await page.locator('.binder-grid .pocket.filled').count()) === 4 &&
+    (await page.locator('.pocket[data-pocket="0"].filled').count()) === 1 &&
+    (await page.locator('.pocket[data-pocket="3"].filled').count()) === 1 &&
+    (await page.locator('.pocket[data-pocket="2"].filled').count()) === 0);
+  check('binder: the ×2 copy count survived the resize',
+    (await page.textContent('.pocket[data-pocket="0"] .pocket-qty')) === '×2');
 
   await page.goto('http://localhost:3111/#/binders');
   await page.waitForSelector('.binder-cover');

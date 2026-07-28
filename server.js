@@ -220,7 +220,7 @@ const _bindersOf = db.prepare('SELECT id, name, size, color, pages, slots, cover
 const _binderGet = db.prepare('SELECT * FROM binders WHERE user_id = ? AND id = ?');
 const _binderPut = db.prepare(`INSERT INTO binders (user_id, id, name, size, color, pages, slots, cover, created, updated)
   VALUES (?,?,?,?,?,?,?,?,?,?)
-  ON CONFLICT(user_id, id) DO UPDATE SET name=excluded.name, color=excluded.color,
+  ON CONFLICT(user_id, id) DO UPDATE SET name=excluded.name, size=excluded.size, color=excluded.color,
     pages=excluded.pages, slots=excluded.slots, cover=excluded.cover, updated=excluded.updated`);
 /** validate a binder cover choice: a set logo, a card's picture, or uploaded art */
 function cleanBinderCover(c) {
@@ -1580,13 +1580,19 @@ async function handleApi(req, res, pathname, ip, url) {
       const body = await readBody(req);
       const name = typeof body.name === 'string' && body.name.trim() ? body.name.trim().slice(0, 40) : row.name;
       const color = BINDER_COLORS.includes(body.color) ? body.color : row.color;
+      // resizing re-lays every pocket, so a size change must bring the
+      // remapped slots along with it (the client computes the new layout)
+      const size = BINDER_SIZES.includes(body.size) ? body.size : row.size;
+      if (size !== row.size && body.slots === undefined) {
+        return sendJSON(res, 400, { error: 'A size change must include the remapped slots' });
+      }
       let pages = Number.isInteger(body.pages) ? Math.min(Math.max(body.pages, 1), 60) : row.pages;
       let slots = JSON.parse(row.slots);
       if (body.slots !== undefined) {
         if (typeof body.slots !== 'object' || body.slots === null || Array.isArray(body.slots)) {
           return sendJSON(res, 400, { error: 'slots must be an object of pocket index -> card entry' });
         }
-        const capacity = pages * row.size * row.size;
+        const capacity = pages * size * size;
         const clean = {};
         for (const [k, v] of Object.entries(body.slots)) {
           const i = parseInt(k, 10);
@@ -1597,7 +1603,7 @@ async function handleApi(req, res, pathname, ip, url) {
             // one page, with a pan/zoom view transform and a gap-cutting mode
             if (!/^\/bimg\/[a-f0-9-]{36}\.webp$/.test(v.img)) continue;
             if (Array.isArray(v.cells)) {
-              const perPage = row.size * row.size;
+              const perPage = size * size;
               const cells = [...new Set(v.cells.filter((c) => Number.isInteger(c) && c >= 0 && c < capacity))].sort((a, b) => a - b);
               if (!cells.length || cells.length > perPage) continue;
               const pg = Math.floor(cells[0] / perPage);
@@ -1611,19 +1617,21 @@ async function handleApi(req, res, pathname, ip, url) {
               continue;
             }
             // legacy rectangular span { img, w, h } (pre-editor clients)
-            const w = Number.isInteger(v.w) ? Math.min(Math.max(v.w, 1), row.size) : 1;
-            const hh = Number.isInteger(v.h) ? Math.min(Math.max(v.h, 1), row.size) : 1;
+            const w = Number.isInteger(v.w) ? Math.min(Math.max(v.w, 1), size) : 1;
+            const hh = Number.isInteger(v.h) ? Math.min(Math.max(v.h, 1), size) : 1;
             clean[i] = { img: v.img, w, h: hh };
             continue;
           }
           if (typeof v.card !== 'string' || !CARD_ID_RE.test(v.card)) continue;
           const variant = typeof v.variant === 'string' && VARIANT_KEY_RE.test(v.variant) ? v.variant : 'normal';
-          clean[i] = { card: v.card, variant, have: v.have ? 1 : 0 };
+          // n = copies in hand (only meaningful when have; 1 is the default)
+          const n = Number.isInteger(v.n) ? Math.min(Math.max(v.n, 1), 99) : 1;
+          clean[i] = { card: v.card, variant, have: v.have ? 1 : 0, ...(n > 1 ? { n } : {}) };
         }
         slots = clean;
       } else {
         // shrinking pages must not orphan filled pockets
-        const capacity = pages * row.size * row.size;
+        const capacity = pages * size * size;
         for (const k of Object.keys(slots)) if (parseInt(k, 10) >= capacity) { pages = row.pages; break; }
       }
       let cover = row.cover;
@@ -1632,7 +1640,7 @@ async function handleApi(req, res, pathname, ip, url) {
         cover = cc ? JSON.stringify(cc) : null;
       }
       const updated = Date.now();
-      _binderPut.run(user.id, row.id, name, row.size, color, pages, JSON.stringify(slots), cover, row.created, updated);
+      _binderPut.run(user.id, row.id, name, size, color, pages, JSON.stringify(slots), cover, row.created, updated);
       return sendJSON(res, 200, { ok: true, updated });
     }
     if (req.method === 'DELETE') {

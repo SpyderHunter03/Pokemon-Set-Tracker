@@ -292,6 +292,31 @@ function fail(msg) {
   check('binder: cells-based art (arbitrary pockets + view + cut mode) persists',
     Array.isArray(e6.cells) && e6.cells.join(',') === '6,7' && e6.gaps === 'without' &&
     e6.view && Math.round(e6.view.s) === 200 && Math.round(e6.view.x * 2) === -21);
+  // copy counts ride along on card entries (clamped; ×1 stays implicit)
+  const nSlots = { ...bArt2.binder.slots };
+  nSlots['4'] = { ...nSlots['4'], n: 3 };
+  nSlots['1'] = { ...nSlots['1'], n: 1 };
+  await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { method: 'PUT', headers: buAuth, body: JSON.stringify({ slots: nSlots }) });
+  const bN = await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { headers: buAuth });
+  check('binder: copy counts persist (and ×1 stays implicit)',
+    bN.binder.slots['4'].n === 3 && bN.binder.slots['4'].have === 1 && bN.binder.slots['1'].n === undefined);
+
+  // resizing re-lays the pockets, so size changes must bring remapped slots
+  const sizeBare = (await fetch(`http://localhost:3115/api/binders/${bd.id}`, { method: 'PUT', headers: buAuth, body: JSON.stringify({ size: 3 }) })).status;
+  const remap = (i) => { const p = Math.floor(i / 4), q = i % 4; return p * 9 + Math.floor(q / 2) * 3 + (q % 2); };
+  const rmSlots = {};
+  for (const [k, v] of Object.entries(bN.binder.slots)) {
+    const cells = v.cells ? v.cells.map(remap).sort((a, b) => a - b) : null;
+    rmSlots[cells ? cells[0] : remap(parseInt(k, 10))] = cells ? { ...v, cells } : v;
+  }
+  await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { method: 'PUT', headers: buAuth, body: JSON.stringify({ size: 3, pages: 2, slots: rmSlots }) });
+  const bRe = await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { headers: buAuth });
+  check('binder: size change persists — cards keep page + position, art cells remap',
+    sizeBare === 400 && bRe.binder.size === 3 &&
+    bRe.binder.slots['9'] && bRe.binder.slots['9'].n === 3 && bRe.binder.slots['9'].have === 1 &&
+    bRe.binder.slots['12'] && (bRe.binder.slots['12'].cells || []).join(',') === '12,13' &&
+    bRe.binder.slots['4'] && typeof bRe.binder.slots['4'].card === 'string');
+
   const bDel = await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { method: 'DELETE', headers: buAuth });
   const bGone = (await fetch(`http://localhost:3115/api/binders/${bd.id}`, { headers: buAuth })).status;
   check('binder: delete removes it', bDel.ok === true && bGone === 404);

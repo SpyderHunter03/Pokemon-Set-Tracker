@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.22.1';
+const APP_VERSION = '3.23.0';
 
 /* ============================================================
  * Storage helpers
@@ -1896,8 +1896,11 @@ async function renderBinderPage(id) {
     setsById = new Map(setIdx.sets.map((x) => [x.id, x]));
   } catch (e) { view.replaceChildren(dbErrorView('Could not load that binder.', e, () => renderBinderPage(id))); return; }
 
-  const per = binder.size * binder.size;
+  let per = binder.size * binder.size;
   let moveFrom = null;
+  // the binder opens in VIEW mode (flip pages, tap pockets you've gotten);
+  // layout work — moving cards, resizing, covers — lives behind ✎ Edit
+  let editMode = false;
 
   // ---- art entries: your own picture across an arbitrary set of pockets ----
   const GAP_MM = 4, CARD_W = 63, CARD_H = 88;   // physical card + pocket spacing
@@ -2071,8 +2074,44 @@ async function renderBinderPage(id) {
   }
   spreadMq.addEventListener('change', () => { viewIdx = Math.min(viewIdx, maxView()); renderNav(); renderBook(); });
 
+  const setEditMode = (on) => {
+    editMode = on;
+    moveFrom = null;
+    actions.replaceChildren();
+    renderHead(); renderBook();
+  };
+
   function renderHead() {
     const total = filledCount(), got = haveCount();
+    const buttons = editMode ? [
+      h('button', { class: 'btn ghost small', onclick: async () => {
+        const name = prompt('Binder name', binder.name);
+        if (!name || !name.trim()) return;
+        binder.name = name.trim().slice(0, 40);
+        try { await apiCall('binders/' + id, { method: 'PUT', body: JSON.stringify({ name: binder.name }) }); } catch (e) { toast(e.message); }
+        renderHead();
+      } }, '\u270e Rename'),
+      h('button', { class: 'btn ghost small', onclick: async () => {
+        binder.color = BINDER_COLORS[(BINDER_COLORS.indexOf(binder.color) + 1) % BINDER_COLORS.length];
+        try { await apiCall('binders/' + id, { method: 'PUT', body: JSON.stringify({ color: binder.color }) }); } catch (e) { toast(e.message); }
+        renderHead();
+      } }, '\ud83c\udfa8 Color'),
+      h('button', { class: 'btn ghost small', onclick: openSizePicker }, '\u229e Size'),
+      h('button', { class: 'btn ghost small', onclick: async () => {
+        binder.pages += 1; await save(); renderNav(); renderBook();
+      } }, '\uff0b Add page'),
+      h('button', { class: 'btn ghost small', onclick: openCoverPicker }, '\ud83d\uddbc Cover'),
+      h('button', { class: 'btn ghost small', onclick: openProxyPrintDialog }, '\ud83d\udda8 Print proxies'),
+      h('button', { class: 'btn ghost small', onclick: async () => {
+        if (!confirm(`Delete "${binder.name}"? This cannot be undone.`)) return;
+        try { await apiCall('binders/' + id, { method: 'DELETE' }); location.hash = '#/binders'; }
+        catch (e) { toast(e.message); }
+      } }, '\ud83d\uddd1 Delete'),
+      h('button', { class: 'btn small', onclick: () => setEditMode(false) }, '\u2713 Done'),
+    ] : [
+      h('button', { class: 'btn ghost small', onclick: openProxyPrintDialog }, '\ud83d\udda8 Print proxies'),
+      h('button', { class: 'btn small', onclick: () => setEditMode(true) }, '\u270e Edit binder'),
+    ];
     head.replaceChildren(...[
       h('a', { class: 'back-link', href: '#/binders' }, '\u2190 Binders'),
       h('div', { class: 'page-head' },
@@ -2081,34 +2120,117 @@ async function renderBinderPage(id) {
       ),
       total ? h('div', { class: 'progress', style: 'height:8px; margin-bottom:10px' },
         h('div', { style: `width:${Math.round((got / total) * 100)}%` })) : null,
-      h('div', { class: 'row', style: 'gap:8px; flex-wrap:wrap' },
-        h('button', { class: 'btn ghost small', onclick: async () => {
-          const name = prompt('Binder name', binder.name);
-          if (!name || !name.trim()) return;
-          binder.name = name.trim().slice(0, 40);
-          try { await apiCall('binders/' + id, { method: 'PUT', body: JSON.stringify({ name: binder.name }) }); } catch (e) { toast(e.message); }
-          renderHead();
-        } }, '\u270e Rename'),
-        h('button', { class: 'btn ghost small', onclick: async () => {
-          binder.color = BINDER_COLORS[(BINDER_COLORS.indexOf(binder.color) + 1) % BINDER_COLORS.length];
-          try { await apiCall('binders/' + id, { method: 'PUT', body: JSON.stringify({ color: binder.color }) }); } catch (e) { toast(e.message); }
-          renderHead();
-        } }, '\ud83c\udfa8 Color'),
-        h('button', { class: 'btn ghost small', onclick: async () => {
-          binder.pages += 1; await save(); renderNav(); renderBook();
-        } }, '\uff0b Add page'),
-        h('button', { class: 'btn ghost small', onclick: openCoverPicker }, '\ud83d\uddbc Cover'),
-        h('button', { class: 'btn ghost small', onclick: openProxyPrintDialog }, '\ud83d\udda8 Print proxies'),
-        h('button', { class: 'btn ghost small', onclick: async () => {
-          if (!confirm(`Delete "${binder.name}"? This cannot be undone.`)) return;
-          try { await apiCall('binders/' + id, { method: 'DELETE' }); location.hash = '#/binders'; }
-          catch (e) { toast(e.message); }
-        } }, '\ud83d\uddd1 Delete'),
-      ),
+      h('div', { class: 'row', style: 'gap:8px; flex-wrap:wrap' }, ...buttons),
+      editMode ? h('p', { class: 'muted small', style: 'margin:6px 0 0' },
+        'Editing \u2014 tap an empty pocket to add a card, drag or \u2194 Move to rearrange, \u22ef for pocket options.') : null,
     ].filter(Boolean));
   }
 
+  /** re-lay the binder for a new pockets-per-side: cards keep their page and
+   * row/column when that position still exists; everything else appends at
+   * the end (carried pictures each get a fresh page, shape preserved). */
+  function remapForSize(newSize) {
+    const oldS = binder.size, oldPer = oldS * oldS, newPer = newSize * newSize;
+    const mapIdx = (k) => {
+      const p = Math.floor(k / oldPer), pos = k % oldPer;
+      const row = Math.floor(pos / oldS), col = pos % oldS;
+      return (row < newSize && col < newSize) ? p * newPer + row * newSize + col : null;
+    };
+    const slots = {};
+    const overCards = [];
+    const overArts = [];
+    const entries = Object.entries(binder.slots).map(([k, e]) => [parseInt(k, 10), e]).sort((a, b) => a[0] - b[0]);
+    for (const [k, e] of entries) {
+      if (e.img && e.cells) {
+        const mapped = e.cells.map(mapIdx);
+        if (mapped.every((m) => m !== null)) {
+          const cells = mapped.sort((a, b) => a - b);
+          slots[cells[0]] = { ...e, cells };
+        } else {
+          // its position is gone — normalize the shape (cropped if it is now
+          // too big for a page) and carry it to its own page at the end
+          const pos = e.cells.map((c) => ({ col: (c % oldPer) % oldS, row: Math.floor((c % oldPer) / oldS) }));
+          const minC = Math.min(...pos.map((q) => q.col)), minR = Math.min(...pos.map((q) => q.row));
+          const cells0 = pos.map((q) => ({ col: q.col - minC, row: q.row - minR }))
+            .filter((q) => q.col < newSize && q.row < newSize);
+          overArts.push({ entry: e, cells0, cropped: cells0.length !== e.cells.length });
+        }
+      } else if (e.card) {
+        const m = mapIdx(k);
+        if (m !== null) slots[m] = e; else overCards.push(e);
+      }
+    }
+    let cursor = Object.keys(slots).length ? Math.max(...Object.keys(slots).map(Number)) + 1 : 0;
+    for (const e of overCards) slots[cursor++] = e;
+    let pages = Math.max(binder.pages, Math.ceil(cursor / newPer) || 1);
+    for (const { entry, cells0, cropped } of overArts) {
+      if (!cells0.length) continue;
+      const base = pages * newPer;
+      const cells = cells0.map((q) => base + q.row * newSize + q.col).sort((a, b) => a - b);
+      slots[cells[0]] = { img: entry.img, cells, view: cropped ? null : (entry.view || null), gaps: entry.gaps === 'without' ? 'without' : 'with' };
+      pages += 1;
+    }
+    return { slots, pages };
+  }
+
+  function openSizePicker() {
+    const overlay = h('div', { class: 'picker-overlay' },
+      h('div', { class: 'picker-panel' },
+        h('h3', {}, 'Binder size'),
+        h('p', { class: 'muted small' }, 'Cards keep their page and position when it still exists in the new size; anything that no longer fits moves to the end.'),
+        h('div', { class: 'row', style: 'gap:6px; flex-wrap:wrap' },
+          ...BINDER_SIZES.map((s) => h('button', { class: 'chip' + (s === binder.size ? ' active' : ''), onclick: async () => {
+            if (s === binder.size) { overlay.remove(); return; }
+            const { slots, pages } = remapForSize(s);
+            if (pages > 60) { toast('That size would need more than 60 pages'); return; }
+            try {
+              await apiCall('binders/' + id, { method: 'PUT', body: JSON.stringify({ size: s, pages, slots }) });
+              binder.size = s; binder.pages = pages; binder.slots = slots;
+              per = s * s;
+              overlay.remove();
+              viewIdx = Math.min(viewIdx, maxView());
+              renderHead(); renderNav(); renderBook();
+            } catch (e) { toast(e.message); }
+          } }, `${s}×${s}`)),
+        ),
+        h('div', { class: 'row', style: 'justify-content:flex-end' },
+          h('button', { class: 'btn ghost small', onclick: () => overlay.remove() }, 'Cancel')),
+      ));
+    view.append(overlay);
+  }
+
+  /** view mode's pocket sheet: copy counts + details, no layout changes */
+  function viewPocketActions(i) {
+    const s = binder.slots[i];
+    if (!s || !s.card) return;
+    const card = cardsById.get(s.card);
+    const rerender = () => { renderHead(); renderBook(); render(); };
+    const render = () => {
+      actions.replaceChildren(h('div', { class: 'pocket-actions' },
+        h('span', { class: 'muted small' }, card ? `${card.name} — ${variantLabel(card, s.variant)}` : s.card),
+        s.have ? h('span', { class: 'row', style: 'gap:6px; align-items:center' },
+          h('button', { class: 'btn small', onclick: async () => {
+            const n = s.n || 1;
+            if (n > 1) { if (n - 1 > 1) s.n = n - 1; else delete s.n; } else { s.have = 0; delete s.n; }
+            await save(); rerender();
+          } }, '−'),
+          h('strong', {}, '×' + (s.n || 1)),
+          h('button', { class: 'btn small', onclick: async () => {
+            s.n = Math.min((s.n || 1) + 1, 99);
+            await save(); rerender();
+          } }, '＋'),
+        ) : h('button', { class: 'btn small', onclick: async () => {
+          s.have = 1; await save(); rerender();
+        } }, 'Mark in hand'),
+        card ? h('button', { class: 'btn small', onclick: () => openCardModal(card, { variant: s.variant }) }, 'ⓘ Details') : null,
+        h('button', { class: 'btn ghost small', onclick: () => actions.replaceChildren() }, 'Close'),
+      ));
+    };
+    render();
+  }
+
   function pocketActions(i) {
+    if (!editMode) return viewPocketActions(i);
     const s = binder.slots[i];
     if (s && s.img) {
       actions.replaceChildren(h('div', { class: 'pocket-actions' },
@@ -2160,11 +2282,12 @@ async function renderBinderPage(id) {
       const s = binder.slots[i];
       let pocket;
       if (anchor !== undefined) {
-        // one slice of a placed picture
+        // one slice of a placed picture \u2014 adjustable only while editing
         const entry = binder.slots[anchor];
         pocket = h('div', { class: 'pocket art', 'data-pocket': String(i) },
-          h('button', { class: 'pocket-edit', onclick: (e) => { e.stopPropagation(); pocketActions(anchor); } }, '\u22ef'));
+          editMode ? h('button', { class: 'pocket-edit', onclick: (e) => { e.stopPropagation(); pocketActions(anchor); } }, '\u22ef') : null);
         pocket.addEventListener('click', () => {
+          if (!editMode) return;
           if (moveFrom !== null) { moveFrom = null; actions.replaceChildren(); renderBook(); return; }
           pocketActions(anchor);
         });
@@ -2175,50 +2298,58 @@ async function renderBinderPage(id) {
       if (s) {
         const card = cardsById.get(s.card);
         const img = card && cardImg(card, 'low', s.variant);
-        pocket = h('div', { class: 'pocket filled' + (s.have ? ' have' : '') + (moveFrom === i ? ' moving' : ''), 'data-pocket': String(i), draggable: 'true' },
+        pocket = h('div', { class: 'pocket filled' + (s.have ? ' have' : '') + (moveFrom === i ? ' moving' : ''), 'data-pocket': String(i) },
           img ? h('img', { src: img, loading: 'lazy', alt: (card && card.name) || s.card })
               : h('div', { class: 'pocket-name' }, (card && card.name) || s.card),
           s.have ? h('div', { class: 'pocket-badge' }, '\u2713') : null,
+          s.have && (s.n || 1) > 1 ? h('div', { class: 'pocket-qty' }, '\u00d7' + s.n) : null,
           h('button', { class: 'pocket-edit', onclick: (e) => { e.stopPropagation(); pocketActions(i); } }, '\u22ef'),
         );
-        // drag & drop between pockets (desktop; mobile keeps \u2194 Move)
-        pocket.addEventListener('dragstart', (e) => {
-          e.dataTransfer.setData('text/plain', String(i));
-          e.dataTransfer.effectAllowed = 'move';
-          pocket.classList.add('dragging');
-        });
-        pocket.addEventListener('dragend', () => {
-          grid.querySelectorAll('.drag-over, .dragging').forEach((el) => el.classList.remove('drag-over', 'dragging'));
-        });
+        if (editMode) {
+          // drag & drop between pockets (desktop; mobile keeps \u2194 Move)
+          pocket.setAttribute('draggable', 'true');
+          pocket.addEventListener('dragstart', (e) => {
+            e.dataTransfer.setData('text/plain', String(i));
+            e.dataTransfer.effectAllowed = 'move';
+            pocket.classList.add('dragging');
+          });
+          pocket.addEventListener('dragend', () => {
+            grid.querySelectorAll('.drag-over, .dragging').forEach((el) => el.classList.remove('drag-over', 'dragging'));
+          });
+        }
       } else {
-        pocket = h('div', { class: 'pocket' + (moveFrom === i ? ' moving' : ''), 'data-pocket': String(i) },
-          h('div', { class: 'pocket-plus' }, '\uff0b'));
+        pocket = h('div', { class: 'pocket' + (moveFrom === i ? ' moving' : '') + (editMode ? '' : ' plain'), 'data-pocket': String(i) },
+          editMode ? h('div', { class: 'pocket-plus' }, '\uff0b') : null);
       }
-      // any card/empty pocket accepts a dropped card
-      pocket.addEventListener('dragover', (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; pocket.classList.add('drag-over'); });
-      pocket.addEventListener('dragleave', () => pocket.classList.remove('drag-over'));
-      pocket.addEventListener('drop', async (e) => {
-        e.preventDefault();
-        const from = parseInt(e.dataTransfer.getData('text/plain'), 10);
-        if (!Number.isInteger(from) || !binder.slots[from] || binder.slots[from].img) return;
-        await moveEntry(from, i);
-        renderBook(); renderHead();
-      });
-      pocket.addEventListener('click', async () => {
-        if (moveFrom !== null) {
-          await moveEntry(moveFrom, i);
-          moveFrom = null;
-          actions.replaceChildren();
+      if (editMode) {
+        // any card/empty pocket accepts a dropped card
+        pocket.addEventListener('dragover', (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; pocket.classList.add('drag-over'); });
+        pocket.addEventListener('dragleave', () => pocket.classList.remove('drag-over'));
+        pocket.addEventListener('drop', async (e) => {
+          e.preventDefault();
+          const from = parseInt(e.dataTransfer.getData('text/plain'), 10);
+          if (!Number.isInteger(from) || !binder.slots[from] || binder.slots[from].img) return;
+          await moveEntry(from, i);
           renderBook(); renderHead();
+        });
+      }
+      pocket.addEventListener('click', async () => {
+        if (editMode) {
+          if (moveFrom !== null) {
+            await moveEntry(moveFrom, i);
+            moveFrom = null;
+            actions.replaceChildren();
+            renderBook(); renderHead();
+            return;
+          }
+          if (s) pocketActions(i); else openPocketPicker(i);
           return;
         }
-        if (s) {
-          s.have = s.have ? 0 : 1;
-          await save();
-          renderBook(); renderHead();
-        } else {
-          openPocketPicker(i);
-        }
+        // view mode: tap = got it / not yet
+        if (!s) return;
+        if (s.have) { s.have = 0; delete s.n; } else { s.have = 1; }
+        await save();
+        renderBook(); renderHead();
       });
       grid.append(pocket);
     }
