@@ -227,6 +227,22 @@ const { chromium } = require('playwright');
   check('editor: copied card lands in THIS set with the source picture',
     ((await page.locator('.tcg-card[data-card-id="test-promos-3"] >> nth=0 >> img').getAttribute('src')) || '').includes('base1/58/'));
 
+  // ---- his bug: uncheck every default variant + type a custom name WITHOUT
+  //      clicking ＋Add — the card must save with ONLY the custom printing ----
+  await page.click('.add-card-tile');
+  await page.waitForSelector('.ce-panel');
+  await page.fill('.ce-panel input[placeholder="e.g. Eevee"]', 'Solo Promo');
+  await page.fill('.ce-panel input[placeholder="e.g. 51 or SWSH087"]', '4');
+  await page.uncheck('.ce-panel label.ce-var:has-text("Normal") input');
+  await page.fill('.ce-panel input[placeholder="e.g. Cracked Ice Holo"]', 'Gold Stamp');
+  await page.click('.ce-panel button:has-text("Add card")');   // note: no ＋Add first
+  await page.waitForSelector('.tcg-card[data-card-id="test-promos-4"]');
+  check('editor: unchecking every default variant sticks (no phantom Normal)',
+    (await page.locator('.tcg-card[data-card-id="test-promos-4"]').count()) === 1 &&
+    (await page.locator('.tcg-card[data-card-id="test-promos-4"][data-variant="gold-stamp"]').count()) === 1);
+  check('editor: a typed-but-not-added custom printing still saves',
+    (await page.locator('.tcg-card[data-card-id="test-promos-4"] .fx-label').textContent()) === 'Gold Stamp');
+
   // sign the admin out so the main suite's fresh user is a clean non-admin test
   await page.click('#account-btn');
   await page.waitForSelector('#account-status button:has-text("Sign out")');

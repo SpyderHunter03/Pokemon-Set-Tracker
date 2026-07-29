@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.34.0';
+const APP_VERSION = '3.34.1';
 
 /* ============================================================
  * Storage helpers
@@ -1249,6 +1249,12 @@ async function openCardEditor(opts) {
   async function saveCard() {
     if (!nameIn.value.trim()) { toast('The card needs a name'); return; }
     if (!editing && !numIn.value.trim()) { toast('The card needs a number'); return; }
+    // a custom printing typed but not yet ＋Added still counts — don't lose it
+    const cvLeft = cvInput.value.trim();
+    if (cvLeft.length >= 2 && !customPend.includes(cvLeft)) { customPend.push(cvLeft); cvInput.value = ''; renderCustom(); }
+    const anyBase = varBoxes.some((b) => b.cb.checked);
+    const anyCustom = customPend.length > 0 || existingCustom.some(([k]) => !customRemove.has(k));
+    if (!anyBase && !anyCustom) { toast('Pick at least one printing, or add your own'); return; }
     const hasFile = !!(fileIn.files && fileIn.files[0]);
     const payload = {
       lang,

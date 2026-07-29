@@ -1535,7 +1535,9 @@ async function handleApi(req, res, pathname, ip, url) {
     const cLang = LANG_RE.test(body.lang || '') ? body.lang : 'en';
     const patch = sanitizeCardPatch(body);
     const csvOf = (arr) => (arr && arr.length ? arr.join(',') : null);
-    const varsCsv = (v) => { const ks = v ? Object.keys(v).filter((k) => v[k]) : []; return ks.length ? ks.join(',') : 'normal'; };
+    // an explicitly empty selection is honored ('' — the card lives on its
+    // custom printings alone); only an ABSENT variants object means 'normal'
+    const varsCsv = (v) => (v ? Object.keys(v).filter((k) => v[k]).join(',') : 'normal');
     // reuse another card's picture (duplicates, or "from an existing card")
     let imgFrom;
     if (typeof body.imageFrom === 'string' && CARD_ID_RE.test(body.imageFrom)) {

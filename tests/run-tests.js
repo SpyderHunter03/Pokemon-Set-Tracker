@@ -269,6 +269,15 @@ function fail(msg) {
     ifRes.ok === true && ifCard && ifCard.img && !!ifCard.img.low &&
     ifB4 && ifB4.img && ifCard.img.low === ifB4.img.low && ifBad === 400);
 
+  // an explicitly empty variant selection is honored — no phantom 'normal'
+  await ovH('/api/card', { new: true, set: 'promo-x', localId: '4', name: 'No Base', variants: {}, lang: 'en' });
+  await ovH('/api/custom-variant', { cardId: 'promo-x-4', label: 'Special Stamp', lang: 'en' });
+  const nbSet = await jfetch('http://localhost:3115/api/catalog/set?lang=en&id=promo-x');
+  const nbCard = (nbSet.cards || []).find((c) => c.id === 'promo-x-4');
+  check('editor: a card can exist on custom printings alone (no phantom Normal)',
+    nbCard && !(nbCard.variants && nbCard.variants.normal) &&
+    nbCard.printings && nbCard.printings['special-stamp'] === 'Special Stamp');
+
   // ---- removing printings (variants) of a card ----
   const vrCustom = await ovH('/api/variant-remove', { cardId: 'base1-4', variant: 'cosmos-holo', lang: 'en' });
   const vrSet = await jfetch('http://localhost:3115/api/catalog/set?lang=en&id=base1');
