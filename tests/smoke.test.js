@@ -78,6 +78,10 @@ const { chromium } = require('playwright');
   check('sets newest first by default', (await page.locator('.set-card .name >> nth=0').textContent()).includes('Test Promos'));   // the admin-made set from the bootstrap suite is newest
   await page.selectOption('.chips select', 'name');
   check('sets sortable by name', (await page.locator('.set-card .name >> nth=0').textContent()).includes('Base Set'));
+  await page.selectOption('.chips select', 'most-owned');
+  check('sets sortable by most owned', (await page.locator('.set-card .name >> nth=0').textContent()).includes('Base Set'));
+  await page.selectOption('.chips select', 'least-owned');
+  check('sets sortable by least owned', (await page.locator('.set-card .name >> nth=0').textContent()).includes('Darkness'));
   await page.selectOption('.chips select', 'newest');
 
   // ---- set page: one tile per printing ----
@@ -173,6 +177,11 @@ const { chromium } = require('playwright');
   check('species tiles show a printings tally too',
     (await page.textContent('.set-card .count >> nth=0')).includes('printings') &&
     (await page.locator('.set-card >> nth=0 >> .progress').count()) === 2);
+  await page.selectOption('.chips select', 'most-owned');
+  check('species sortable by most owned', (await page.locator('.set-card .name >> nth=0').textContent()).includes('Charizard'));
+  await page.selectOption('.chips select', 'least-owned');
+  check('species sortable by least owned', (await page.locator('.set-card .name >> nth=0').textContent()).includes('Eevee'));
+  await page.selectOption('.chips select', 'dex');
   check('charizard owned across sets', (await page.textContent('.set-card:has-text("Charizard") .count')).includes('1 / 2'));
 
   await page.click('.set-card:has-text("Charizard")');

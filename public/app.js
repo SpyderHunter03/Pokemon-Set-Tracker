@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.32.0';
+const APP_VERSION = '3.33.0';
 
 /* ============================================================
  * Storage helpers
@@ -972,14 +972,20 @@ async function renderHome() {
     }
   } catch { /* tiles just skip the printings bar */ }
 
+  const counts = ownedCountsBySet();
   let setSort = lsGet('ptcg.sort.sets') || 'newest';
   const orderedSets = () => {
     if (setSort === 'name') return [...sets].sort((a, b) => a.name.localeCompare(b.name));
+    if (setSort === 'most-owned' || setSort === 'least-owned') {
+      const dir = setSort === 'most-owned' ? -1 : 1;
+      const pctOf = (x) => { const t = (x.cardCount && (x.cardCount.official || x.cardCount.total)) || 0; return t ? (counts[x.id] || 0) / t : 0; };
+      return [...sets].sort((a, b) =>
+        dir * ((counts[a.id] || 0) - (counts[b.id] || 0)) || dir * (pctOf(a) - pctOf(b)) || a.name.localeCompare(b.name));
+    }
     if (setSort === 'oldest') return [...sets]; // index order = release order
     return [...sets].reverse(); // newest first
   };
   let ordered = orderedSets();
-  const counts = ownedCountsBySet();
 
   const totalOwned = Object.keys(collection).filter(ownedAny).length;
   const completeSets = ordered.filter((s) => {
@@ -1039,7 +1045,7 @@ async function renderHome() {
   renderSetCards('');
 
   const sortCtl = sortSelect(
-    [['newest', 'Newest first'], ['oldest', 'Oldest first'], ['name', 'Name A–Z']],
+    [['newest', 'Newest first'], ['oldest', 'Oldest first'], ['name', 'Name A–Z'], ['most-owned', 'Most owned'], ['least-owned', 'Least owned']],
     setSort,
     (v) => { setSort = v; lsSet('ptcg.sort.sets', v); ordered = orderedSets(); renderSetCards(filterInput.value.trim().toLowerCase()); },
   );
@@ -1582,9 +1588,22 @@ async function renderPokemonList() {
     oninput: () => renderList(filterInput.value.trim().toLowerCase()),
   });
 
+  let spSort = lsGet('ptcg.sort.species') || 'dex';
+  const orderedSpecies = () => {
+    if (spSort === 'most-owned' || spSort === 'least-owned') {
+      const dir = spSort === 'most-owned' ? -1 : 1;
+      const key = (sp) => { const o = sp.cards.filter((c) => ownedAny(c.id)).length; return [o, sp.cards.length ? o / sp.cards.length : 0]; };
+      return [...idx.species].sort((a, b) => {
+        const ka = key(a), kb = key(b);
+        return dir * (ka[0] - kb[0]) || dir * (ka[1] - kb[1]) || a.dex - b.dex;
+      });
+    }
+    return idx.species;   // already in dex order
+  };
+
   function renderList(filter) {
     list.replaceChildren();
-    for (const sp of idx.species) {
+    for (const sp of orderedSpecies()) {
       if (filter && !sp.name.toLowerCase().includes(filter) && String(sp.dex) !== filter) continue;
       const owned = sp.cards.filter((c) => ownedAny(c.id)).length;
       const total = sp.cards.length;
@@ -1614,6 +1633,10 @@ async function renderPokemonList() {
     h('div', { class: 'page-head' }, h('h1', {}, 'Pokémon')),
     h('p', { class: 'muted', style: 'margin-top:0' }, 'Every printing of each Pokémon, across all sets.'),
     h('div', { class: 'set-filter' }, filterInput),
+    h('div', { class: 'chips' },
+      sortSelect([['dex', 'Dex number'], ['most-owned', 'Most owned'], ['least-owned', 'Least owned']], spSort,
+        (v) => { spSort = v; lsSet('ptcg.sort.species', v); renderList(filterInput.value.trim().toLowerCase()); }),
+    ),
     list,
   );
 }
