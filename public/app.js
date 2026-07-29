@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.37.0';
+const APP_VERSION = '3.38.0';
 
 /* ============================================================
  * Storage helpers
@@ -3288,7 +3288,7 @@ async function renderBinderPage(id) {
   }
 
   function openProxyPrintDialog() {
-    let which = 'missing', frame = 'color', paper = 'letter';
+    let which = 'missing', paper = 'letter';
     // pocket sizes vary between binders — offer presets and a custom entry
     const SIZES = { std: { w: 63, h: 88 }, small: { w: 59, h: 86 }, jumbo: { w: 89, h: 127 } };
     let sizeKey = lsGet('ptcg.proxy.size') || 'std';
@@ -3325,9 +3325,8 @@ async function renderBinderPage(id) {
     const overlay = h('div', { class: 'picker-overlay' },
       h('div', { class: 'picker-panel' },
         h('h3', {}, 'Print proxies'),
-        h('p', { class: 'muted small' }, 'Prints cards at real size (63\u2009\u00d7\u200988\u2009mm) with cut guides \u2014 stand-ins for your physical binder\u2019s pockets until the real card arrives. Artwork adds a decorative frame around each card.'),
+        h('p', { class: 'muted small' }, 'Prints cards at pocket size with cut guides \u2014 stand-ins for your physical binder\u2019s pockets until the real card arrives.'),
         optRow('Cards', [['missing', 'Missing only'], ['all', 'All pockets']], () => which, (v) => which = v),
-        optRow('Artwork', [['none', 'None'], ['color', 'Binder color'], ['gold', 'Gold'], ['pokeball', 'Pok\u00e9ball']], () => frame, (v) => frame = v),
         optRow('Size', [['std', 'Standard 63\u00d788'], ['small', 'Small 59\u00d786'], ['jumbo', 'Jumbo 89\u00d7127'], ['custom', 'Custom\u2026']],
           () => sizeKey, (v) => { sizeKey = v; syncCustomRow(); }),
         customRow,
@@ -3340,7 +3339,7 @@ async function renderBinderPage(id) {
             lsSet('ptcg.proxy.size', sizeKey);
             if (sizeKey === 'custom') { lsSet('ptcg.proxy.customW', String(size.w)); lsSet('ptcg.proxy.customH', String(size.h)); }
             overlay.remove();
-            printProxies(which, frame, paper, size);
+            printProxies(which, paper, size);
           } }, '\ud83d\udda8 Print'),
         ),
       ));
@@ -3348,20 +3347,20 @@ async function renderBinderPage(id) {
     syncCustomRow();
   }
 
-  function printProxies(which, frame, paper, size) {
+  function printProxies(which, paper, size) {
     const pw = (size && size.w) || 63, ph = (size && size.h) || 88;
     const entries = Object.entries(binder.slots)
       .map(([k, v]) => [parseInt(k, 10), v])
       .sort((a, b) => a[0] - b[0])
       .filter(([, v]) => which === 'all' ? true : (v.card && !v.have));
     if (!entries.length) { toast('Nothing to print \u2014 every pocket is already in hand'); return; }
-    const area = h('div', { id: 'print-area', class: 'frame-' + frame });
+    const area = h('div', { id: 'print-area' });
     for (const [, v] of entries) {
       if (v.img) {
         // your picture: one 63×88mm piece per chosen pocket, cut with or
         // without the between-pocket spacing (exactly as placed in the editor)
         for (const c of v.cells || []) {
-          const cell = h('div', { class: 'print-cell print-art b-' + binder.color });
+          const cell = h('div', { class: 'print-cell print-art' });
           area.append(cell);
           artPieceCss(cell, v, c, pw / CARD_W, 'mm');
         }
@@ -3370,7 +3369,7 @@ async function renderBinderPage(id) {
       const card = cardsById.get(v.card);
       const img = card && (cardImg(card, 'high', v.variant) || cardImg(card, 'low', v.variant));
       // the printing's name banners EVERY proxy, matching the collection look
-      area.append(h('div', { class: 'print-cell b-' + binder.color },
+      area.append(h('div', { class: 'print-cell' },
         img ? h('img', { src: img, alt: (card && card.name) || v.card })
             : h('div', { class: 'print-fallback' },
                 h('div', { class: 'pf-name' }, (card && card.name) || v.card),
@@ -3382,10 +3381,7 @@ async function renderBinderPage(id) {
     }
     const pageStyle = h('style', {}, `@page { size: ${paper === 'a4' ? 'A4' : 'letter'}; margin: 8mm; }`);
     const sizeStyle = h('style', {}, `
-      body.printing-proxies #print-area .print-cell { width: ${pw}mm; height: ${ph}mm; }
-      body.printing-proxies #print-area.frame-color .print-cell,
-      body.printing-proxies #print-area.frame-gold .print-cell,
-      body.printing-proxies #print-area.frame-pokeball .print-cell { width: ${pw + 6}mm; height: ${ph + 6}mm; }`);
+      body.printing-proxies #print-area .print-cell { width: ${pw}mm; height: ${ph}mm; }`);
     document.head.append(pageStyle, sizeStyle);
     document.body.append(area);
     document.body.classList.add('printing-proxies');

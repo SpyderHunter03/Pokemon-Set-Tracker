@@ -771,41 +771,14 @@ body.printing-proxies #print-area {
 }
 .pf-name { font-weight: 700; font-size: 12pt; }
 .pf-meta { font-size: 8pt; color: #555; }
-/* decorative frames: the card stays 63×88; the frame surrounds it */
-#print-area.frame-color .print-cell,
-#print-area.frame-gold .print-cell,
-#print-area.frame-pokeball .print-cell {
-  width: 69mm; height: 94mm; padding: 3mm; outline: none; border-radius: 2mm;
-}
-#print-area.frame-gold .print-cell {
-  background: linear-gradient(135deg, #f9e8a0, #d4a017 30%, #f6d365 50%, #b8860b 75%, #f9e8a0) !important;
-}
-#print-area.frame-pokeball .print-cell {
-  background:
-    radial-gradient(circle at 50% 50%, #fff 0 1.6mm, #1c1c1c 1.6mm 2.6mm, transparent 2.6mm),
-    linear-gradient(180deg, #d92818 0 45%, #1c1c1c 45% 55%, #f2f2f2 55% 100%) !important;
-}
-/* frame-color reuses the binder cover palette via the .b-* class on the cell */
-#print-area.frame-color .print-cell.b-red    { background: linear-gradient(145deg, #b3271e, #7c1712) !important; }
-#print-area.frame-color .print-cell.b-blue   { background: linear-gradient(145deg, #2456b3, #16336e) !important; }
-#print-area.frame-color .print-cell.b-green  { background: linear-gradient(145deg, #1e8a4c, #135631) !important; }
-#print-area.frame-color .print-cell.b-purple { background: linear-gradient(145deg, #6d3fb3, #45266f) !important; }
-#print-area.frame-color .print-cell.b-black  { background: linear-gradient(145deg, #3a3f47, #17191d) !important; }
-
-/* ---------- binder art spans + drag & drop ---------- */
-.pocket.art { border-style: solid; border-color: var(--line, #3a4157); background: #000; }
-.pocket.art img { width: 100%; height: 100%; object-fit: cover; display: block; }
-.pocket.dragging { opacity: .45; }
-.pocket.drag-over { border-color: var(--accent-soft); border-style: solid; box-shadow: 0 0 0 2px var(--accent-soft) inset; }
-.picker-panel select { background: var(--card, #1c2333); color: inherit; border: 1px solid var(--line, #333); border-radius: 8px; padding: 6px 8px; }
-/* printing-name banner on proxies — same look as the collection tiles */
-.print-cell { position: relative; }
+/* same pill as the web app's .fx-label: dark rounded box at the 75% line */
 .print-fx {
-  position: absolute; left: -20%; width: 140%; top: 75%;   /* matches the on-screen banner position */
-  transform: translateY(-50%) rotate(-24deg);
-  background: rgba(255, 255, 255, 0.82); color: #111;
-  font-weight: 800; font-size: 10pt; letter-spacing: 0.06em; text-transform: uppercase;
-  text-align: center; padding: 1.6mm 0; border-top: 0.3mm solid #111; border-bottom: 0.3mm solid #111;
+  position: absolute; top: 75%; left: 50%; max-width: 94%; box-sizing: border-box;
+  transform: translate(-50%, -50%) rotate(-24deg);
+  background: rgba(10, 12, 22, .74); color: #fff;
+  border: 0.3mm solid rgba(255, 255, 255, .35); border-radius: 2mm;
+  font-weight: 800; font-size: 9pt; letter-spacing: 0.04em; text-transform: uppercase;
+  text-align: center; line-height: 1.2; padding: 1.5mm 3mm;
   -webkit-print-color-adjust: exact; print-color-adjust: exact;
 }
 .print-cell.print-art { outline: 0.3mm dashed #999; }
