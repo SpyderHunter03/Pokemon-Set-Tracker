@@ -259,6 +259,55 @@ function fail(msg) {
   check('editor: restoring brings the card back',
     rsRes.ok === true && (rsSet.cards || []).some((c) => c.id === 'promo-x-1'));
 
+  // ---- removing printings (variants) of a card ----
+  const vrCustom = await ovH('/api/variant-remove', { cardId: 'base1-4', variant: 'cosmos-holo', lang: 'en' });
+  const vrSet = await jfetch('http://localhost:3115/api/catalog/set?lang=en&id=base1');
+  const vrB4 = (vrSet.cards || []).find((c) => c.id === 'base1-4');
+  check('editor: removing a custom printing hides it',
+    vrCustom.ok === true && !(vrB4.printings && vrB4.printings['cosmos-holo']));
+  await ovH('/api/custom-variant', { cardId: 'base1-4', label: 'Cosmos Holo' });
+  const raSet = await jfetch('http://localhost:3115/api/catalog/set?lang=en&id=base1');
+  const raB4 = (raSet.cards || []).find((c) => c.id === 'base1-4');
+  check('editor: re-adding the same printing name restores it',
+    raB4.printings && raB4.printings['cosmos-holo'] === 'Cosmos Holo');
+
+  const vrBase = await ovH('/api/variant-remove', { cardId: 'base1-4', variant: 'firstEdition', lang: 'en' });
+  await ovH('/api/catalog/import', {});   // a re-import must not resurrect it
+  const vrSet2 = await jfetch('http://localhost:3115/api/catalog/set?lang=en&id=base1');
+  const vrB42 = (vrSet2.cards || []).find((c) => c.id === 'base1-4');
+  check('editor: removed base variant stays gone through a catalog re-import',
+    vrBase.ok === true && vrB42 && vrB42.variants && !vrB42.variants.firstEdition && vrB42.variants.holo === true);
+
+  await ovH('/api/variant-remove', { cardId: 'promo-x-1', variant: 'holo', lang: 'en' });
+  const vrLast = (await fetch('http://localhost:3115/api/variant-remove', { method: 'POST', headers: ovAuth, body: JSON.stringify({ cardId: 'promo-x-1', variant: 'normal', lang: 'en' }) })).status;
+  const vrPromo = await jfetch('http://localhost:3115/api/catalog/set?lang=en&id=promo-x');
+  const vrP1 = (vrPromo.cards || []).find((c) => c.id === 'promo-x-1');
+  check('editor: the last printing cannot be removed',
+    vrLast === 400 && vrP1 && vrP1.variants && vrP1.variants.normal === true && !vrP1.variants.holo);
+
+  // removals are SOFT tombstones: the card row itself stays under master
+  // control (updates keep flowing), and the merge bypasses the removed variant
+  await ovH('/api/variant-remove', { cardId: 'base1-58', variant: 'firstEdition', lang: 'en' });
+  await ovH('/api/catalog/import', {});
+  const pkSet = await jfetch('http://localhost:3115/api/catalog/set?lang=en&id=base1');
+  const pk = (pkSet.cards || []).find((c) => c.id === 'base1-58');
+  let pkSource;
+  {
+    const { DatabaseSync } = require('node:sqlite');
+    const pdb = new DatabaseSync(path.join(ROOT, '.test-data-ov', 'ptcg.db'));
+    pkSource = (pdb.prepare("SELECT source FROM cards WHERE lang='en' AND id='base1-58'").get() || {}).source;
+    pdb.close();
+  }
+  check('editor: a variant tombstone leaves the card itself master-owned (soft removal)',
+    pk && pk.variants && !pk.variants.firstEdition && pk.variants.normal === true && pkSource === 'master');
+  // re-ticking the variant in the card editor lifts the tombstone, scan intact
+  await ovH('/api/card', { cardId: 'base1-58', variants: { normal: true, firstEdition: true }, lang: 'en' });
+  const pkSet2 = await jfetch('http://localhost:3115/api/catalog/set?lang=en&id=base1');
+  const pk2 = (pkSet2.cards || []).find((c) => c.id === 'base1-58');
+  check('editor: re-ticking the variant restores it with its scan',
+    pk2 && pk2.variants && pk2.variants.firstEdition === true &&
+    !!(pk2.variantImages && pk2.variantImages.firstEdition && pk2.variantImages.firstEdition.low));
+
   // ---- download all images locally: repoint a remote image to /cdn ----
   {
     const { DatabaseSync } = require('node:sqlite');

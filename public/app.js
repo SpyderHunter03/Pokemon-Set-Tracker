@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.24.0';
+const APP_VERSION = '3.25.1';
 
 /* ============================================================
  * Storage helpers
@@ -311,11 +311,13 @@ function realVariants(card) {
     if (key === 'other') continue;
     if (v && v[key]) avail.push(key);
   }
-  if (!avail.length) avail.push('normal');
   const pr = card && card.printings;   // custom printings carried on the card
   if (pr) for (const key of Object.keys(pr)) {
     if (!avail.includes(key)) avail.push(key);
   }
+  // only assume "normal" when the card has no printings at all — a card whose
+  // normal printing was removed but keeps a custom one must not resurrect it
+  if (!avail.length) avail.push('normal');
   return avail;
 }
 
@@ -722,6 +724,23 @@ async function openCardModal(brief, { variant, onOwnershipChange } = {}) {
           }
         } }, '＋ Add printing'),
         h('button', { type: 'button', class: 'btn ghost small', onclick: () => fileInput.click() }, `⬆ Upload ${variantLabel(card, active)} image`),
+        (realVariants(card).includes(active) && realVariants(card).length > 1)
+          ? h('button', { type: 'button', class: 'btn ghost small', onclick: async () => {
+              if (!confirm(`Remove the ${variantLabel(card, active)} printing of ${card.name}?` +
+                (appConfig.master
+                  ? '\n\nThis is the master workspace — publishing afterwards removes it from every install.'
+                  : '\n\nOnly this install is affected; master updates will not bring it back. Restore it any time: re-tick it in \u270e Edit card, or re-add a printing with the same name.'))) return;
+              try {
+                await apiCall('variant-remove', { method: 'POST', body: JSON.stringify({ cardId: card.id, variant: active, lang }) });
+                clearDataCaches();
+                card = await getCard(card.id);
+                active = avail()[0];
+                toast('Printing removed');
+                renderVariantUI();
+                route(); // its tile disappears from the grid behind
+              } catch (err) { toast(err.message); }
+            } }, `✕ Remove ${variantLabel(card, active)}`)
+          : null,
         h('button', { type: 'button', class: 'btn ghost small', onclick: () => {
           cardModal.close();   // dialogs sit in the browser's top layer — the editor overlay must replace it
           openCardEditor({ card, onSaved: () => { clearDataCaches(); route(); } });

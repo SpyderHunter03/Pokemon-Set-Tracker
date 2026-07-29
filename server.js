@@ -153,6 +153,7 @@ db.exec(`
 // migrate older catalog schemas (add columns introduced after first release)
 try { db.exec('ALTER TABLE sets ADD COLUMN official_count INTEGER'); } catch { /* already present */ }
 try { db.exec('ALTER TABLE binders ADD COLUMN cover TEXT'); } catch { /* already present */ }
+try { db.exec('ALTER TABLE printings ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0'); } catch { /* already present */ }
 
 // ---------- storage helpers ----------
 
@@ -749,10 +750,10 @@ const _catCard = db.prepare(`INSERT INTO cards (lang,id,set_id,local_id,name,rar
     hp=excluded.hp, illustrator=excluded.illustrator, variants_csv=excluded.variants_csv,
     img_low=excluded.img_low, img_high=excluded.img_high, position=excluded.position,
     hidden=excluded.hidden WHERE cards.source='master'`);
-const _catPrinting = db.prepare(`INSERT INTO printings (lang,card_id,variant,label,img_low,img_high,source)
-  VALUES (?,?,?,?,?,?, 'master')
+const _catPrinting = db.prepare(`INSERT INTO printings (lang,card_id,variant,label,img_low,img_high,source,hidden)
+  VALUES (?,?,?,?,?,?, 'master', ?)
   ON CONFLICT(lang,card_id,variant) DO UPDATE SET label=excluded.label,
-    img_low=excluded.img_low, img_high=excluded.img_high WHERE printings.source='master'`);
+    img_low=excluded.img_low, img_high=excluded.img_high, hidden=excluded.hidden WHERE printings.source='master'`);
 const _countCards = db.prepare('SELECT COUNT(*) AS n FROM cards');
 const _countSets = db.prepare('SELECT COUNT(*) AS n FROM sets');
 const _countPrintings = db.prepare('SELECT COUNT(*) AS n FROM printings');
@@ -799,7 +800,7 @@ function _upsertCatCard(lang, c, setId, ci, imageBase, hasHigh, custom) {
     prints[vk] = { label, img_low: (prints[vk] || {}).img_low || null, img_high: (prints[vk] || {}).img_high || null };
   }
   let n = 0;
-  for (const [vk, p] of Object.entries(prints)) { _catPrinting.run(lang, c.id, vk, p.label, p.img_low, p.img_high); n++; }
+  for (const [vk, p] of Object.entries(prints)) { _catPrinting.run(lang, c.id, vk, p.label, p.img_low, p.img_high, 0); n++; }
   return n;
 }
 
@@ -885,8 +886,11 @@ async function importCatalogFromRemote(base, progressCb) {
     // custom printings (labels / per-printing image overrides)
     db.exec('BEGIN');
     try {
-      for (const p of src.prepare('SELECT lang,card_id,variant,label,img_low,img_high FROM printings').all()) {
-        _catPrinting.run(p.lang, p.card_id, p.variant, p.label, p.img_low, p.img_high);
+      let pullPrints;   // older master catalogs predate the printings hidden column
+      try { pullPrints = src.prepare('SELECT lang,card_id,variant,label,img_low,img_high,hidden FROM printings').all(); }
+      catch { pullPrints = src.prepare('SELECT lang,card_id,variant,label,img_low,img_high FROM printings').all(); }
+      for (const p of pullPrints) {
+        _catPrinting.run(p.lang, p.card_id, p.variant, p.label, p.img_low, p.img_high, p.hidden ? 1 : 0);
         seenPrints.add(p.lang + '\n' + p.card_id + '\n' + p.variant);
         nPrint++;
       }
@@ -950,23 +954,25 @@ const _setCount = db.prepare('SELECT COUNT(*) AS n FROM cards WHERE lang = ? AND
 const _oneSet = db.prepare('SELECT id, name, release_date, official_count FROM sets WHERE lang = ? AND id = ? AND hidden = 0');
 const _cardsOfSet = db.prepare('SELECT * FROM cards WHERE lang = ? AND set_id = ? AND hidden = 0 ORDER BY position, local_id');
 const _cardsOfLang = db.prepare('SELECT id, set_id, local_id, name, rarity, category, dex_csv, types_csv, variants_csv, img_low, img_high FROM cards WHERE lang = ? AND hidden = 0 ORDER BY position');
-const _printsOfCard = db.prepare('SELECT variant, label, img_low, img_high FROM printings WHERE lang = ? AND card_id = ?');
-const _printsOfLang = db.prepare('SELECT card_id, variant, label, img_low, img_high FROM printings WHERE lang = ?');
+const _printsOfCard = db.prepare('SELECT variant, label, img_low, img_high, hidden FROM printings WHERE lang = ? AND card_id = ?');
+const _printsOfLang = db.prepare('SELECT card_id, variant, label, img_low, img_high, hidden FROM printings WHERE lang = ?');
 
 const langsAvailable = () => { const r = _langsDistinct.all().map((x) => x.lang); return r.length ? r : ['en']; };
 const emitLanguages = () => ({ languages: langsAvailable().map((code) => ({ code, name: LANG_NAMES[code] || code })) });
 
 function printingMaps(rows) {
-  const printings = {}, variantImages = {};
+  const printings = {}, variantImages = {}, removed = [];
   for (const p of rows || []) {
+    if (p.hidden) { removed.push(p.variant); continue; }   // soft-removal tombstone
     if (p.label) printings[p.variant] = p.label;
     if (p.img_low || p.img_high) variantImages[p.variant] = { low: p.img_low || null, high: p.img_high || null };
   }
-  return { printings, variantImages };
+  return { printings, variantImages, removed };
 }
 function cardObj(c, maps, lean) {
   const variants = {};
-  (c.variants_csv ? c.variants_csv.split(',') : ['normal']).forEach((v) => { if (v) variants[v] = true; });
+  (c.variants_csv == null ? ['normal'] : c.variants_csv.split(',')).forEach((v) => { if (v) variants[v] = true; });
+  for (const k of maps.removed || []) delete variants[k];
   const o = {
     id: c.id, localId: c.local_id, name: c.name,
     rarity: c.rarity || undefined, category: c.category || undefined,
@@ -1017,12 +1023,16 @@ const _localCardPut = db.prepare(`INSERT INTO cards (lang,id,set_id,local_id,nam
 const _localSetPut = db.prepare(`INSERT INTO sets (lang,id,name,release_date,logo,official_count,position,source,hidden)
   VALUES (?,?,?,?,NULL,?,?, 'local', 0)`);
 const _cardHide = db.prepare("UPDATE cards SET hidden = ?, source = 'local' WHERE lang = ? AND id = ?");
+const _printingHide = db.prepare(`INSERT INTO printings (lang, card_id, variant, hidden, source) VALUES (?,?,?, 1, 'local')
+  ON CONFLICT(lang, card_id, variant) DO UPDATE SET hidden = 1, source = 'local'`);
+const _allPrints = db.prepare('SELECT variant, hidden FROM printings WHERE lang = ? AND card_id = ?');
+const _printingUnhide = db.prepare("UPDATE printings SET hidden = 0, source = 'local' WHERE lang = ? AND card_id = ? AND variant = ? AND hidden = 1");
 const _hiddenOfSet = db.prepare('SELECT id, local_id, name FROM cards WHERE lang = ? AND set_id = ? AND hidden = 1 ORDER BY position, local_id');
 const _setCardBaseImg = db.prepare("UPDATE cards SET img_low = ?, img_high = ?, source = 'local' WHERE lang = ? AND id = ?");
 const _localPrintingLabel = db.prepare(`INSERT INTO printings (lang, card_id, variant, label, source) VALUES (?,?,?,?, 'local')
-  ON CONFLICT(lang, card_id, variant) DO UPDATE SET label = excluded.label, source = 'local'`);
+  ON CONFLICT(lang, card_id, variant) DO UPDATE SET label = excluded.label, source = 'local', hidden = 0`);
 const _localPrintingImg = db.prepare(`INSERT INTO printings (lang, card_id, variant, img_low, img_high, source) VALUES (?,?,?,?,?, 'local')
-  ON CONFLICT(lang, card_id, variant) DO UPDATE SET img_low = excluded.img_low, img_high = excluded.img_high, source = 'local'`);
+  ON CONFLICT(lang, card_id, variant) DO UPDATE SET img_low = excluded.img_low, img_high = excluded.img_high, source = 'local', hidden = 0`);
 const _imgRemote = db.prepare("SELECT COUNT(*) AS n FROM cards WHERE hidden = 0 AND img_low LIKE 'http%'");
 const _imgLocal = db.prepare("SELECT COUNT(*) AS n FROM cards WHERE hidden = 0 AND img_low IS NOT NULL AND img_low NOT LIKE 'http%'");
 const imageCounts = () => ({ remote: _imgRemote.get().n, local: _imgLocal.get().n });
@@ -1418,8 +1428,10 @@ async function handleApi(req, res, pathname, ip, url) {
       patch.dexId !== undefined ? csvOf(patch.dexId) : row.dex_csv,
       patch.types !== undefined ? csvOf(patch.types) : row.types_csv,
       patch.hp !== undefined ? patch.hp : row.hp, pick(patch.illustrator, row.illustrator) || null,
-      patch.variants !== undefined ? varsCsv(patch.variants) : (row.variants_csv || 'normal'),
+      patch.variants !== undefined ? varsCsv(patch.variants) : (row.variants_csv ?? 'normal'),
       row.img_low, row.img_high, row.position, row.hidden);
+    // re-ticking a printing lifts its soft-removal tombstone (scan and all)
+    if (patch.variants) for (const [k, on] of Object.entries(patch.variants)) if (on) _printingUnhide.run(cLang, cardId, k);
     return sendJSON(res, 200, { ok: true, cardId });
   }
 
@@ -1453,6 +1465,36 @@ async function handleApi(req, res, pathname, ip, url) {
     const hide = body.hidden !== false;   // default: hide
     _cardHide.run(hide ? 1 : 0, cLang, cardId);
     return sendJSON(res, 200, { ok: true, cardId, hidden: hide });
+  }
+
+  // ---- admin: remove one printing (variant) of a card ----
+  // Base variants come off the card's variants list; custom printings get a
+  // hidden marker row. Both end up source='local', so a master pull can't
+  // re-add them — and on the workspace the removal publishes to everyone.
+  // Restore: re-add a printing with the same name, or re-tick the variant in
+  // the card editor.
+  if (pathname === '/api/variant-remove' && req.method === 'POST') {
+    if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
+    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    const body = await readBody(req);
+    const cLang = LANG_RE.test(body.lang || '') ? body.lang : 'en';
+    const cardId = typeof body.cardId === 'string' && CARD_ID_RE.test(body.cardId) ? body.cardId : null;
+    const variant = typeof body.variant === 'string' && VARIANT_KEY_RE.test(body.variant) ? body.variant : null;
+    if (!cardId || !variant) return sendJSON(res, 400, { error: 'A valid cardId and variant are required' });
+    const row = _cardRow.get(cLang, cardId);
+    if (!row) return sendJSON(res, 404, { error: `Card ${cardId} not found in the ${cLang} database` });
+    // every removal is SOFT: a hidden marker row in printings. The card row is
+    // never rewritten, so it stays under master control (name/image fixes keep
+    // flowing in) — the merge sees the original variant and bypasses it.
+    const rows = _allPrints.all(cLang, cardId);
+    const tombs = new Set(rows.filter((r) => r.hidden).map((r) => r.variant));
+    const visPrintKeys = rows.filter((r) => !r.hidden).map((r) => r.variant);
+    const baseVars = (row.variants_csv == null ? ['normal'] : row.variants_csv.split(',')).filter(Boolean).filter((v) => !tombs.has(v));
+    const all = new Set([...baseVars, ...visPrintKeys]);
+    if (!all.has(variant)) return sendJSON(res, 404, { error: 'That printing does not exist on this card' });
+    if (all.size <= 1) return sendJSON(res, 400, { error: 'A card needs at least one printing — hide the whole card instead' });
+    _printingHide.run(cLang, cardId, variant);
+    return sendJSON(res, 200, { ok: true, cardId, variant, removed: true });
   }
 
   // ---- admin: upload the card's own picture (its base image) ----

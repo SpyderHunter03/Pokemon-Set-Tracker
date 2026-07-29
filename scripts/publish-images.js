@@ -241,6 +241,7 @@ const CATALOG_SCHEMA = `
   CREATE TABLE printings (
     lang TEXT NOT NULL DEFAULT 'en', card_id TEXT NOT NULL, variant TEXT NOT NULL,
     label TEXT, img_low TEXT, img_high TEXT, source TEXT NOT NULL DEFAULT 'master',
+    hidden INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (lang, card_id, variant));
 `;
 
@@ -301,10 +302,10 @@ function buildCatalogDb() {
       c.hp, c.illustrator, c.variants_csv, abs(c.img_low), abs(c.img_high), c.position, c.hidden ? 1 : 0];
     insCard.run(...row); feed(row); nCards++;
   }
-  const insPrint = out.prepare("INSERT INTO printings (lang,card_id,variant,label,img_low,img_high,source) VALUES (?,?,?,?,?,?,'master')");
+  const insPrint = out.prepare("INSERT INTO printings (lang,card_id,variant,label,img_low,img_high,source,hidden) VALUES (?,?,?,?,?,?,'master',?)");
   let nPrints = 0;
   for (const p of src.prepare('SELECT * FROM printings ORDER BY lang,card_id,variant').all()) {
-    const row = [p.lang, p.card_id, p.variant, p.label, abs(p.img_low), abs(p.img_high)];
+    const row = [p.lang, p.card_id, p.variant, p.label, abs(p.img_low), abs(p.img_high), p.hidden ? 1 : 0];
     insPrint.run(...row); feed(row); nPrints++;
   }
   const contentHash = hasher.digest('hex');

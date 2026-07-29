@@ -102,6 +102,22 @@ const { chromium } = require('playwright');
     (await fetch('api/custom-variant', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ cardId: 'base1-4', label: 'Hax' }) })).status);
   check('unauthenticated custom-variant rejected', denied2 === 401 || denied2 === 403);
 
+  // ---- removing a printing from the modal, and bringing it back ----
+  await page.click('.tcg-card[data-variant="cracked-ice-holo"] .info-btn');
+  await page.waitForSelector('#card-modal[open] button:has-text("Remove Cracked Ice Holo")');
+  page.once('dialog', (d) => d.accept());
+  await page.click('#card-modal button:has-text("Remove Cracked Ice Holo")');
+  await page.waitForFunction((n) => document.querySelectorAll('.tcg-card').length === n, tilesBefore);
+  check('editor: removed printing drops its tile from the set', true);
+  // re-adding a printing with the same name restores it, scan and all
+  page.once('dialog', (d) => d.accept('Cracked Ice Holo'));
+  await page.click('#card-modal button:has-text("Add printing")');
+  await page.waitForSelector('#card-modal .chips .chip:has-text("Cracked Ice Holo")');
+  await page.click('#card-modal button:has-text("Close")');
+  await page.waitForFunction((n) => document.querySelectorAll('.tcg-card').length === n + 1, tilesBefore);
+  check('editor: re-adding the printing restores it (scan intact)',
+    ((await page.locator('.tcg-card[data-variant="cracked-ice-holo"] img').getAttribute('src')) || '').includes('cracked-ice-holo-low.webp'));
+
   // ---- whole-card editor: new set → new card (with picture) → edit → hide → restore ----
   await page.goto('http://localhost:3111/#/');
   await page.waitForSelector('.chip:has-text("＋ New set")');
