@@ -102,6 +102,63 @@ const { chromium } = require('playwright');
     (await fetch('api/custom-variant', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ cardId: 'base1-4', label: 'Hax' }) })).status);
   check('unauthenticated custom-variant rejected', denied2 === 401 || denied2 === 403);
 
+  // ---- whole-card editor: new set → new card (with picture) → edit → hide → restore ----
+  await page.goto('http://localhost:3111/#/');
+  await page.waitForSelector('.chip:has-text("＋ New set")');
+  await page.click('.chip:has-text("＋ New set")');
+  await page.waitForSelector('.picker-panel input[placeholder="e.g. Eevee Promos"]');
+  await page.fill('.picker-panel input[placeholder="e.g. Eevee Promos"]', 'Test Promos');
+  await page.click('.picker-panel button:has-text("Create set")');
+  await page.waitForSelector('.set-card:has-text("Test Promos")');
+  check('editor: brand-new set appears on the home page', true);
+
+  await page.goto('http://localhost:3111/#/set/test-promos');
+  await page.waitForSelector('.add-card-tile');
+  check('editor: empty new set offers the add-card tile', true);
+  await page.click('.add-card-tile');
+  await page.waitForSelector('.ce-panel');
+  check('editor: card number pre-filled with the next free number',
+    (await page.locator('.ce-panel input[placeholder="e.g. 51 or SWSH087"]').inputValue()) === '1');
+  await page.fill('.ce-panel input[placeholder="e.g. Eevee"]', 'Eevee Star');
+  await page.fill('.ce-panel input[placeholder="e.g. Rare Holo"]', 'Rare');
+  await page.fill('.ce-panel input[placeholder="e.g. Lightning"]', 'Colorless');
+  await page.fill('.ce-panel input[placeholder="e.g. 133"]', '133');
+  await page.setInputFiles('.ce-panel input[type=file]', require('path').join(__dirname, 'fixtures', 'base1-4.png'));
+  await page.click('.ce-panel button:has-text("Add card")');
+  await page.waitForSelector('.tcg-card[data-card-id="test-promos-1"]');
+  check('editor: brand-new card appears in its set', true);
+  check('editor: the card uses the uploaded picture',
+    ((await page.locator('.tcg-card[data-card-id="test-promos-1"] img').getAttribute('src')) || '').includes('card-low.webp'));
+
+  // edit it through the card modal's Edit button
+  await page.click('.tcg-card[data-card-id="test-promos-1"] .info-btn');
+  await page.waitForSelector('#card-modal[open] button:has-text("Edit card")');
+  await page.click('#card-modal button:has-text("Edit card")');
+  await page.waitForSelector('.ce-panel');
+  await page.fill('.ce-panel input[placeholder="e.g. Eevee"]', 'Eevee Star EX');
+  await page.click('.ce-panel button:has-text("Save changes")');
+  await page.waitForFunction(async () => {
+    const d = await (await fetch('api/catalog/set?lang=en&id=test-promos')).json();
+    const c = (d.cards || []).find((x) => x.id === 'test-promos-1');
+    return !!c && c.name === 'Eevee Star EX' && c.rarity === 'Rare';
+  });
+  check('editor: renaming keeps the other fields', true);
+
+  // hide it (tombstone), then restore it from the set page's hidden list
+  await page.waitForSelector('.tcg-card[data-card-id="test-promos-1"] .info-btn');
+  await page.click('.tcg-card[data-card-id="test-promos-1"] .info-btn');
+  await page.waitForSelector('#card-modal[open] button:has-text("Edit card")');
+  await page.click('#card-modal button:has-text("Edit card")');
+  await page.waitForSelector('.ce-panel button:has-text("Hide card")');
+  page.once('dialog', (d) => d.accept());
+  await page.click('.ce-panel button:has-text("Hide card")');
+  await page.waitForSelector('h3:has-text("Hidden cards (1)")');
+  check('editor: hidden card leaves the grid and lists under Hidden cards',
+    (await page.locator('.tcg-card[data-card-id="test-promos-1"]').count()) === 0);
+  await page.click('button:has-text("Restore")');
+  await page.waitForSelector('.tcg-card[data-card-id="test-promos-1"]');
+  check('editor: restoring brings it back', true);
+
   // sign the admin out so the main suite's fresh user is a clean non-admin test
   await page.click('#account-btn');
   await page.waitForSelector('#account-status button:has-text("Sign out")');

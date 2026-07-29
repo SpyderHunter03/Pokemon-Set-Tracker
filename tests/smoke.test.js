@@ -66,13 +66,13 @@ const { chromium } = require('playwright');
     renderAccountModal();
     return document.getElementById('backup-area').style.display !== 'none';
   }));
-  check('home shows sets', (await page.locator('.set-card').count()) === 2);
+  check('home shows sets', (await page.locator('.set-card').count()) === 3);   // base1 + Darkness Ablaze + admin-made Test Promos
   check('TCG Pocket sets excluded from the database',
     !(await page.locator('.set-card').allTextContents()).join(' ').includes('Genetic Apex'));
   check('stats count migrated card', (await page.textContent('#stat-owned')).trim() === '1');
 
   // home sorting: newest first by default, switchable to name
-  check('sets newest first by default', (await page.locator('.set-card .name >> nth=0').textContent()).includes('Darkness'));
+  check('sets newest first by default', (await page.locator('.set-card .name >> nth=0').textContent()).includes('Test Promos'));   // the admin-made set from the bootstrap suite is newest
   await page.selectOption('.chips select', 'name');
   check('sets sortable by name', (await page.locator('.set-card .name >> nth=0').textContent()).includes('Base Set'));
   await page.selectOption('.chips select', 'newest');
@@ -166,7 +166,7 @@ const { chromium } = require('playwright');
   await page.click('.bottomnav a[data-nav=pokemon]');
   await page.waitForSelector('.set-card');
   const speciesNames = await page.locator('.set-card .name').allTextContents();
-  check('species list grouped by dex number', JSON.stringify(speciesNames) === JSON.stringify(['#006 Charizard', '#025 Pikachu', '#162 Furret']));
+  check('species list grouped by dex number', JSON.stringify(speciesNames) === JSON.stringify(['#006 Charizard', '#025 Pikachu', '#133 Eevee Star EX', '#162 Furret']));
   check('charizard owned across sets', (await page.textContent('.set-card:has-text("Charizard") .count')).includes('1 / 2'));
 
   await page.click('.set-card:has-text("Charizard")');

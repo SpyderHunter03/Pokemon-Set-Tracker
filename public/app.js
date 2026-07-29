@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.23.0';
+const APP_VERSION = '3.24.0';
 
 /* ============================================================
  * Storage helpers
@@ -722,6 +722,10 @@ async function openCardModal(brief, { variant, onOwnershipChange } = {}) {
           }
         } }, '＋ Add printing'),
         h('button', { type: 'button', class: 'btn ghost small', onclick: () => fileInput.click() }, `⬆ Upload ${variantLabel(card, active)} image`),
+        h('button', { type: 'button', class: 'btn ghost small', onclick: () => {
+          cardModal.close();   // dialogs sit in the browser's top layer — the editor overlay must replace it
+          openCardEditor({ card, onSaved: () => { clearDataCaches(); route(); } });
+        } }, '✎ Edit card'),
         fileInput,
       ),
       h('p', { class: 'muted small', style: 'text-align:center; margin:6px 0 0' }, 'Admin: custom printings apply to this card; uploaded images replace the synthetic look.'),
@@ -1003,15 +1007,159 @@ async function renderHome() {
     (v) => { setSort = v; lsSet('ptcg.sort.sets', v); ordered = orderedSets(); renderSetCards(filterInput.value.trim().toLowerCase()); },
   );
 
+  const homeMe = await ensureMe();
+  const newSetBtn = (homeMe && homeMe.admin && !appConfig.readonly)
+    ? h('button', { class: 'chip', onclick: () => openSetCreator(() => renderHome()) }, '＋ New set')
+    : null;
+
   view.replaceChildren(...(runningBanner ? [runningBanner] : []), banner,
     h('div', { class: 'set-filter' }, filterInput),
-    h('div', { class: 'chips' }, sortCtl),
+    h('div', { class: 'chips' }, ...[sortCtl, newSetBtn].filter(Boolean)),
     grid);
 }
 
 function updateStatsBanner() {
   const el = document.getElementById('stat-owned');
   if (el) el.textContent = String(Object.keys(collection).filter(ownedAny).length);
+}
+
+/* ============================================================
+ * Admin — whole-card editor (create / edit / hide) + new sets
+ * ============================================================ */
+
+/** Create a brand-new card ({ set, nextNumber }) or edit any card ({ card }).
+ * Writes to this server's database: on the master workspace the change
+ * publishes to every install; on a personal install it stays local and
+ * survives master updates. opts.onSaved() re-renders the caller. */
+function openCardEditor(opts) {
+  const editing = opts.card || null;
+  const setId = editing ? setIdOf(editing.id) : opts.set;
+  const txt = (value, placeholder) => h('input', { type: 'text', value: value || '', placeholder: placeholder || '' });
+  const nameIn = txt(editing && editing.name, 'e.g. Eevee');
+  const numIn = txt(editing ? String(editing.localId) : (opts.nextNumber || ''), 'e.g. 51 or SWSH087');
+  const rarityIn = txt(editing && editing.rarity, 'e.g. Rare Holo');
+  const catSel = h('select', {}, ...['', 'Pokemon', 'Trainer', 'Energy'].map((c) => h('option', { value: c }, c || '— none —')));
+  if (editing && editing.category) catSel.value = editing.category;
+  const hpIn = h('input', { type: 'number', min: '0', max: '9999', value: editing && editing.hp ? String(editing.hp) : '' });
+  const typesIn = txt(editing && editing.types ? editing.types.join(', ') : '', 'e.g. Lightning');
+  const dexIn = txt(editing && editing.dexId ? editing.dexId.join(', ') : '', 'e.g. 133');
+  const illusIn = txt(editing && editing.illustrator, '');
+  const varBoxes = VARIANT_DEFS.filter(([k]) => k !== 'other').map(([k, lbl]) => {
+    const cb = h('input', { type: 'checkbox' });
+    cb.checked = editing ? !!(editing.variants && editing.variants[k]) : k === 'normal';
+    return { k, cb, el: h('label', { class: 'ce-var' }, cb, ' ' + lbl) };
+  });
+  const fileIn = h('input', { type: 'file', accept: 'image/*' });
+  const status = h('div', { class: 'muted small' });
+  const field = (label, input) => h('label', { class: 'ce-field' }, h('span', { class: 'muted small' }, label), input);
+
+  const listOf = (s) => s.split(',').map((x) => x.trim()).filter(Boolean);
+  async function saveCard() {
+    if (!nameIn.value.trim()) { toast('The card needs a name'); return; }
+    if (!editing && !numIn.value.trim()) { toast('The card needs a number'); return; }
+    const payload = {
+      lang,
+      name: nameIn.value.trim(), localId: numIn.value.trim(),
+      rarity: rarityIn.value.trim(), category: catSel.value,
+      hp: hpIn.value === '' ? null : parseInt(hpIn.value, 10),
+      types: listOf(typesIn.value), dexId: listOf(dexIn.value).map((d) => parseInt(d, 10)).filter((d) => d > 0),
+      illustrator: illusIn.value.trim(),
+      variants: Object.fromEntries(varBoxes.map((b) => [b.k, b.cb.checked])),
+      ...(editing ? { cardId: editing.id } : { new: true, set: setId }),
+    };
+    try {
+      status.textContent = 'Saving…';
+      const res = await apiCall('card', { method: 'POST', body: JSON.stringify(payload) });
+      const f = fileIn.files && fileIn.files[0];
+      if (f) {
+        status.textContent = 'Uploading picture…';
+        const up = await fetch(`api/card-image?cardId=${encodeURIComponent(res.cardId)}&lang=${encodeURIComponent(lang)}`, {
+          method: 'POST', headers: { ...authHeaders(), 'Content-Type': f.type || 'application/octet-stream' }, body: f,
+        });
+        const upData = await up.json().catch(() => ({}));
+        if (!up.ok) throw new Error(upData.error || 'The card saved, but the picture upload failed');
+      }
+      overlay.remove();
+      clearDataCaches();
+      toast(editing ? `${payload.name} updated` : `${payload.name} added to the set`);
+      if (opts.onSaved) opts.onSaved(res.cardId);
+    } catch (e) { status.textContent = ''; toast(e.message); }
+  }
+
+  async function hideCard() {
+    if (!confirm(`Hide "${editing.name}" from the database?` +
+      (appConfig.master ? '\n\nThis is the master workspace — publishing afterwards removes the card from every install.' : '\n\nOnly this install is affected; master updates will not bring it back.'))) return;
+    try {
+      await apiCall('card-hide', { method: 'POST', body: JSON.stringify({ cardId: editing.id, hidden: true, lang }) });
+      overlay.remove();
+      clearDataCaches();
+      toast(`${editing.name} hidden — restore it from the set page`);
+      if (opts.onSaved) opts.onSaved(editing.id);
+    } catch (e) { toast(e.message); }
+  }
+
+  const overlay = h('div', { class: 'picker-overlay' },
+    h('div', { class: 'picker-panel ce-panel' },
+      h('h3', { style: 'margin:0' }, editing ? `Edit ${editing.name}` : `New card in ${setId}`),
+      editing ? h('p', { class: 'muted small', style: 'margin:2px 0 0' }, `Card id: ${editing.id}`) : null,
+      h('div', { class: 'ce-grid' },
+        field('Name *', nameIn), field('Number *', numIn),
+        field('Rarity', rarityIn), field('Category', catSel),
+        field('HP', hpIn), field('Types (comma-separated)', typesIn),
+        field('Pokédex numbers', dexIn), field('Illustrator', illusIn),
+      ),
+      h('div', { class: 'ce-field' }, h('span', { class: 'muted small' }, 'Printings this card exists in'),
+        h('div', { class: 'ce-vars' }, ...varBoxes.map((b) => b.el))),
+      field(editing ? 'Replace picture (optional)' : 'Picture (optional — a clean text tile is shown without one)', fileIn),
+      status,
+      h('div', { class: 'row', style: 'justify-content:flex-end; gap:8px; margin-top:6px; flex-wrap:wrap' },
+        editing ? h('button', { class: 'btn ghost small', style: 'margin-right:auto', onclick: hideCard }, '🗑 Hide card') : null,
+        h('button', { class: 'btn ghost small', onclick: () => overlay.remove() }, 'Cancel'),
+        h('button', { class: 'btn small', onclick: saveCard }, editing ? 'Save changes' : 'Add card'),
+      ),
+    ));
+  view.append(overlay);
+  nameIn.focus();
+}
+
+/** Admin: create a brand-new set (e.g. a promo binder's home). */
+function openSetCreator(onSaved) {
+  const nameIn = h('input', { type: 'text', placeholder: 'e.g. Eevee Promos' });
+  const idIn = h('input', { type: 'text', placeholder: 'auto from the name' });
+  let idTouched = false;
+  idIn.addEventListener('input', () => { idTouched = true; });
+  nameIn.addEventListener('input', () => {
+    if (!idTouched) idIn.value = nameIn.value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+  });
+  const dateIn = h('input', { type: 'date' });
+  const countIn = h('input', { type: 'number', min: '1', placeholder: 'optional' });
+  const field = (label, input) => h('label', { class: 'ce-field' }, h('span', { class: 'muted small' }, label), input);
+  const overlay = h('div', { class: 'picker-overlay' },
+    h('div', { class: 'picker-panel' },
+      h('h3', { style: 'margin:0' }, 'New set'),
+      h('p', { class: 'muted small' }, 'A home for cards no existing set covers — promos, custom cards, and the like.'),
+      h('div', { class: 'ce-grid' },
+        field('Name *', nameIn), field('Set id *', idIn),
+        field('Release date', dateIn), field('Printed size', countIn),
+      ),
+      h('div', { class: 'row', style: 'justify-content:flex-end; gap:8px; margin-top:6px' },
+        h('button', { class: 'btn ghost small', onclick: () => overlay.remove() }, 'Cancel'),
+        h('button', { class: 'btn small', onclick: async () => {
+          try {
+            const body = { lang, id: idIn.value.trim(), name: nameIn.value.trim() };
+            if (dateIn.value) body.releaseDate = dateIn.value;
+            if (countIn.value) body.officialCount = parseInt(countIn.value, 10);
+            const res = await apiCall('set-create', { method: 'POST', body: JSON.stringify(body) });
+            overlay.remove();
+            clearDataCaches();
+            toast(`Set "${res.set.name}" created — open it to add cards`);
+            if (onSaved) onSaved(res.set.id);
+          } catch (e) { toast(e.message); }
+        } }, 'Create set'),
+      ),
+    ));
+  view.append(overlay);
+  nameIn.focus();
 }
 
 /* ============================================================
@@ -1029,6 +1177,8 @@ async function renderSetPage(setId) {
 
   const cards = set.cards || [];
   const officialTotal = (set.cardCount && (set.cardCount.official || set.cardCount.total)) || cards.length;
+  const me = await ensureMe();
+  const isAdmin = !!(me && me.admin) && !appConfig.readonly;
   let filter = 'all';
   let master = false;
   let query = '';
@@ -1074,6 +1224,15 @@ async function renderSetPage(setId) {
       }
     }
     if (!grid.children.length) grid.append(h('div', { class: 'center' }, 'No cards match.'));
+    // admins get a "new card" tile at the end of the plain set view
+    if (isAdmin && filter === 'all' && !q) {
+      const nums = cards.map((c) => parseInt(c.localId, 10)).filter(Number.isFinite);
+      const next = nums.length ? String(Math.max(...nums) + 1) : '1';
+      grid.append(h('button', {
+        class: 'add-card-tile',
+        onclick: () => openCardEditor({ set: setId, nextNumber: next, onSaved: () => renderSetPage(setId) }),
+      }, h('div', { class: 'act-plus' }, '＋'), h('div', { class: 'muted small' }, 'Add card')));
+    }
   }
 
   const chip = (label, isActive, onClick) => h('button', {
@@ -1102,6 +1261,28 @@ async function renderSetPage(setId) {
     oninput: (e) => { query = e.target.value.trim(); renderGrid(); },
   });
 
+  // admins can see and restore hidden (tombstoned) cards of this set
+  const hiddenWrap = h('div', {});
+  async function renderHiddenSection() {
+    if (!isAdmin) return;
+    let hid;
+    try { hid = await apiCall(`hidden-cards?set=${encodeURIComponent(setId)}&lang=${encodeURIComponent(lang)}`); } catch { return; }
+    if (!hid.cards || !hid.cards.length) { hiddenWrap.replaceChildren(); return; }
+    hiddenWrap.replaceChildren(
+      h('h3', { class: 'muted', style: 'margin:20px 0 6px' }, `Hidden cards (${hid.cards.length})`),
+      ...hid.cards.map((c) => h('div', { class: 'row', style: 'gap:10px; align-items:center; margin:4px 0' },
+        h('span', { class: 'muted small' }, `#${c.localId}`), h('span', {}, c.name),
+        h('button', { class: 'btn ghost small', onclick: async () => {
+          try {
+            await apiCall('card-hide', { method: 'POST', body: JSON.stringify({ cardId: c.id, hidden: false, lang }) });
+            clearDataCaches();
+            toast(`${c.name} restored`);
+            renderSetPage(setId);
+          } catch (e) { toast(e.message); }
+        } }, 'Restore'))),
+    );
+  }
+
   view.replaceChildren(
     h('a', { class: 'back-link', href: '#/' }, '← All sets'),
     h('div', { class: 'page-head' },
@@ -1111,10 +1292,12 @@ async function renderSetPage(setId) {
     h('div', { class: 'set-filter' }, searchInput),
     chipsWrap,
     grid,
+    hiddenWrap,
   );
   renderChips();
   if (canTrack()) updateProgress();
   renderGrid();
+  renderHiddenSection();
 }
 
 /* ============================================================

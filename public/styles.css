@@ -887,3 +887,23 @@ body.printing-proxies #print-area {
 }
 .flip-face.back { transform: rotateY(180deg); }
 .flip-face .binder-cover-page { max-width: none; height: 100%; }
+
+/* ---------- admin: whole-card editor + new-set / add-card entry points ---------- */
+.add-card-tile {
+  aspect-ratio: 63 / 88; border: 2px dashed var(--line, #3a4157); border-radius: 10px;
+  background: rgba(255,255,255,.02); color: inherit; cursor: pointer;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+}
+.add-card-tile:hover { border-color: var(--accent-soft); }
+.add-card-tile .act-plus { font-size: 30px; color: var(--line, #3a4157); line-height: 1; }
+.add-card-tile:hover .act-plus { color: var(--accent-soft); }
+.ce-panel { max-width: 560px; }
+.ce-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 10px; }
+@media (max-width: 480px) { .ce-grid { grid-template-columns: 1fr; } }
+.ce-field { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.ce-field input, .ce-field select {
+  background: var(--card, #1c2333); color: inherit; border: 1px solid var(--line, #333);
+  border-radius: 8px; padding: 7px 9px; font-size: 14px; width: 100%; box-sizing: border-box;
+}
+.ce-vars { display: flex; flex-wrap: wrap; gap: 4px 14px; }
+.ce-var { display: inline-flex; align-items: center; gap: 5px; font-size: 14px; cursor: pointer; }

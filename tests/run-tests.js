@@ -176,8 +176,8 @@ function fail(msg) {
   check('read-only server reports itself in app-config', roCfg.readonly === true);
   check('read-only blocks every database write (build/mirror/printing/upload)',
     roBuild === 403 && roMirror === 403 && roCustom === 403 && roUpload === 403);
-  const roOverlayCard = (await fetch('http://localhost:3113/api/overlay-card', { method: 'POST', headers: roAuth, body: JSON.stringify({ cardId: 'x-1', set: 'x', name: 'X', new: true }) })).status;
-  const roOverlayRemove = (await fetch('http://localhost:3113/api/overlay-remove', { method: 'POST', headers: roAuth, body: JSON.stringify({ cardId: 'base1-4' }) })).status;
+  const roOverlayCard = (await fetch('http://localhost:3113/api/card', { method: 'POST', headers: roAuth, body: JSON.stringify({ localId: '1', set: 'x', name: 'X', new: true }) })).status;
+  const roOverlayRemove = (await fetch('http://localhost:3113/api/card-hide', { method: 'POST', headers: roAuth, body: JSON.stringify({ cardId: 'base1-4' }) })).status;
   check('read-only blocks overlay editing (add-card / remove)', roOverlayCard === 403 && roOverlayRemove === 403);
 
   // ---- catalog editing writes to the database (add printing shows in the API) ----
@@ -212,6 +212,52 @@ function fail(msg) {
     check('imageless card has a null image location', imgless && imgless.img_low === null);
     check('imported custom printing carried its label', pRow && pRow.label === 'Cracked Ice Holo');
   }
+
+  // ---- whole-card editor: new sets, new cards, edits, hide/restore ----
+  const nsRes = await ovH('/api/set-create', { id: 'promo-x', name: 'Promo X', releaseDate: '2026-01-01', lang: 'en' });
+  const nsDup = (await fetch('http://localhost:3115/api/set-create', { method: 'POST', headers: ovAuth, body: JSON.stringify({ id: 'promo-x', name: 'Promo X' }) })).status;
+  const nsIdx = await jfetch('http://localhost:3115/api/catalog/index?lang=en');
+  check('editor: brand-new set created (and duplicates refused)',
+    nsRes.ok === true && nsDup === 409 && (nsIdx.sets || []).some((s) => s.id === 'promo-x'));
+
+  const ncRes = await ovH('/api/card', { new: true, set: 'promo-x', localId: '1', name: 'Eevee Star', rarity: 'Rare',
+    category: 'Pokemon', hp: 70, types: ['Colorless'], dexId: [133], variants: { normal: true, holo: true }, lang: 'en' });
+  const ncDup = (await fetch('http://localhost:3115/api/card', { method: 'POST', headers: ovAuth, body: JSON.stringify({ new: true, set: 'promo-x', localId: '1', name: 'Again' }) })).status;
+  const ncSet = await jfetch('http://localhost:3115/api/catalog/set?lang=en&id=promo-x');
+  const ncCard = (ncSet.cards || []).find((c) => c.id === 'promo-x-1');
+  check('editor: brand-new card created with full details (duplicates refused)',
+    ncRes.ok === true && ncRes.cardId === 'promo-x-1' && ncDup === 409 &&
+    ncCard && ncCard.name === 'Eevee Star' && ncCard.hp === 70 && (ncCard.dexId || [])[0] === 133 &&
+    ncCard.variants && ncCard.variants.holo === true && ncCard.img === null);
+  const ncSearch = await jfetch('http://localhost:3115/api/catalog/search?lang=en');
+  check('editor: new card reaches the search index', (ncSearch.cards || []).some((c) => c.id === 'promo-x-1'));
+
+  const edRes = await ovH('/api/card', { cardId: 'promo-x-1', name: 'Eevee Star EX', rarity: 'Ultra Rare', lang: 'en' });
+  const edSet = await jfetch('http://localhost:3115/api/catalog/set?lang=en&id=promo-x');
+  const edCard = (edSet.cards || []).find((c) => c.id === 'promo-x-1');
+  check('editor: editing a card updates it in place (untouched fields kept)',
+    edRes.ok === true && edCard && edCard.name === 'Eevee Star EX' && edCard.rarity === 'Ultra Rare' && edCard.hp === 70);
+
+  // edits mark rows source='local', so a catalog re-import can't undo them
+  await ovH('/api/card', { cardId: 'base1-4', rarity: 'Shiny Rare', lang: 'en' });
+  await ovH('/api/catalog/import', {});
+  const reSet = await jfetch('http://localhost:3115/api/catalog/set?lang=en&id=base1');
+  const reB4 = (reSet.cards || []).find((c) => c.id === 'base1-4');
+  const rePromo = await jfetch('http://localhost:3115/api/catalog/set?lang=en&id=promo-x');
+  check('editor: local edits and new cards survive a catalog re-import',
+    reB4 && reB4.rarity === 'Shiny Rare' && ((rePromo.cards || []).find((c) => c.id === 'promo-x-1') || {}).name === 'Eevee Star EX');
+
+  const hdRes = await ovH('/api/card-hide', { cardId: 'promo-x-1', lang: 'en' });
+  const hdSet = await jfetch('http://localhost:3115/api/catalog/set?lang=en&id=promo-x');
+  const hdList = await jfetch('http://localhost:3115/api/hidden-cards?set=promo-x&lang=en', { headers: ovAuth });
+  const hdAnon = (await fetch('http://localhost:3115/api/hidden-cards?set=promo-x&lang=en')).status;
+  check('editor: hiding a card tombstones it (admin sees it in hidden-cards)',
+    hdRes.ok === true && !(hdSet.cards || []).some((c) => c.id === 'promo-x-1') &&
+    (hdList.cards || []).some((c) => c.id === 'promo-x-1') && hdAnon === 403);
+  const rsRes = await ovH('/api/card-hide', { cardId: 'promo-x-1', hidden: false, lang: 'en' });
+  const rsSet = await jfetch('http://localhost:3115/api/catalog/set?lang=en&id=promo-x');
+  check('editor: restoring brings the card back',
+    rsRes.ok === true && (rsSet.cards || []).some((c) => c.id === 'promo-x-1'));
 
   // ---- download all images locally: repoint a remote image to /cdn ----
   {

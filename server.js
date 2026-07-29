@@ -680,7 +680,6 @@ function mergeLocalVariantImages(setFile, lang) {
 // ---------- custom printings & variant image library ----------
 
 const CUSTOM_FILE = path.join(CDN_DIR, 'custom.json');       // master overlay (published to R2)
-const LOCAL_OVERLAY_FILE = path.join(DATA_DIR, 'local-overlay.json'); // this install's own layer
 const CARD_ID_RE = /^[a-zA-Z0-9.-]{1,64}$/;
 const SET_ID_RE = /^[a-zA-Z0-9.-]{1,40}$/;
 const VARIANT_KEY_RE = /^[a-zA-Z0-9_-]{1,24}$/;
@@ -690,34 +689,25 @@ function slugifyVariant(label) {
   return label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 24);
 }
 
-/* ---------- overlay layers ----------
- * The card database is rendered as three stacked layers:
- *   TCGdex base  →  master overlay (custom.json, published to R2)  →  local overlay
- * Each overlay is { cards:{id:{…}}, sets:{id:{…}}, removed:[id] }. A card entry
- * either patches an existing card (partial fields) or defines a brand-new one
- * (new:true). `removed` is a tombstone list: a card listed here is hidden even
- * if a lower layer (or a future master pull) still has it. The local overlay is
- * this install's own edits — it lives in DATA_DIR, is never touched by a master
- * pull, and is applied last so it always wins. */
-const EMPTY_OVERLAY = () => ({ cards: {}, sets: {}, removed: [] });
-const loadLocalOverlay = () => {
-  const o = readJSON(LOCAL_OVERLAY_FILE, null) || EMPTY_OVERLAY();
-  o.cards = o.cards || {}; o.sets = o.sets || {}; o.removed = Array.isArray(o.removed) ? o.removed : [];
-  return o;
-};
-const saveLocalOverlay = (o) => writeJSONAtomic(LOCAL_OVERLAY_FILE, o);
+/* ---------- catalog editing ----------
+ * Admins can create whole cards and sets, edit any card, and hide (tombstone)
+ * cards. Edits write straight into the SQLite catalog with source='local':
+ *   - on a normal install, source='local' rows are never touched by a master
+ *     pull (no override) and never swept (no deletion), so local edits stick;
+ *   - on the master workspace, the publisher normalizes every exported row to
+ *     source='master', so the same edits propagate to every install. */
 
 /** Sanitize a card patch/definition coming from the editor API. */
-function sanitizeOverlayCard(body) {
+function sanitizeCardPatch(body) {
   const out = {};
   const str = (v, n) => (typeof v === 'string' ? v.slice(0, n) : undefined);
   if (body.name !== undefined) out.name = str(body.name, 80);
   if (body.rarity !== undefined) out.rarity = str(body.rarity, 40);
   if (body.category !== undefined) out.category = str(body.category, 20);
   if (body.localId !== undefined) out.localId = str(body.localId, 24);
-  if (body.image !== undefined) out.image = body.image === null ? null : str(body.image, 120);
-  if (body.hp !== undefined) { const h = parseInt(body.hp, 10); if (h >= 0 && h < 100000) out.hp = h; }
-  if (Array.isArray(body.types)) out.types = body.types.filter((t) => typeof t === 'string').slice(0, 6).map((t) => t.slice(0, 20));
+  if (body.illustrator !== undefined) out.illustrator = str(body.illustrator, 60);
+  if (body.hp !== undefined) { const h = parseInt(body.hp, 10); out.hp = (h >= 0 && h < 100000) ? h : null; }
+  if (Array.isArray(body.types)) out.types = body.types.filter((t) => typeof t === 'string' && t.trim()).slice(0, 6).map((t) => t.trim().slice(0, 20));
   if (Array.isArray(body.dexId)) out.dexId = body.dexId.map((d) => parseInt(d, 10)).filter((d) => d > 0 && d < 100000).slice(0, 6);
   if (body.variants && typeof body.variants === 'object' && !Array.isArray(body.variants)) {
     out.variants = {};
@@ -1014,6 +1004,21 @@ function emitSearch(lang) {
 
 // ---------- catalog editing (admin) + image localisation ----------
 const _cardExists = db.prepare('SELECT 1 FROM cards WHERE lang = ? AND id = ?');
+const _cardRow = db.prepare('SELECT * FROM cards WHERE lang = ? AND id = ?');
+const _setRow = db.prepare('SELECT * FROM sets WHERE lang = ? AND id = ?');
+const _maxCardPos = db.prepare('SELECT COALESCE(MAX(position), -1) AS p FROM cards WHERE lang = ? AND set_id = ?');
+const _maxSetPos = db.prepare('SELECT COALESCE(MAX(position), -1) AS p FROM sets WHERE lang = ?');
+const _localCardPut = db.prepare(`INSERT INTO cards (lang,id,set_id,local_id,name,rarity,category,dex_csv,types_csv,hp,illustrator,variants_csv,img_low,img_high,position,source,hidden)
+  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'local', ?)
+  ON CONFLICT(lang,id) DO UPDATE SET set_id=excluded.set_id, local_id=excluded.local_id, name=excluded.name,
+    rarity=excluded.rarity, category=excluded.category, dex_csv=excluded.dex_csv, types_csv=excluded.types_csv,
+    hp=excluded.hp, illustrator=excluded.illustrator, variants_csv=excluded.variants_csv,
+    img_low=excluded.img_low, img_high=excluded.img_high, position=excluded.position, source='local', hidden=excluded.hidden`);
+const _localSetPut = db.prepare(`INSERT INTO sets (lang,id,name,release_date,logo,official_count,position,source,hidden)
+  VALUES (?,?,?,?,NULL,?,?, 'local', 0)`);
+const _cardHide = db.prepare("UPDATE cards SET hidden = ?, source = 'local' WHERE lang = ? AND id = ?");
+const _hiddenOfSet = db.prepare('SELECT id, local_id, name FROM cards WHERE lang = ? AND set_id = ? AND hidden = 1 ORDER BY position, local_id');
+const _setCardBaseImg = db.prepare("UPDATE cards SET img_low = ?, img_high = ?, source = 'local' WHERE lang = ? AND id = ?");
 const _localPrintingLabel = db.prepare(`INSERT INTO printings (lang, card_id, variant, label, source) VALUES (?,?,?,?, 'local')
   ON CONFLICT(lang, card_id, variant) DO UPDATE SET label = excluded.label, source = 'local'`);
 const _localPrintingImg = db.prepare(`INSERT INTO printings (lang, card_id, variant, img_low, img_high, source) VALUES (?,?,?,?,?, 'local')
@@ -1120,10 +1125,14 @@ async function handleApi(req, res, pathname, ip, url) {
     });
   }
 
-  // this install's own overlay layer (adds/edits/removals) — public read so the
-  // app can merge it on top of the master database
-  if (pathname === '/api/local-overlay' && req.method === 'GET') {
-    return sendJSON(res, 200, loadLocalOverlay());
+  // hidden (tombstoned) cards of a set — lets the admin see and restore them
+  if (pathname === '/api/hidden-cards' && req.method === 'GET') {
+    const hUser = authUser(req);
+    if (!hUser || !isAdminUser(hUser)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    const qLang = LANG_RE.test(url.searchParams.get('lang') || '') ? url.searchParams.get('lang') : 'en';
+    const setId = url.searchParams.get('set') || '';
+    if (!SET_ID_RE.test(setId)) return sendJSON(res, 400, { error: 'A valid set id is required' });
+    return sendJSON(res, 200, { cards: _hiddenOfSet.all(qLang, setId).map((c) => ({ id: c.id, localId: c.local_id, name: c.name })) });
   }
 
   // how many cards/sets/printings are in the database catalog
@@ -1372,70 +1381,108 @@ async function handleApi(req, res, pathname, ip, url) {
     return sendJSON(res, 200, { ok: true, cardId, key, label });
   }
 
-  // ---- admin: add or edit a card (patch an existing one, or define a new one) ----
-  if (pathname === '/api/overlay-card' && req.method === 'POST') {
+  // ---- admin: create a whole new card, or edit any card's details ----
+  if (pathname === '/api/card' && req.method === 'POST') {
     if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
     if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
     const body = await readBody(req);
-    const cardId = typeof body.cardId === 'string' && CARD_ID_RE.test(body.cardId) ? body.cardId : null;
-    const setId = typeof body.set === 'string' && SET_ID_RE.test(body.set) ? body.set : null;
-    if (!cardId) return sendJSON(res, 400, { error: 'A valid cardId is required' });
-    const overlay = loadLocalOverlay();
-    const existing = overlay.cards[cardId] || {};
-    const patch = sanitizeOverlayCard(body);
-    const merged = { ...existing, ...patch };
+    const cLang = LANG_RE.test(body.lang || '') ? body.lang : 'en';
+    const patch = sanitizeCardPatch(body);
+    const csvOf = (arr) => (arr && arr.length ? arr.join(',') : null);
+    const varsCsv = (v) => { const ks = v ? Object.keys(v).filter((k) => v[k]) : []; return ks.length ? ks.join(',') : 'normal'; };
     if (body.new) {
-      // defining a brand-new card the base database doesn't have
+      const setId = typeof body.set === 'string' && SET_ID_RE.test(body.set) ? body.set : null;
       if (!setId) return sendJSON(res, 400, { error: 'New cards need a set id' });
-      merged.new = true;
-      merged.set = setId;
-      if (!merged.localId) merged.localId = localIdOfCard(cardId);
-      if (!merged.name) return sendJSON(res, 400, { error: 'New cards need a name' });
+      if (!_setRow.get(cLang, setId)) return sendJSON(res, 404, { error: `Set ${setId} not found in the ${cLang} database` });
+      const localId = (patch.localId || '').trim().replace(/\s+/g, '');
+      if (!localId) return sendJSON(res, 400, { error: 'New cards need a card number' });
+      if (!patch.name || !patch.name.trim()) return sendJSON(res, 400, { error: 'New cards need a name' });
+      const cardId = `${setId}-${localId}`;
+      if (!CARD_ID_RE.test(cardId)) return sendJSON(res, 400, { error: 'That card number produces an invalid id — letters, numbers, dots and dashes only' });
+      if (_cardRow.get(cLang, cardId)) return sendJSON(res, 409, { error: `${cardId} already exists — open that card and edit it instead` });
+      _localCardPut.run(cLang, cardId, setId, localId, patch.name.trim(), patch.rarity || null, patch.category || null,
+        csvOf(patch.dexId), csvOf(patch.types), patch.hp ?? null, patch.illustrator || null,
+        varsCsv(patch.variants), null, null, _maxCardPos.get(cLang, setId).p + 1, 0);
+      return sendJSON(res, 200, { ok: true, cardId, created: true });
     }
-    overlay.cards[cardId] = merged;
-    // adding a card back un-tombstones it
-    overlay.removed = (overlay.removed || []).filter((id) => id !== cardId);
-    saveLocalOverlay(overlay);
-    return sendJSON(res, 200, { ok: true, cardId, card: merged });
+    // edit an existing card — the edited row becomes source='local', which
+    // protects it from master pulls (and, on the workspace, publishes as-is)
+    const cardId = typeof body.cardId === 'string' && CARD_ID_RE.test(body.cardId) ? body.cardId : null;
+    if (!cardId) return sendJSON(res, 400, { error: 'A valid cardId is required' });
+    const row = _cardRow.get(cLang, cardId);
+    if (!row) return sendJSON(res, 404, { error: `Card ${cardId} not found in the ${cLang} database` });
+    const pick = (v, cur) => (v !== undefined ? v : cur);
+    const name = (patch.name !== undefined ? patch.name.trim() : row.name) || row.name;
+    _localCardPut.run(cLang, cardId, row.set_id, pick(patch.localId, row.local_id) || row.local_id, name,
+      pick(patch.rarity, row.rarity) || null, pick(patch.category, row.category) || null,
+      patch.dexId !== undefined ? csvOf(patch.dexId) : row.dex_csv,
+      patch.types !== undefined ? csvOf(patch.types) : row.types_csv,
+      patch.hp !== undefined ? patch.hp : row.hp, pick(patch.illustrator, row.illustrator) || null,
+      patch.variants !== undefined ? varsCsv(patch.variants) : (row.variants_csv || 'normal'),
+      row.img_low, row.img_high, row.position, row.hidden);
+    return sendJSON(res, 200, { ok: true, cardId });
   }
 
-  // ---- admin: add a brand-new set the base database doesn't have ----
-  if (pathname === '/api/overlay-set' && req.method === 'POST') {
+  // ---- admin: create a brand-new set (for promos and the like) ----
+  if (pathname === '/api/set-create' && req.method === 'POST') {
     if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
     if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
     const body = await readBody(req);
+    const cLang = LANG_RE.test(body.lang || '') ? body.lang : 'en';
     const setId = typeof body.id === 'string' && SET_ID_RE.test(body.id) ? body.id : null;
     const name = typeof body.name === 'string' ? body.name.trim().slice(0, 80) : '';
     if (!setId || name.length < 2) return sendJSON(res, 400, { error: 'A valid set id and name (2+ characters) are required' });
-    const overlay = loadLocalOverlay();
-    overlay.sets[setId] = {
-      id: setId, name,
-      releaseDate: typeof body.releaseDate === 'string' ? body.releaseDate.slice(0, 10) : undefined,
-    };
-    saveLocalOverlay(overlay);
-    return sendJSON(res, 200, { ok: true, set: overlay.sets[setId] });
+    if (_setRow.get(cLang, setId)) return sendJSON(res, 409, { error: `Set ${setId} already exists` });
+    const releaseDate = typeof body.releaseDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(body.releaseDate) ? body.releaseDate : null;
+    const official = Number.isInteger(body.officialCount) && body.officialCount > 0 ? Math.min(body.officialCount, 10000) : null;
+    _localSetPut.run(cLang, setId, name, releaseDate, official, _maxSetPos.get(cLang).p + 1);
+    return sendJSON(res, 200, { ok: true, set: { id: setId, name, releaseDate } });
   }
 
-  // ---- admin: remove (tombstone) or restore a card ----
-  if (pathname === '/api/overlay-remove' && req.method === 'POST') {
+  // ---- admin: hide (tombstone) or restore a card ----
+  // On the master workspace a hide publishes as a deletion to every install;
+  // on a normal install it is a local hide that master updates can't undo.
+  if (pathname === '/api/card-hide' && req.method === 'POST') {
     if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
     if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
     const body = await readBody(req);
+    const cLang = LANG_RE.test(body.lang || '') ? body.lang : 'en';
     const cardId = typeof body.cardId === 'string' && CARD_ID_RE.test(body.cardId) ? body.cardId : null;
     if (!cardId) return sendJSON(res, 400, { error: 'A valid cardId is required' });
-    const overlay = loadLocalOverlay();
-    overlay.removed = overlay.removed || [];
-    const remove = body.removed !== false; // default: remove
-    if (remove) {
-      if (!overlay.removed.includes(cardId)) overlay.removed.push(cardId);
-      // a purely-overlay-added card with no other data → drop it entirely
-      const e = overlay.cards[cardId];
-      if (e && e.new && !e.printings) delete overlay.cards[cardId];
-    } else {
-      overlay.removed = overlay.removed.filter((id) => id !== cardId);
+    if (!_cardRow.get(cLang, cardId)) return sendJSON(res, 404, { error: `Card ${cardId} not found in the ${cLang} database` });
+    const hide = body.hidden !== false;   // default: hide
+    _cardHide.run(hide ? 1 : 0, cLang, cardId);
+    return sendJSON(res, 200, { ok: true, cardId, hidden: hide });
+  }
+
+  // ---- admin: upload the card's own picture (its base image) ----
+  if (pathname === '/api/card-image' && req.method === 'POST') {
+    if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
+    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    const cardId = url.searchParams.get('cardId') || '';
+    const cLang = LANG_RE.test(url.searchParams.get('lang') || '') ? url.searchParams.get('lang') : 'en';
+    if (!CARD_ID_RE.test(cardId)) return sendJSON(res, 400, { error: 'A valid cardId query parameter is required' });
+    let sharp;
+    try { sharp = require('sharp'); } catch {
+      return sendJSON(res, 501, { error: 'Image processing needs the sharp package on the server: npm install --no-save sharp (the in-app database download installs it automatically)' });
     }
-    saveLocalOverlay(overlay);
-    return sendJSON(res, 200, { ok: true, cardId, removed: remove });
+    if (!_cardExists.get(cLang, cardId)) return sendJSON(res, 404, { error: `Card ${cardId} not found in the ${cLang} database` });
+    const setId = setIdOfCard(cardId);
+    const localId = localIdOfCard(cardId);
+    const raw = await readRawBody(req);
+    if (!raw.length) return sendJSON(res, 400, { error: 'Send the image file as the request body' });
+    const dir = path.join(CDN_DIR, cLang, 'images', setId, localId);
+    fs.mkdirSync(dir, { recursive: true });
+    try {
+      await sharp(raw).resize({ width: 745, withoutEnlargement: true }).webp({ quality: 88 }).toFile(path.join(dir, 'card-high.webp'));
+      await sharp(raw).resize({ width: 245, withoutEnlargement: true }).webp({ quality: 82 }).toFile(path.join(dir, 'card-low.webp'));
+    } catch (e) {
+      return sendJSON(res, 400, { error: 'Could not process that image: ' + e.message });
+    }
+    const low = `/cdn/${cLang}/images/${setId}/${localId}/card-low.webp`;
+    const high = `/cdn/${cLang}/images/${setId}/${localId}/card-high.webp`;
+    _setCardBaseImg.run(low, high, cLang, cardId);
+    return sendJSON(res, 200, { ok: true, urls: { low, high } });
   }
 
   // ---- admin: upload your own image for a specific printing of a card ----
