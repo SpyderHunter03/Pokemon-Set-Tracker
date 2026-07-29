@@ -571,10 +571,10 @@ body { padding-bottom: calc(64px + env(safe-area-inset-bottom)); }
 .fx { position: absolute; inset: 0; pointer-events: none; border-radius: inherit; }
 
 /* the printing's name written across the closest (base) card image */
-.fx-label { display: flex; align-items: center; justify-content: center; }
-
+/* the banner's center sits 75% down the card (his preference), not at 50% */
 .fx-label span {
-  transform: rotate(-24deg);
+  position: absolute; top: 75%; left: 50%;
+  transform: translate(-50%, -50%) rotate(-24deg);
   background: rgba(10, 12, 22, .74);
   border: 1px solid rgba(255, 255, 255, .35);
   color: #fff;
@@ -801,7 +801,7 @@ body.printing-proxies #print-area {
 /* printing-name banner on proxies — same look as the collection tiles */
 .print-cell { position: relative; }
 .print-fx {
-  position: absolute; left: -20%; width: 140%; top: 50%;
+  position: absolute; left: -20%; width: 140%; top: 75%;   /* matches the on-screen banner position */
   transform: translateY(-50%) rotate(-24deg);
   background: rgba(255, 255, 255, 0.82); color: #111;
   font-weight: 800; font-size: 10pt; letter-spacing: 0.06em; text-transform: uppercase;
