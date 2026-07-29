@@ -296,6 +296,12 @@ const { chromium } = require('playwright');
   await page.click('button:has-text("Print proxies")');
   await page.waitForSelector('.picker-panel h3:has-text("Print proxies")');
   await page.click('.picker-panel .chip:has-text("Custom")');
+  // ratio lock: with 🔒 3:4 on, editing width drives height (75 → 100)
+  await page.click('.picker-panel button:has-text("3:4")');
+  await page.fill('.picker-panel input[type=number] >> nth=0', '75');
+  check('proxies: ratio lock keeps the custom boxes at 3:4',
+    (await page.locator('.picker-panel input[type=number] >> nth=1').inputValue()) === '100');
+  await page.click('.picker-panel button:has-text("3:4")');   // unlock again
   await page.fill('.picker-panel input[type=number] >> nth=0', '70');
   await page.fill('.picker-panel input[type=number] >> nth=1', '95');
   await page.click('.picker-panel .btn:has-text("Print")');

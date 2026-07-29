@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.36.0';
+const APP_VERSION = '3.36.1';
 
 /* ============================================================
  * Storage helpers
@@ -3266,9 +3266,25 @@ async function renderBinderPage(id) {
     const mmIn = (v) => h('input', { type: 'number', min: '20', max: '150', value: v, style: 'flex:none; width:72px' });
     const wIn = mmIn(lsGet('ptcg.proxy.customW') || '63');
     const hIn = mmIn(lsGet('ptcg.proxy.customH') || '88');
+    // ratio lock: keep the custom boxes at 3:4 while editing either one
+    let ratioLock = lsGet('ptcg.proxy.ratioLock') === '1';
+    const r1 = (n) => Math.round(n * 10) / 10;
+    const hFromW = () => { const w = parseFloat(wIn.value); if (Number.isFinite(w)) hIn.value = String(r1(w * 4 / 3)); };
+    const wFromH = () => { const v = parseFloat(hIn.value); if (Number.isFinite(v)) wIn.value = String(r1(v * 3 / 4)); };
+    const lockBtn = h('button', { type: 'button', class: 'chip', title: 'Keep a 3:4 ratio' });
+    const syncLock = () => { lockBtn.textContent = (ratioLock ? '\ud83d\udd12' : '\ud83d\udd13') + ' 3:4'; lockBtn.classList.toggle('active', ratioLock); };
+    lockBtn.addEventListener('click', () => {
+      ratioLock = !ratioLock;
+      lsSet('ptcg.proxy.ratioLock', ratioLock ? '1' : '0');
+      syncLock();
+      if (ratioLock) hFromW();
+    });
+    wIn.addEventListener('input', () => { if (ratioLock) hFromW(); });
+    hIn.addEventListener('input', () => { if (ratioLock) wFromH(); });
+    syncLock();
     const customRow = h('div', { class: 'row', style: 'gap:6px; align-items:center' },
       h('span', { class: 'muted small', style: 'min-width:64px' }, 'Custom'),
-      wIn, h('span', { class: 'muted small' }, '\u00d7'), hIn, h('span', { class: 'muted small' }, 'mm'));
+      wIn, lockBtn, hIn, h('span', { class: 'muted small' }, 'mm'));
     const syncCustomRow = () => { customRow.style.display = sizeKey === 'custom' ? '' : 'none'; };
     const optRow = (label, opts, get, set) => h('div', { class: 'row', style: 'gap:6px; flex-wrap:wrap; align-items:center' },
       h('span', { class: 'muted small', style: 'min-width:64px' }, label),
