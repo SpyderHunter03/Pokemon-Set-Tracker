@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.30.0';
+const APP_VERSION = '3.31.0';
 
 /* ============================================================
  * Storage helpers
@@ -1136,11 +1136,13 @@ async function openCardEditor(opts) {
   }
   renderPicChoice();
   fileIn.addEventListener('change', () => { if (fileIn.files && fileIn.files[0]) { imageFrom = null; renderPicChoice(); } });
-  async function openImagePicker() {
+
+  /** searchable card picker used for "reuse a picture" and "copy from a card" */
+  async function openCardPicker(withImagesOnly, onPick) {
     let cards = [], setNames = new Map();
     try {
       const [sx, ix] = await Promise.all([getSearchIndex(), getIndex()]);
-      cards = sx.cards.filter((c) => cardImg(c, 'low'))
+      cards = (withImagesOnly ? sx.cards.filter((c) => cardImg(c, 'low')) : sx.cards.slice())
         .sort((a, b) => a.name.localeCompare(b.name) || String(a.localId).localeCompare(String(b.localId), undefined, { numeric: true }));
       setNames = new Map(ix.sets.map((x) => [x.id, x.name]));
     } catch { toast('Could not load the card list'); return; }
@@ -1151,14 +1153,8 @@ async function openCardEditor(opts) {
       const hits = q ? cards.filter((c) => c.name.toLowerCase().includes(q)) : cards;
       results.replaceChildren(
         h('p', { class: 'muted small' }, `${hits.length} card${hits.length === 1 ? '' : 's'}${hits.length > 60 ? ' \u2014 showing 60, type to narrow' : ''}`),
-        ...hits.slice(0, 60).map((c) => h('div', { class: 'picker-row', onclick: () => {
-          imageFrom = c.id;
-          imageFromLabel = `${c.name} (#${c.localId})`;
-          fileIn.value = '';
-          ov.remove();
-          renderPicChoice();
-        } },
-          h('img', { src: cardImg(c, 'low'), loading: 'lazy' }),
+        ...hits.slice(0, 60).map((c) => h('div', { class: 'picker-row', onclick: () => { ov.remove(); onPick(c); } },
+          cardImg(c, 'low') ? h('img', { src: cardImg(c, 'low'), loading: 'lazy' }) : h('div', { class: 'picker-thumb' }, '\ud83c\udccf'),
           h('div', { class: 'picker-info' }, h('div', {}, c.name),
             h('div', { class: 'muted small' }, (setNames.get(setIdOf(c.id)) || setIdOf(c.id)) + ' \u00b7 #' + c.localId)))));
     };
@@ -1172,6 +1168,37 @@ async function openCardEditor(opts) {
     render();
     view.append(ov);
     input.focus();
+  }
+  const openImagePicker = () => openCardPicker(true, (c) => {
+    imageFrom = c.id;
+    imageFromLabel = `${c.name} (#${c.localId})`;
+    fileIn.value = '';
+    renderPicChoice();
+  });
+
+  /** fill the whole form from an existing card (any set) — same as Duplicate,
+   * but reachable from ＋ New card too */
+  async function copyFromCard(brief) {
+    let c = brief;
+    try { c = await getCard(brief.id); } catch { /* fall back to the index row */ }
+    nameIn.value = c.name || '';
+    rarityIn.value = c.rarity || '';
+    catSel.value = c.category || '';
+    hpIn.value = c.hp ? String(c.hp) : '';
+    typesIn.value = (c.types || []).join(', ');
+    dexIn.value = (c.dexId || []).join(', ');
+    illusIn.value = c.illustrator || '';
+    for (const b of varBoxes) b.cb.checked = !!(c.variants && c.variants[b.k]);
+    customPend.length = 0;
+    if (c.printings) customPend.push(...Object.values(c.printings));
+    renderCustom();
+    if (cardImg(c, 'low')) {
+      imageFrom = c.id;
+      imageFromLabel = `${c.name} (#${c.localId})`;
+      fileIn.value = '';
+    } else { imageFrom = null; }
+    renderPicChoice();
+    toast(`Copied everything from ${c.name} \u2014 pick a number and save`);
   }
 
   const status = h('div', { class: 'muted small' });
@@ -1233,6 +1260,9 @@ async function openCardEditor(opts) {
     h('div', { class: 'picker-panel ce-panel' },
       h('h3', { style: 'margin:0' }, editing ? `Edit ${editing.name}` : dup ? `Duplicate ${dup.name}` : 'New card'),
       editing ? h('p', { class: 'muted small', style: 'margin:2px 0 0' }, `Card id: ${editing.id}`) : null,
+      editing ? null : h('div', { class: 'row', style: 'gap:8px; align-items:center' },
+        h('button', { type: 'button', class: 'btn ghost small', onclick: () => openCardPicker(false, copyFromCard) }, '\u29c9 Copy from a card'),
+        h('span', { class: 'muted small' }, 'fills the whole form from any existing card')),
       h('div', { class: 'ce-grid' },
         setSel ? field('Set *', setSel) : null,
         field('Name *', nameIn), field('Number *', numIn),
@@ -1379,32 +1409,34 @@ async function renderSetPage(setId) {
   const me = await ensureMe();
   const isAdmin = !!(me && me.admin) && !appConfig.readonly;
   let filter = 'all';
-  let master = false;
   let query = '';
   let cardSort = lsGet('ptcg.sort.cards') || 'number';
 
   const progressLabel = h('span', { class: 'muted' });
   const progressBar = h('div', {});
   const progressWrap = h('div', { class: 'progress', style: 'flex:1; min-width:140px' }, progressBar);
+  // second bar: the master-set view — every printing counts separately
+  const printLabel = h('span', { class: 'muted' });
+  const printBar = h('div', {});
+  const printWrap = h('div', { class: 'progress', style: 'flex:1; min-width:140px' }, printBar);
 
   function updateProgress() {
-    let owned, total;
-    if (master) {
-      // master set: every printing of every card counts separately
-      owned = 0; total = 0;
-      for (const c of cards) {
-        const avail = realVariants(c);
-        total += avail.length;
-        owned += avail.filter((v) => variantQty(c.id, v) > 0).length;
-      }
-    } else {
-      owned = cards.filter((c) => ownedAny(c.id)).length;
-      total = officialTotal;
-    }
-    progressLabel.textContent = `${owned} / ${total}${master ? ' variants' : ''}`;
+    const owned = cards.filter((c) => ownedAny(c.id)).length;
+    const total = officialTotal;
+    progressLabel.textContent = `${owned} / ${total}`;
     const pct = total ? Math.min(100, Math.round((owned / total) * 100)) : 0;
     progressBar.style.width = pct + '%';
     progressWrap.classList.toggle('done', total > 0 && owned >= total);
+    let vOwned = 0, vTotal = 0;
+    for (const c of cards) {
+      const avail = realVariants(c);
+      vTotal += avail.length;
+      vOwned += avail.filter((v) => variantQty(c.id, v) > 0).length;
+    }
+    printLabel.textContent = `${vOwned} / ${vTotal} printings`;
+    const vPct = vTotal ? Math.min(100, Math.round((vOwned / vTotal) * 100)) : 0;
+    printBar.style.width = vPct + '%';
+    printWrap.classList.toggle('done', vTotal > 0 && vOwned >= vTotal);
   }
 
   const grid = h('div', { class: 'card-grid' });
@@ -1449,7 +1481,6 @@ async function renderSetPage(setId) {
     chipsWrap.replaceChildren(
       chip('All', filter === 'all', () => { filter = 'all'; renderChips(); renderGrid(); }),
       ...trackChips,
-      chip('Master set', master, () => { master = !master; renderChips(); updateProgress(); }),
       sortSelect([['number', 'Card number'], ['name', 'Name A–Z']], cardSort,
         (v) => { cardSort = v; lsSet('ptcg.sort.cards', v); renderGrid(); }),
     );
@@ -1486,7 +1517,10 @@ async function renderSetPage(setId) {
     h('a', { class: 'back-link', href: '#/' }, '← All sets'),
     h('div', { class: 'page-head' },
       h('h1', {}, set.name),
-      ...(canTrack() ? [progressLabel, progressWrap] : []),
+      ...(canTrack() ? [h('div', { class: 'prog-stack' },
+        h('div', { class: 'prog-row' }, progressLabel, progressWrap),
+        h('div', { class: 'prog-row' }, printLabel, printWrap),
+      )] : []),
     ),
     h('div', { class: 'set-filter' }, searchInput),
     chipsWrap,
@@ -1569,9 +1603,26 @@ async function renderPokemonPage(dexStr) {
   }
 
   const progressLabel = h('span', { class: 'muted' });
+  const pBar = h('div', {});
+  const pWrap = h('div', { class: 'progress', style: 'flex:1; min-width:120px' }, pBar);
+  const vLabel = h('span', { class: 'muted' });
+  const vBar = h('div', {});
+  const vWrap = h('div', { class: 'progress', style: 'flex:1; min-width:120px' }, vBar);
   function updateProgress() {
-    if (!canTrack()) { progressLabel.textContent = ''; return; }
-    progressLabel.textContent = `${sp.cards.filter((c) => ownedAny(c.id)).length} / ${sp.cards.length} owned`;
+    if (!canTrack()) return;
+    const owned = sp.cards.filter((c) => ownedAny(c.id)).length;
+    progressLabel.textContent = `${owned} / ${sp.cards.length} owned`;
+    pBar.style.width = (sp.cards.length ? Math.min(100, Math.round((owned / sp.cards.length) * 100)) : 0) + '%';
+    pWrap.classList.toggle('done', sp.cards.length > 0 && owned >= sp.cards.length);
+    let vOwned = 0, vTotal = 0;
+    for (const c of sp.cards) {
+      const avail = realVariants(c);
+      vTotal += avail.length;
+      vOwned += avail.filter((v) => variantQty(c.id, v) > 0).length;
+    }
+    vLabel.textContent = `${vOwned} / ${vTotal} printings`;
+    vBar.style.width = (vTotal ? Math.min(100, Math.round((vOwned / vTotal) * 100)) : 0) + '%';
+    vWrap.classList.toggle('done', vTotal > 0 && vOwned >= vTotal);
   }
 
   const grid = h('div', { class: 'card-grid' });
@@ -1592,7 +1643,10 @@ async function renderPokemonPage(dexStr) {
     h('a', { class: 'back-link', href: '#/pokemon' }, '← All Pokémon'),
     h('div', { class: 'page-head' },
       h('h1', {}, `#${String(sp.dex).padStart(3, '0')} ${sp.name}`),
-      progressLabel,
+      ...(canTrack() ? [h('div', { class: 'prog-stack' },
+        h('div', { class: 'prog-row' }, progressLabel, pWrap),
+        h('div', { class: 'prog-row' }, vLabel, vWrap),
+      )] : []),
     ),
     h('div', { class: 'chips' },
       sortSelect([['newest', 'Newest set'], ['oldest', 'Oldest set'], ['name', 'Name A–Z'], ['number', 'Card number']], pokeSort,

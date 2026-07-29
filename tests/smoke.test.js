@@ -159,10 +159,8 @@ const { chromium } = require('playwright');
   check('in-set search shows both Pikachu printings', (await page.locator('.tcg-card').count()) === 2);
   await page.fill('.set-filter input', '');
 
-  // master set mode
-  await page.click('.chip:has-text("Master set")');
-  check('master set counts printings incl. custom', (await page.textContent('.page-head .muted')).trim() === '3 / 8 variants');
-  await page.click('.chip:has-text("Master set")');
+  // the printings bar always shows the master-set tally (incl. custom)
+  check('master set counts printings incl. custom', (await page.textContent('.page-head .prog-row >> nth=1')).includes('3 / 8 printings'));
 
   // ---- Pokémon view ----
   await page.click('.bottomnav a[data-nav=pokemon]');
@@ -177,6 +175,7 @@ const { chromium } = require('playwright');
     (await page.locator('.tcg-card').count()) === 4 &&
     (await page.locator('.tcg-card >> nth=0').getAttribute('data-card-id')) === 'swsh3-20');
   check('pokemon page progress', (await page.textContent('.page-head .muted')).trim() === '1 / 2 owned');
+  check('pokemon page shows a printings bar too', (await page.textContent('.page-head .prog-row >> nth=1')).includes('printings'));
   await page.selectOption('.chips select', 'oldest');
   check('pokemon page sorts oldest-set first', (await page.locator('.tcg-card >> nth=0').getAttribute('data-card-id')) === 'base1-4');
   await page.selectOption('.chips select', 'newest');

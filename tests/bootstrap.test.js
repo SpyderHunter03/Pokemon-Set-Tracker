@@ -202,6 +202,29 @@ const { chromium } = require('playwright');
     ((await page.locator('.tcg-card[data-card-id="test-promos-2"] >> nth=0 >> img').getAttribute('src')) || '').includes('test-promos/1/card-low.webp') &&
     (await page.locator('.tcg-card[data-card-id="test-promos-2"][data-variant="sparkle-foil"]').count()) === 1);
 
+  // ---- ＋ New card can copy everything from a card in ANOTHER set ----
+  await page.goto('http://localhost:3111/#/set/test-promos');
+  await page.waitForSelector('.add-card-tile');
+  await page.click('.add-card-tile');
+  await page.waitForSelector('.ce-panel');
+  await page.click('.ce-panel button:has-text("Copy from a card")');
+  await page.waitForSelector('.picker-overlay .picker-row');
+  await page.fill('.picker-overlay input[placeholder="Search cards by name…"]', 'Pikachu');
+  await page.waitForSelector('.picker-row:has-text("Pikachu")');
+  await page.click('.picker-row:has-text("Pikachu") >> nth=0');
+  await page.waitForFunction(() => {
+    const n = document.querySelector('.ce-panel input[placeholder="e.g. Eevee"]');
+    return n && n.value === 'Pikachu';
+  });
+  check('editor: ＋ New card copies the whole form from a card in another set',
+    (await page.textContent('.ce-panel')).includes('Using the picture of Pikachu'));
+  await page.fill('.ce-panel input[placeholder="e.g. Eevee"]', 'Pika Promo');   // renamed copy
+  await page.fill('.ce-panel input[placeholder="e.g. 51 or SWSH087"]', '3');
+  await page.click('.ce-panel button:has-text("Add card")');
+  await page.waitForSelector('.tcg-card[data-card-id="test-promos-3"]');
+  check('editor: copied card lands in THIS set with the source picture',
+    ((await page.locator('.tcg-card[data-card-id="test-promos-3"] >> nth=0 >> img').getAttribute('src')) || '').includes('base1/58/'));
+
   // sign the admin out so the main suite's fresh user is a clean non-admin test
   await page.click('#account-btn');
   await page.waitForSelector('#account-status button:has-text("Sign out")');

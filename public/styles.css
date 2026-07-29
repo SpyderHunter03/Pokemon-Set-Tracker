@@ -899,3 +899,9 @@ body.printing-proxies #print-area {
 /* inline ✕ inside label chips (editor's custom printings, picture source) */
 .chip-x { border: 0; background: transparent; color: inherit; cursor: pointer; font-size: 11px; padding: 0 2px; }
 span.chip { display: inline-flex; align-items: center; gap: 2px; }
+
+/* stacked progress bars (cards + printings) on set & Pokémon pages */
+.prog-stack { flex: 1; min-width: 200px; display: flex; flex-direction: column; gap: 4px; }
+.prog-row { display: flex; align-items: center; gap: 8px; }
+.prog-row .muted { white-space: nowrap; font-size: 13px; }
+.prog-row .progress { margin-top: 0; }
