@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.35.0';
+const APP_VERSION = '3.36.0';
 
 /* ============================================================
  * Storage helpers
@@ -3259,6 +3259,17 @@ async function renderBinderPage(id) {
 
   function openProxyPrintDialog() {
     let which = 'missing', frame = 'color', paper = 'letter';
+    // pocket sizes vary between binders — offer presets and a custom entry
+    const SIZES = { std: { w: 63, h: 88 }, small: { w: 59, h: 86 }, jumbo: { w: 89, h: 127 } };
+    let sizeKey = lsGet('ptcg.proxy.size') || 'std';
+    if (!SIZES[sizeKey] && sizeKey !== 'custom') sizeKey = 'std';
+    const mmIn = (v) => h('input', { type: 'number', min: '20', max: '150', value: v, style: 'flex:none; width:72px' });
+    const wIn = mmIn(lsGet('ptcg.proxy.customW') || '63');
+    const hIn = mmIn(lsGet('ptcg.proxy.customH') || '88');
+    const customRow = h('div', { class: 'row', style: 'gap:6px; align-items:center' },
+      h('span', { class: 'muted small', style: 'min-width:64px' }, 'Custom'),
+      wIn, h('span', { class: 'muted small' }, '\u00d7'), hIn, h('span', { class: 'muted small' }, 'mm'));
+    const syncCustomRow = () => { customRow.style.display = sizeKey === 'custom' ? '' : 'none'; };
     const optRow = (label, opts, get, set) => h('div', { class: 'row', style: 'gap:6px; flex-wrap:wrap; align-items:center' },
       h('span', { class: 'muted small', style: 'min-width:64px' }, label),
       ...opts.map(([v, txt]) => h('button', { class: 'chip' + (v === get() ? ' active' : ''), onclick: (e) => {
@@ -3271,16 +3282,28 @@ async function renderBinderPage(id) {
         h('p', { class: 'muted small' }, 'Prints cards at real size (63\u2009\u00d7\u200988\u2009mm) with cut guides \u2014 stand-ins for your physical binder\u2019s pockets until the real card arrives. Artwork adds a decorative frame around each card.'),
         optRow('Cards', [['missing', 'Missing only'], ['all', 'All pockets']], () => which, (v) => which = v),
         optRow('Artwork', [['none', 'None'], ['color', 'Binder color'], ['gold', 'Gold'], ['pokeball', 'Pok\u00e9ball']], () => frame, (v) => frame = v),
+        optRow('Size', [['std', 'Standard 63\u00d788'], ['small', 'Small 59\u00d786'], ['jumbo', 'Jumbo 89\u00d7127'], ['custom', 'Custom\u2026']],
+          () => sizeKey, (v) => { sizeKey = v; syncCustomRow(); }),
+        customRow,
         optRow('Paper', [['letter', 'Letter'], ['a4', 'A4']], () => paper, (v) => paper = v),
         h('div', { class: 'row', style: 'justify-content:flex-end; gap:8px; margin-top:6px' },
           h('button', { class: 'btn ghost small', onclick: () => overlay.remove() }, 'Cancel'),
-          h('button', { class: 'btn small', onclick: () => { overlay.remove(); printProxies(which, frame, paper); } }, '\ud83d\udda8 Print'),
+          h('button', { class: 'btn small', onclick: () => {
+            const clamp = (el, dflt) => Math.min(150, Math.max(20, parseFloat(el.value) || dflt));
+            const size = sizeKey === 'custom' ? { w: clamp(wIn, 63), h: clamp(hIn, 88) } : SIZES[sizeKey];
+            lsSet('ptcg.proxy.size', sizeKey);
+            if (sizeKey === 'custom') { lsSet('ptcg.proxy.customW', String(size.w)); lsSet('ptcg.proxy.customH', String(size.h)); }
+            overlay.remove();
+            printProxies(which, frame, paper, size);
+          } }, '\ud83d\udda8 Print'),
         ),
       ));
     view.append(overlay);
+    syncCustomRow();
   }
 
-  function printProxies(which, frame, paper) {
+  function printProxies(which, frame, paper, size) {
+    const pw = (size && size.w) || 63, ph = (size && size.h) || 88;
     const entries = Object.entries(binder.slots)
       .map(([k, v]) => [parseInt(k, 10), v])
       .sort((a, b) => a[0] - b[0])
@@ -3294,7 +3317,7 @@ async function renderBinderPage(id) {
         for (const c of v.cells || []) {
           const cell = h('div', { class: 'print-cell print-art b-' + binder.color });
           area.append(cell);
-          artPieceCss(cell, v, c, 1, 'mm');
+          artPieceCss(cell, v, c, pw / CARD_W, 'mm');
         }
         continue;
       }
@@ -3312,11 +3335,16 @@ async function renderBinderPage(id) {
       ));
     }
     const pageStyle = h('style', {}, `@page { size: ${paper === 'a4' ? 'A4' : 'letter'}; margin: 8mm; }`);
-    document.head.append(pageStyle);
+    const sizeStyle = h('style', {}, `
+      body.printing-proxies #print-area .print-cell { width: ${pw}mm; height: ${ph}mm; }
+      body.printing-proxies #print-area.frame-color .print-cell,
+      body.printing-proxies #print-area.frame-gold .print-cell,
+      body.printing-proxies #print-area.frame-pokeball .print-cell { width: ${pw + 6}mm; height: ${ph + 6}mm; }`);
+    document.head.append(pageStyle, sizeStyle);
     document.body.append(area);
     document.body.classList.add('printing-proxies');
     const cleanup = () => {
-      area.remove(); pageStyle.remove();
+      area.remove(); pageStyle.remove(); sizeStyle.remove();
       document.body.classList.remove('printing-proxies');
       window.removeEventListener('afterprint', cleanup);
     };

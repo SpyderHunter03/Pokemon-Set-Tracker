@@ -282,6 +282,32 @@ const { chromium } = require('playwright');
     (await page.locator('#print-area .print-fx').allTextContents()).some((t) => t.includes('1st Edition')));
   await page.evaluate(() => window.dispatchEvent(new Event('afterprint')));
 
+  // proxy sizes: a preset and a custom entry both drive the printed cell size
+  await page.evaluate(() => { delete document.body.dataset.printed; });
+  await page.click('button:has-text("Print proxies")');
+  await page.waitForSelector('.picker-panel h3:has-text("Print proxies")');
+  await page.click('.picker-panel .chip:has-text("Jumbo")');
+  await page.click('.picker-panel .btn:has-text("Print")');
+  await page.waitForFunction(() => document.body.dataset.printed === '1');
+  check('proxies: Jumbo preset prints 89×127mm cells',
+    await page.evaluate(() => [...document.head.querySelectorAll('style')].some((st) => st.textContent.includes('width: 89mm; height: 127mm'))));
+  await page.evaluate(() => window.dispatchEvent(new Event('afterprint')));
+  await page.evaluate(() => { delete document.body.dataset.printed; });
+  await page.click('button:has-text("Print proxies")');
+  await page.waitForSelector('.picker-panel h3:has-text("Print proxies")');
+  await page.click('.picker-panel .chip:has-text("Custom")');
+  await page.fill('.picker-panel input[type=number] >> nth=0', '70');
+  await page.fill('.picker-panel input[type=number] >> nth=1', '95');
+  await page.click('.picker-panel .btn:has-text("Print")');
+  await page.waitForFunction(() => document.body.dataset.printed === '1');
+  check('proxies: custom size prints exactly as entered',
+    await page.evaluate(() => [...document.head.querySelectorAll('style')].some((st) => st.textContent.includes('width: 70mm; height: 95mm'))));
+  await page.evaluate(() => window.dispatchEvent(new Event('afterprint')));
+  check('proxies: size style cleans up after printing',
+    await page.evaluate(() => ![...document.head.querySelectorAll('style')].some((st) => st.textContent.includes('width: 70mm'))));
+  // back to standard so nothing downstream inherits the custom choice
+  await page.evaluate(() => localStorage.setItem('ptcg.proxy.size', 'std'));
+
   // drag & drop a card between pockets (idx4 -> empty idx7) — dispatch the
   // HTML5 drag events directly (headless mouse-drag doesn't start native DnD)
   await page.evaluate(() => {
