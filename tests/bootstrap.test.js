@@ -209,6 +209,8 @@ const { chromium } = require('playwright');
   await page.waitForSelector('.ce-panel');
   await page.click('.ce-panel button:has-text("Copy from a card")');
   await page.waitForSelector('.picker-overlay .picker-row');
+  check('editor: copy-from picker offers every card (chunked, no cap)',
+    !(await page.textContent('.picker-overlay .picker-results')).includes('showing 60'));
   await page.fill('.picker-overlay input[placeholder="Search cards by name…"]', 'Pikachu');
   await page.waitForSelector('.picker-row:has-text("Pikachu")');
   await page.click('.picker-row:has-text("Pikachu") >> nth=0');

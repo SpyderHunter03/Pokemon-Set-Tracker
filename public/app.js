@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.33.0';
+const APP_VERSION = '3.34.0';
 
 /* ============================================================
  * Storage helpers
@@ -105,6 +105,24 @@ async function getSet(id) {
   const set = await catGet('set?lang=' + encodeURIComponent(lang) + '&id=' + encodeURIComponent(id));
   _setDetailCache.set(id, set);
   return set;
+}
+
+/** Render an unbounded result list in batches of 40 as the panel scrolls —
+ * EVERY scrollable list offers every value, loaded incrementally (no caps). */
+function chunkedList(results, hits, rowOf, emptyMsg) {
+  results.replaceChildren();
+  if (!hits.length) { results.append(h('p', { class: 'muted small' }, emptyMsg)); return; }
+  results.append(h('p', { class: 'muted small' }, `${hits.length} card${hits.length === 1 ? '' : 's'}`));
+  let shown = 0;
+  const CHUNK = 40;
+  const renderMore = () => {
+    const upto = Math.min(shown + CHUNK, hits.length);
+    for (; shown < upto; shown++) results.append(rowOf(hits[shown]));
+  };
+  renderMore();
+  results.onscroll = () => {
+    if (shown < hits.length && results.scrollTop + results.clientHeight > results.scrollHeight - 300) renderMore();
+  };
 }
 
 async function getCard(id) {
@@ -1173,15 +1191,13 @@ async function openCardEditor(opts) {
     } catch { toast('Could not load the card list'); return; }
     const input = h('input', { type: 'text', placeholder: 'Search cards by name\u2026' });
     const results = h('div', { class: 'picker-results' });
+    const rowOf = (c) => h('div', { class: 'picker-row', onclick: () => { ov.remove(); onPick(c); } },
+      cardImg(c, 'low') ? h('img', { src: cardImg(c, 'low'), loading: 'lazy' }) : h('div', { class: 'picker-thumb' }, '\ud83c\udccf'),
+      h('div', { class: 'picker-info' }, h('div', {}, c.name),
+        h('div', { class: 'muted small' }, (setNames.get(setIdOf(c.id)) || setIdOf(c.id)) + ' \u00b7 #' + c.localId)));
     const render = () => {
       const q = input.value.trim().toLowerCase();
-      const hits = q ? cards.filter((c) => c.name.toLowerCase().includes(q)) : cards;
-      results.replaceChildren(
-        h('p', { class: 'muted small' }, `${hits.length} card${hits.length === 1 ? '' : 's'}${hits.length > 60 ? ' \u2014 showing 60, type to narrow' : ''}`),
-        ...hits.slice(0, 60).map((c) => h('div', { class: 'picker-row', onclick: () => { ov.remove(); onPick(c); } },
-          cardImg(c, 'low') ? h('img', { src: cardImg(c, 'low'), loading: 'lazy' }) : h('div', { class: 'picker-thumb' }, '\ud83c\udccf'),
-          h('div', { class: 'picker-info' }, h('div', {}, c.name),
-            h('div', { class: 'muted small' }, (setNames.get(setIdOf(c.id)) || setIdOf(c.id)) + ' \u00b7 #' + c.localId)))));
+      chunkedList(results, q ? cards.filter((c) => c.name.toLowerCase().includes(q)) : cards, rowOf, 'No cards match.');
     };
     input.addEventListener('input', render);
     const ov = h('div', { class: 'picker-overlay' },
@@ -2880,24 +2896,6 @@ async function renderBinderPage(id) {
       grid.append(pocket);
     }
     return grid;
-  }
-
-  /** render an unbounded result list in batches as the panel scrolls —
-   * no more "first 30 only" caps in the pickers */
-  function chunkedList(results, hits, rowOf, emptyMsg) {
-    results.replaceChildren();
-    if (!hits.length) { results.append(h('p', { class: 'muted small' }, emptyMsg)); return; }
-    results.append(h('p', { class: 'muted small' }, `${hits.length} card${hits.length === 1 ? '' : 's'}`));
-    let shown = 0;
-    const CHUNK = 40;
-    const renderMore = () => {
-      const upto = Math.min(shown + CHUNK, hits.length);
-      for (; shown < upto; shown++) results.append(rowOf(hits[shown]));
-    };
-    renderMore();
-    results.onscroll = () => {
-      if (shown < hits.length && results.scrollTop + results.clientHeight > results.scrollHeight - 300) renderMore();
-    };
   }
 
   function openPocketPicker(i) {
