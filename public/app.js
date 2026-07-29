@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.31.0';
+const APP_VERSION = '3.32.0';
 
 /* ============================================================
  * Storage helpers
@@ -957,6 +957,21 @@ async function renderHome() {
     }
   }
 
+  // printings tallies per set (for the second bar on each tile) — the search
+  // index is cached, so this is one fetch at most
+  let printBySet = null;
+  try {
+    const sx = await getSearchIndex();
+    printBySet = {};
+    for (const c of sx.cards) {
+      const sid = setIdOf(c.id);
+      const t = printBySet[sid] || (printBySet[sid] = { owned: 0, total: 0 });
+      const avail = realVariants(c);
+      t.total += avail.length;
+      t.owned += avail.filter((v) => variantQty(c.id, v) > 0).length;
+    }
+  } catch { /* tiles just skip the printings bar */ }
+
   let setSort = lsGet('ptcg.sort.sets') || 'newest';
   const orderedSets = () => {
     if (setSort === 'name') return [...sets].sort((a, b) => a.name.localeCompare(b.name));
@@ -1004,14 +1019,18 @@ async function renderHome() {
       const pct = total ? Math.min(100, Math.round((owned / total) * 100)) : 0;
       const done = total > 0 && owned >= total;
       const logo = setLogo(s);
+      const pt = printBySet && printBySet[s.id];
+      const vPct = pt && pt.total ? Math.min(100, Math.round((pt.owned / pt.total) * 100)) : 0;
       grid.append(h('a', { class: 'set-card' + (done ? ' complete' : ''), href: '#/set/' + encodeURIComponent(s.id) },
         logo
           ? h('img', { class: 'logo', src: logo, alt: '', loading: 'lazy', onerror: (e) => { e.target.outerHTML = '<div class="logo placeholder">🎴</div>'; } })
           : h('div', { class: 'logo placeholder' }, '🎴'),
         h('div', { class: 'info' },
           h('div', { class: 'name' }, s.name),
-          h('div', { class: 'count' }, `${owned} / ${total || '?'}${done ? ' ✓ complete' : ''}`),
+          h('div', { class: 'count' }, `${owned} / ${total || '?'}${done ? ' ✓ complete' : ''}` +
+            (pt ? ` · ${pt.owned} / ${pt.total} printings` : '')),
           h('div', { class: 'progress' + (done ? ' done' : '') }, h('div', { style: `width:${pct}%` })),
+          pt ? h('div', { class: 'progress' + (pt.total > 0 && pt.owned >= pt.total ? ' done' : ''), style: 'margin-top:3px' }, h('div', { style: `width:${vPct}%` })) : null,
         ),
       ));
     }
@@ -1536,6 +1555,17 @@ async function renderSetPage(setId) {
 /* ============================================================
  * Pages — Pokémon (all printings of each species, via dex number)
  * ============================================================ */
+/** printings tally of a card list (master-set style, custom incl.) */
+function printingTally(cards) {
+  let owned = 0, total = 0;
+  for (const c of cards) {
+    const avail = realVariants(c);
+    total += avail.length;
+    owned += avail.filter((v) => variantQty(c.id, v) > 0).length;
+  }
+  return { owned, total };
+}
+
 async function renderPokemonList() {
   view.replaceChildren(spinner());
   let idx;
@@ -1562,14 +1592,17 @@ async function renderPokemonList() {
       const withImg = sp.cards.find((c) => c.img);
       const thumb = withImg ? cardImg(withImg) : null;
       const pct = total ? Math.round((owned / total) * 100) : 0;
+      const pt = printingTally(sp.cards);
+      const vPct = pt.total ? Math.round((pt.owned / pt.total) * 100) : 0;
       list.append(h('a', { class: 'set-card' + (done ? ' complete' : ''), href: '#/pokemon/' + sp.dex },
         thumb
           ? h('img', { class: 'logo poke-thumb', src: thumb, alt: '', loading: 'lazy' })
           : h('div', { class: 'logo placeholder' }, '❔'),
         h('div', { class: 'info' },
           h('div', { class: 'name' }, `#${String(sp.dex).padStart(3, '0')} ${sp.name}`),
-          h('div', { class: 'count' }, `${owned} / ${total} cards${done ? ' ✓' : ''}`),
+          h('div', { class: 'count' }, `${owned} / ${total} cards${done ? ' ✓' : ''} · ${pt.owned} / ${pt.total} printings`),
           h('div', { class: 'progress' + (done ? ' done' : '') }, h('div', { style: `width:${pct}%` })),
+          h('div', { class: 'progress' + (pt.total > 0 && pt.owned >= pt.total ? ' done' : ''), style: 'margin-top:3px' }, h('div', { style: `width:${vPct}%` })),
         ),
       ));
     }

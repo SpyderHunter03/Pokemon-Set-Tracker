@@ -67,6 +67,9 @@ const { chromium } = require('playwright');
     return document.getElementById('backup-area').style.display !== 'none';
   }));
   check('home shows sets', (await page.locator('.set-card').count()) === 3);   // base1 + Darkness Ablaze + admin-made Test Promos
+  check('set tiles show a printings tally too',
+    (await page.textContent('.set-card .count >> nth=0')).includes('printings') &&
+    (await page.locator('.set-card >> nth=0 >> .progress').count()) === 2);
   check('TCG Pocket sets excluded from the database',
     !(await page.locator('.set-card').allTextContents()).join(' ').includes('Genetic Apex'));
   check('stats count migrated card', (await page.textContent('#stat-owned')).trim() === '1');
@@ -167,6 +170,9 @@ const { chromium } = require('playwright');
   await page.waitForSelector('.set-card');
   const speciesNames = await page.locator('.set-card .name').allTextContents();
   check('species list grouped by dex number', JSON.stringify(speciesNames) === JSON.stringify(['#006 Charizard', '#025 Pikachu', '#133 Eevee Star EX', '#162 Furret']));
+  check('species tiles show a printings tally too',
+    (await page.textContent('.set-card .count >> nth=0')).includes('printings') &&
+    (await page.locator('.set-card >> nth=0 >> .progress').count()) === 2);
   check('charizard owned across sets', (await page.textContent('.set-card:has-text("Charizard") .count')).includes('1 / 2'));
 
   await page.click('.set-card:has-text("Charizard")');
