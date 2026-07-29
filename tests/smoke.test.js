@@ -226,6 +226,8 @@ const { chromium } = require('playwright');
   await page.waitForSelector('.picker-overlay input');
   await page.fill('.picker-overlay input', 'Pikachu');
   await page.waitForSelector('.picker-row .chip');
+  check('binder picker shows the set NAME and card number, not the set code',
+    (await page.textContent('.picker-row >> nth=0')).includes('Base Set · #58'));
   await page.click('.picker-row .chip >> nth=0');
   await page.waitForFunction(() => document.querySelectorAll('.binder-grid .pocket.filled').length === 2);
   check('binder: picker places a card into the chosen pocket', (await page.textContent('#view')).includes('1 / 6 in hand'));

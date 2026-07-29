@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.26.0';
+const APP_VERSION = '3.26.1';
 
 /* ============================================================
  * Storage helpers
@@ -2186,6 +2186,8 @@ async function renderBinderPage(id) {
     setsById = new Map(setIdx.sets.map((x) => [x.id, x]));
   } catch (e) { view.replaceChildren(dbErrorView('Could not load that binder.', e, () => renderBinderPage(id))); return; }
 
+  // pickers & proxies show the readable set NAME, not the internal set code
+  const setNameOf = (cid) => { const st = setsById.get(setIdOf(cid)); return (st && st.name) || setIdOf(cid); };
   let per = binder.size * binder.size;
   let moveFrom = null;
   // the binder opens in VIEW mode (flip pages, tap pockets you've gotten);
@@ -2703,7 +2705,7 @@ async function renderBinderPage(id) {
         img ? h('img', { src: img, loading: 'lazy' }) : h('div', { class: 'picker-thumb' }, '\ud83c\udccf'),
         h('div', { class: 'picker-info' },
           h('div', {}, c.name),
-          h('div', { class: 'muted small' }, setIdOf(c.id) + ' \u00b7 #' + c.localId),
+          h('div', { class: 'muted small' }, setNameOf(c.id) + ' \u00b7 #' + c.localId),
           h('div', { class: 'row', style: 'flex-wrap:wrap; gap:4px' }, ...chips)),
       );
     };
@@ -2867,7 +2869,7 @@ async function renderBinderPage(id) {
         .sort((a, b) => a.name.localeCompare(b.name) || String(a.localId).localeCompare(String(b.localId), undefined, { numeric: true }));
       const rowOf = (c) => h('div', { class: 'picker-row', onclick: () => setCover({ type: 'card', card: c.id }) },
         h('img', { src: cardImg(c, 'low'), loading: 'lazy' }),
-        h('div', { class: 'picker-info' }, h('div', {}, c.name), h('div', { class: 'muted small' }, setIdOf(c.id) + ' \u00b7 #' + c.localId)));
+        h('div', { class: 'picker-info' }, h('div', {}, c.name), h('div', { class: 'muted small' }, setNameOf(c.id) + ' \u00b7 #' + c.localId)));
       const rr = () => {
         const q = input.value.trim().toLowerCase();
         const hits = q ? allCards.filter((c) => c.name.toLowerCase().includes(q)) : allCards;
@@ -2965,7 +2967,7 @@ async function renderBinderPage(id) {
         img ? h('img', { src: img, alt: (card && card.name) || v.card })
             : h('div', { class: 'print-fallback' },
                 h('div', { class: 'pf-name' }, (card && card.name) || v.card),
-                h('div', { class: 'pf-meta' }, setIdOf(v.card) + ' \u00b7 #' + ((card && card.localId) || '?') +
+                h('div', { class: 'pf-meta' }, setNameOf(v.card) + ' \u00b7 #' + ((card && card.localId) || '?') +
                   (card ? ' \u00b7 ' + variantLabel(card, v.variant) : '')),
               ),
         needsLabel ? h('div', { class: 'print-fx' }, variantLabel(card, v.variant)) : null,
