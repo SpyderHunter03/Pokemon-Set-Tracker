@@ -86,7 +86,7 @@ const { chromium } = require('playwright');
   const customTile = page.locator('.tcg-card[data-variant="cracked-ice-holo"]');
   check('custom printing appears as its own card tile', (await customTile.count()) === 1);
   check('custom tile shows uploaded image', (await customTile.locator('img').getAttribute('src')).includes('cracked-ice-holo-low.webp'));
-  check('custom tile labeled correctly', (await customTile.locator('.variant-badge').textContent()) === 'Cracked Ice Holo');
+  check('custom tile labeled correctly', (await customTile.locator('.fx-label').textContent()) === 'Cracked Ice Holo');
 
   // public image API lists it, CORS open
   const manifest = await page.evaluate(async () => {

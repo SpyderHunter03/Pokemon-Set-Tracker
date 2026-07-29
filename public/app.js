@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.27.0';
+const APP_VERSION = '3.29.0';
 
 /* ============================================================
  * Storage helpers
@@ -184,9 +184,9 @@ function cardImg(card, quality = 'low', variant = null) {
  * card's base scan (same set, same number) — with the printing's name
  * written across it. The card's primary printing is what the base scan
  * depicts, so it stays clean; real uploaded scans always win. */
+/** The printing's name, written diagonally across the card — on EVERY
+ * printing, base image and dedicated scans included (uniform labeling). */
 function variantFxEl(card, variant) {
-  if (card.variantImages && card.variantImages[variant]) return null; // real scan of this printing
-  if (realVariants(card)[0] === variant) return null; // the base scan depicts this printing
   return h('div', { class: 'fx fx-label', 'aria-hidden': 'true' },
     h('span', {}, variantLabel(card, variant)));
 }
@@ -552,15 +552,10 @@ function cardTile(card, variant, { onOwnershipChange } = {}) {
     imgEl.addEventListener('error', () => imgEl.replaceWith(placeholderContent(card)));
     tile.append(imgEl);
     trackImageLoad(imgEl, tile);
-    const fx = variantFxEl(card, variant);
-    if (fx) tile.append(fx);
   } else {
     tile.append(placeholderContent(card));
   }
-  // label the printing when a card has several (or a notable one like 1st Edition)
-  if (realVariants(card).length > 1 || variant !== 'normal') {
-    tile.append(h('div', { class: 'variant-badge' }, variantLabel(card, variant)));
-  }
+  tile.append(variantFxEl(card, variant));   // every tile banners its printing
   tile.append(h('button', {
     class: 'info-btn', title: 'Card details', 'aria-label': 'Card details',
     onclick: (e) => { e.stopPropagation(); openCardModal(card, { variant, onOwnershipChange }); },
@@ -2619,6 +2614,7 @@ async function renderBinderPage(id) {
         pocket = h('div', { class: 'pocket filled' + (s.have ? ' have' : '') + (moveFrom === i ? ' moving' : ''), 'data-pocket': String(i) },
           img ? h('img', { src: img, loading: 'lazy', alt: (card && card.name) || s.card })
               : h('div', { class: 'pocket-name' }, (card && card.name) || s.card),
+          card ? variantFxEl(card, s.variant) : null,   // same diagonal banner as the collection tiles
           s.have ? h('div', { class: 'pocket-badge' }, '\u2713') : null,
           s.have && (s.n || 1) > 1 ? h('div', { class: 'pocket-qty' }, '\u00d7' + s.n) : null,
           h('button', { class: 'pocket-edit', onclick: (e) => { e.stopPropagation(); pocketActions(i); } }, '\u22ef'),
@@ -3050,11 +3046,7 @@ async function renderBinderPage(id) {
       }
       const card = cardsById.get(v.card);
       const img = card && (cardImg(card, 'high', v.variant) || cardImg(card, 'low', v.variant));
-      // same printing-name banner as the collection tiles: shown when this
-      // printing has no dedicated scan and isn't what the base scan depicts
-      const needsLabel = card && img &&
-        !(card.variantImages && card.variantImages[v.variant]) &&
-        realVariants(card)[0] !== v.variant;
+      // the printing's name banners EVERY proxy, matching the collection look
       area.append(h('div', { class: 'print-cell b-' + binder.color },
         img ? h('img', { src: img, alt: (card && card.name) || v.card })
             : h('div', { class: 'print-fallback' },
@@ -3062,7 +3054,7 @@ async function renderBinderPage(id) {
                 h('div', { class: 'pf-meta' }, setNameOf(v.card) + ' \u00b7 #' + ((card && card.localId) || '?') +
                   (card ? ' \u00b7 ' + variantLabel(card, v.variant) : '')),
               ),
-        needsLabel ? h('div', { class: 'print-fx' }, variantLabel(card, v.variant)) : null,
+        card ? h('div', { class: 'print-fx' }, variantLabel(card, v.variant)) : null,
       ));
     }
     const pageStyle = h('style', {}, `@page { size: ${paper === 'a4' ? 'A4' : 'letter'}; margin: 8mm; }`);

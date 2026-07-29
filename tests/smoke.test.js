@@ -83,11 +83,13 @@ const { chromium } = require('playwright');
   check('set page shows 8 printing tiles (incl. custom Cracked Ice Holo)', (await page.locator('.tcg-card').count()) === 8);
   check('progress counts unique cards', (await page.textContent('.page-head .muted')).trim() === '1 / 102');
 
-  const badges = await page.locator('.tcg-card .variant-badge').allTextContents();
+  const badges = await page.locator('.tcg-card .fx-label').allTextContents();
   check('variant labels incl. Unlimited, 1st Edition, custom printing',
     JSON.stringify(badges.slice(0, 4)) === JSON.stringify(['Holo', '1st Edition', 'Cracked Ice Holo', 'Unlimited']));
 
   check('imageless cards show clean placeholders', (await page.locator('.tcg-card .noimg').count()) === 2);
+  check('every tile banners its printing (no unlabeled cards)',
+    (await page.locator('.tcg-card').count()) === (await page.locator('.tcg-card .fx-label').count()));
   check('high-only card got an image', (await page.locator('.tcg-card[data-card-id="base1-97"] img').count()) === 1);
 
   // tap the Holo printing of Charizard
@@ -129,14 +131,14 @@ const { chromium } = require('playwright');
   await page.click('.chip:has-text("All")');
 
   // ---- printing looks: name banner on non-primary printings + real variant scans ----
-  check('primary printing shows the plain base scan', (await page.locator('.tcg-card >> nth=0 >> .fx').count()) === 0);
+  check('primary printing banners its name too now', (await page.locator('.tcg-card >> nth=0 >> .fx-label').textContent()) === 'Holo');
   check('1st Edition printing shows its name across the base scan', (await page.locator('.tcg-card >> nth=1 >> .fx-label').textContent()) === '1st Edition');
-  check('unlimited (primary) printing stays clean', (await page.locator('.tcg-card[data-card-id="base1-58"][data-variant="normal"] >> .fx').count()) === 0);
+  check('unlimited (primary) printing banners "Unlimited"', (await page.locator('.tcg-card[data-card-id="base1-58"][data-variant="normal"] >> .fx-label').textContent()) === 'Unlimited');
   const customT = page.locator('.tcg-card[data-variant="cracked-ice-holo"]');
   check('custom printing survives database rebuild with its image', (await customT.locator('img').getAttribute('src')).includes('cracked-ice-holo-low.webp'));
   const pikaFirstEd = page.locator('.tcg-card[data-card-id="base1-58"][data-variant="firstEdition"]');
   check('real variant scan used when present', (await pikaFirstEd.locator('img').getAttribute('src')).includes('firstEdition-low.webp'));
-  check('real variant scan suppresses the name banner', (await pikaFirstEd.locator('.fx-label').count()) === 0);
+  check('real variant scan still banners its name (uniform labeling)', (await pikaFirstEd.locator('.fx-label').textContent()) === '1st Edition');
 
   // modal image follows the selected printing
   await pikaFirstEd.locator('.info-btn').click();
@@ -194,6 +196,8 @@ const { chromium } = require('playwright');
   await page.waitForSelector('.binder-grid .pocket');
   check('binder: 2×2 page shows 4 pockets', (await page.locator('.binder-grid .pocket').count()) === 4);
   check('binder: fill-from-set filled page 1', (await page.locator('.binder-grid .pocket.filled').count()) === 4);
+  check('binder: pockets carry the collection-style printing labels',
+    (await page.locator('.binder-grid .pocket.filled .fx-label').count()) === 4);
   check('binder: 5 cards → 2 pages', (await page.textContent('#view')).includes('Page 1 of 2'));
   check('binder: starts with none in hand', (await page.textContent('#view')).includes('0 / 5 in hand'));
   await page.click('.binder-grid .pocket >> nth=0');                    // tap = "I have this one"
@@ -259,9 +263,9 @@ const { chromium } = require('playwright');
   await page.waitForSelector('.picker-panel h3:has-text("Print proxies")');
   await page.click('.picker-panel .btn:has-text("Print")');
   await page.waitForFunction(() => document.body.dataset.printed === '1');
-  check('proxies: non-primary printings carry the collection-style name banner',
-    (await page.locator('#print-area .print-fx').count()) === 1 &&
-    (await page.textContent('#print-area .print-fx')).includes('1st Edition'));
+  check('proxies: every card proxy carries its collection-style printing banner',
+    (await page.locator('#print-area .print-fx').count()) === 6 &&
+    (await page.locator('#print-area .print-fx').allTextContents()).some((t) => t.includes('1st Edition')));
   await page.evaluate(() => window.dispatchEvent(new Event('afterprint')));
 
   // drag & drop a card between pockets (idx4 -> empty idx7) — dispatch the
