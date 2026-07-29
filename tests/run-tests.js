@@ -406,6 +406,15 @@ function fail(msg) {
   check('binder: cells-based art (arbitrary pockets + view + cut mode) persists',
     Array.isArray(e6.cells) && e6.cells.join(',') === '6,7' && e6.gaps === 'without' &&
     e6.view && Math.round(e6.view.s) === 200 && Math.round(e6.view.x * 2) === -21);
+  // mirroring persists on art pieces and covers alike (invalid values dropped)
+  const flSlots = { ...bArt2.binder.slots, '6': { ...e6, flip: 'xy' } };
+  await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { method: 'PUT', headers: buAuth, body: JSON.stringify({ slots: flSlots }) });
+  await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { method: 'PUT', headers: buAuth, body: JSON.stringify({ cover: { type: 'art', img: up.url, view: { x: 0, y: 0, s: 150 }, flip: 'diagonal' } }) });
+  const flGet = await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { headers: buAuth });
+  await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { method: 'PUT', headers: buAuth, body: JSON.stringify({ cover: { type: 'art', img: up.url, view: { x: 0, y: 0, s: 150 }, flip: 'y' } }) });
+  const flGet2 = await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { headers: buAuth });
+  check('binder: mirror flags persist on art and covers (junk values dropped)',
+    flGet.binder.slots['6'].flip === 'xy' && flGet.binder.cover.flip === undefined && flGet2.binder.cover.flip === 'y');
   // an art cover can carry its placement (drag/resize view, cover-units)
   const cvPut = await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { method: 'PUT', headers: buAuth, body: JSON.stringify({ cover: { type: 'art', img: up.url, view: { x: -20.5, y: 5, s: 180 } } }) });
   const cvGet = await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { headers: buAuth });

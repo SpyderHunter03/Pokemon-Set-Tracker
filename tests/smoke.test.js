@@ -313,12 +313,16 @@ const { chromium } = require('playwright');
   await page.waitForFunction(() => document.querySelectorAll('.art-cell.sel').length === 2);
   await page.click('button:has-text("Cut: with pocket spacing")');      // toggle cut mode
   await page.waitForSelector('button:has-text("Cut: without spacing")');
+  await page.click('.art-editor button:has-text("Mirror X: off")');     // mirror it too
+  await page.waitForSelector('.art-editor button:has-text("Mirror X: on")');
   await page.click('.art-editor button:has-text("Save")');
   await page.waitForFunction(() => {
-    const els = [...document.querySelectorAll('.binder-grid .pocket.art')];
+    const els = [...document.querySelectorAll('.binder-grid .pocket.art .art-bg')];
     return els.length === 2 && els.every((el) => (el.style.backgroundImage || '').includes('/bimg/'));
   });
   check('binder: picture sliced across the chosen pockets (each piece its own slice)', true);
+  check('binder: mirrored pieces render flipped',
+    (await page.locator('.binder-grid .pocket.art .art-bg >> nth=0').getAttribute('style')).includes('scale(-1, 1)'));
 
   // own cover picture: upload → place it with the drag/resize editor
   await page.click('button:has-text("Cover")');
@@ -328,12 +332,16 @@ const { chromium } = require('playwright');
   await page.setInputFiles('.picker-overlay input[type=file]', require('path').join(__dirname, 'fixtures', 'base1-4.png'));
   await page.waitForSelector('.cover-adjust .art-board img');
   check('binder: cover picture opens the placement editor', true);
+  await page.click('.cover-adjust button:has-text("Mirror Y: off")');
+  await page.waitForSelector('.cover-adjust button:has-text("Mirror Y: on")');
   await page.click('.cover-adjust button:has-text("Save")');
   await page.waitForFunction(() => {
-    const el = document.querySelector('.binder-cover-page');
+    const el = document.querySelector('.binder-cover-page .art-bg');
     return el && (el.style.backgroundImage || '').includes('/bimg/');
   });
   check('binder: adjusted cover picture painted on the cover page', true);
+  check('binder: mirrored cover renders flipped',
+    (await page.locator('.binder-cover-page .art-bg').getAttribute('style')).includes('scale(1, -1)'));
 
   // pick a set logo as the binder cover
   await page.click('button:has-text("Cover")');

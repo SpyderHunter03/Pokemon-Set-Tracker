@@ -905,3 +905,6 @@ span.chip { display: inline-flex; align-items: center; gap: 2px; }
 .prog-row { display: flex; align-items: center; gap: 8px; }
 .prog-row .muted { white-space: nowrap; font-size: 13px; }
 .prog-row .progress { margin-top: 0; }
+
+/* mirrored art renders on a child layer so buttons/labels never flip with it */
+.art-bg { position: absolute; inset: 0; }

@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.34.1';
+const APP_VERSION = '3.35.0';
 
 /* ============================================================
  * Storage helpers
@@ -105,6 +105,48 @@ async function getSet(id) {
   const set = await catGet('set?lang=' + encodeURIComponent(lang) + '&id=' + encodeURIComponent(id));
   _setDetailCache.set(id, set);
   return set;
+}
+
+const _nat = new Map();   // img url -> natural size
+const natSize = (src) => _nat.get(src) || null;
+function loadNat(src) {
+  if (_nat.has(src)) return Promise.resolve(_nat.get(src));
+  return new Promise((resolve) => {
+    const im = new Image();
+    im.onload = () => { _nat.set(src, { w: im.naturalWidth || 1, h: im.naturalHeight || 1 }); resolve(_nat.get(src)); };
+    im.onerror = () => { _nat.set(src, { w: 1, h: 1 }); resolve(_nat.get(src)); };
+    im.src = src;
+  });
+}
+
+/** paint an adjusted cover picture: view is in cover-units (100 = element
+ * width), so the same placement scales to the book page and the list tile */
+function coverArtCss(el, img, v, flip) {
+  loadNat(img).then((nat) => requestAnimationFrame(() => {
+    const pw = (el.clientWidth || 300) / 100;
+    const frameH = 100 * (el.clientHeight && el.clientWidth ? el.clientHeight / el.clientWidth : 4 / 3);
+    const { fx, fy } = flipParts(flip);
+    const sH = v.s * (nat.h / nat.w);
+    const bx = fx ? (100 - v.s - v.x) : v.x;
+    const by = fy ? (frameH - sH - v.y) : v.y;
+    const layer = artBgLayer(el);
+    layer.style.transform = (fx || fy) ? `scale(${fx ? -1 : 1}, ${fy ? -1 : 1})` : '';
+    layer.style.backgroundImage = `url("${img}")`;
+    layer.style.backgroundRepeat = 'no-repeat';
+    layer.style.backgroundSize = (v.s * pw) + 'px auto';
+    layer.style.backgroundPosition = (bx * pw) + 'px ' + (by * pw) + 'px';
+  }));
+}
+
+/** flip helpers: 'x' | 'y' | 'xy' — mirrored images are treated as the source
+ * picture, so all placement math applies to the mirrored picture directly */
+const flipParts = (flip) => ({ fx: flip === 'x' || flip === 'xy', fy: flip === 'y' || flip === 'xy' });
+const flipOf = (fx, fy) => (fx && fy ? 'xy' : fx ? 'x' : fy ? 'y' : undefined);
+/** background layer inside el that can mirror without flipping el's children */
+function artBgLayer(el) {
+  let layer = el.querySelector(':scope > .art-bg');
+  if (!layer) { layer = h('div', { class: 'art-bg' }); el.prepend(layer); }
+  return layer;
 }
 
 /** Render an unbounded result list in batches of 40 as the panel scrolls —
@@ -2367,13 +2409,7 @@ async function renderBindersPage() {
     if (src && artV) {
       const bg = h('div', { class: 'binder-cover-img' });
       tile.prepend(bg);
-      requestAnimationFrame(() => {
-        const pw = (bg.clientWidth || 200) / 100;
-        bg.style.backgroundImage = `url("${src}")`;
-        bg.style.backgroundRepeat = 'no-repeat';
-        bg.style.backgroundSize = (artV.s * pw) + 'px auto';
-        bg.style.backgroundPosition = (artV.x * pw) + 'px ' + (artV.y * pw) + 'px';
-      });
+      coverArtCss(bg, src, artV, b.cover.flip);
     }
     grid.append(tile);
   }
@@ -2450,17 +2486,6 @@ async function renderBinderPage(id) {
       binder.slots[k] = { img: e.img, cells, view: null, gaps: 'with' };
     }
   }
-  const _nat = new Map();   // img url -> natural size
-  const natSize = (src) => _nat.get(src) || null;
-  function loadNat(src) {
-    if (_nat.has(src)) return Promise.resolve(_nat.get(src));
-    return new Promise((resolve) => {
-      const im = new Image();
-      im.onload = () => { _nat.set(src, { w: im.naturalWidth || 1, h: im.naturalHeight || 1 }); resolve(_nat.get(src)); };
-      im.onerror = () => { _nat.set(src, { w: 1, h: 1 }); resolve(_nat.get(src)); };
-      im.src = src;
-    });
-  }
   /** geometry of an art entry in card-mm space (gap depends on its cut mode) */
   function artGeo(entry) {
     const gap = entry.gaps === 'without' ? 0 : GAP_MM;
@@ -2480,17 +2505,25 @@ async function renderBinderPage(id) {
   }
   /** paint one pocket's slice of the picture (unit: 'px' on screen, 'mm' in print) */
   function artPieceCss(el, entry, cellIdx, perMm, unit) {
-    loadNat(entry.img).then(() => {
+    loadNat(entry.img).then((nat) => {
       const geo = artGeo(entry);
       const v = artView(entry, geo);
       const pc = geo.pos.find((q) => q.c === cellIdx);
       if (!pc) return;
       const ox = (pc.col - geo.minC) * (CARD_W + geo.gap);
       const oy = (pc.row - geo.minR) * (CARD_H + geo.gap);
-      el.style.backgroundImage = `url("${entry.img}")`;
-      el.style.backgroundRepeat = 'no-repeat';
-      el.style.backgroundSize = (v.s * perMm) + unit + ' auto';
-      el.style.backgroundPosition = ((v.x - ox) * perMm) + unit + ' ' + ((v.y - oy) * perMm) + unit;
+      const { fx, fy } = flipParts(entry.flip);
+      const sH = v.s * (nat.h / nat.w);
+      // a mirrored slice: flip the piece element, sample the source at the
+      // mirrored offset — together they render the mirrored composed picture
+      const bx = fx ? (ox - v.x) + CARD_W - v.s : (v.x - ox);
+      const by = fy ? (oy - v.y) + CARD_H - sH : (v.y - oy);
+      const layer = artBgLayer(el);
+      layer.style.transform = (fx || fy) ? `scale(${fx ? -1 : 1}, ${fy ? -1 : 1})` : '';
+      layer.style.backgroundImage = `url("${entry.img}")`;
+      layer.style.backgroundRepeat = 'no-repeat';
+      layer.style.backgroundSize = (v.s * perMm) + unit + ' auto';
+      layer.style.backgroundPosition = (bx * perMm) + unit + ' ' + (by * perMm) + unit;
     });
   }
 
@@ -2533,17 +2566,6 @@ async function renderBinderPage(id) {
     if (c.type === 'card') { const cd = cardsById.get(c.card); return cd ? (cardImg(cd, 'high', c.variant || null) || cardImg(cd, 'low', c.variant || null)) : null; }
     return null;
   }
-  /** paint an adjusted cover picture: view is in cover-units (100 = element
-   * width), so the same placement scales to the book page and the list tile */
-  function coverArtCss(el, img, v) {
-    requestAnimationFrame(() => {
-      const pw = (el.clientWidth || 300) / 100;
-      el.style.backgroundImage = `url("${img}")`;
-      el.style.backgroundRepeat = 'no-repeat';
-      el.style.backgroundSize = (v.s * pw) + 'px auto';
-      el.style.backgroundPosition = (v.x * pw) + 'px ' + (v.y * pw) + 'px';
-    });
-  }
   function coverFace() {
     const src = coverImgSrc();
     const av = binder.cover && binder.cover.type === 'art' && binder.cover.view && binder.cover.view.s ? binder.cover.view : null;
@@ -2552,7 +2574,7 @@ async function renderBinderPage(id) {
       h('div', { class: 'cover-name' }, binder.name),
       h('div', { class: 'cover-hint muted small' }, 'Open \u2192'),
     );
-    if (src && av) coverArtCss(el, src, av);
+    if (src && av) coverArtCss(el, src, av, binder.cover.flip);
     el.addEventListener('click', () => navTo(1, 1));
     return el;
   }
@@ -2997,6 +3019,9 @@ async function renderBinderPage(id) {
     board.append(im, cellLayer);
     const scale = h('input', { type: 'range', min: '25', max: '300', step: '1' });
     const gapBtn = h('button', { class: 'btn ghost small' });
+    let { fx: flipX, fy: flipY } = flipParts(entry.flip);
+    const flipXBtn = h('button', { class: 'btn ghost small', onclick: () => { flipX = !flipX; layout(); } });
+    const flipYBtn = h('button', { class: 'btn ghost small', onclick: () => { flipY = !flipY; layout(); } });
     const status = h('div', { class: 'muted small', style: 'margin-top:4px' });
 
     let pxPerMm = 1;
@@ -3019,6 +3044,9 @@ async function renderBinderPage(id) {
         cell.style.height = (CARD_H * pxPerMm) + 'px';
         cellLayer.append(cell);
       }
+      im.style.transform = (flipX || flipY) ? `scale(${flipX ? -1 : 1}, ${flipY ? -1 : 1})` : '';
+      flipXBtn.textContent = flipX ? '\u21cb Mirror X: on' : '\u21cb Mirror X: off';
+      flipYBtn.textContent = flipY ? '\u21f5 Mirror Y: on' : '\u21f5 Mirror Y: off';
       gapBtn.textContent = gaps === 'with' ? '\u2702 Cut: with pocket spacing' : '\u2702 Cut: without spacing';
       status.textContent = `${selected.size} pocket${selected.size === 1 ? '' : 's'} selected \u2014 drag the picture to shift it, tap pockets to include them`;
       scale.value = String(Math.round((imgW / pageW()) * 100));
@@ -3061,6 +3089,7 @@ async function renderBinderPage(id) {
         h('div', { class: 'row', style: 'gap:8px; align-items:center' }, h('span', { class: 'muted small' }, 'Size'), scale),
         h('div', { class: 'row', style: 'gap:8px; flex-wrap:wrap; align-items:center' }, gapBtn,
           h('span', { class: 'muted small' }, 'With: the picture flows continuously across the binder. Without: slices are cut edge-to-edge.')),
+        h('div', { class: 'row', style: 'gap:8px; flex-wrap:wrap; align-items:center' }, flipXBtn, flipYBtn),
         status,
         h('div', { class: 'row', style: 'justify-content:flex-end; gap:8px; margin-top:6px' },
           h('button', { class: 'btn ghost small', onclick: () => overlay.remove() }, 'Cancel'),
@@ -3069,7 +3098,8 @@ async function renderBinderPage(id) {
             const cells = [...selected].sort((a, b) => a - b);
             const geo = artGeo({ img: entry.img, cells, gaps });
             binder.slots[cells[0]] = { img: entry.img, cells,
-              view: { x: imgX - geo.minC * (CARD_W + gapMm()), y: imgY - geo.minR * (CARD_H + gapMm()), s: imgW }, gaps };
+              view: { x: imgX - geo.minC * (CARD_W + gapMm()), y: imgY - geo.minR * (CARD_H + gapMm()), s: imgW }, gaps,
+              ...(flipOf(flipX, flipY) ? { flip: flipOf(flipX, flipY) } : {}) };
             if (anchor !== null && anchor !== cells[0]) delete binder.slots[anchor];
             overlay.remove();
             await save();
@@ -3120,7 +3150,7 @@ async function renderBinderPage(id) {
     };
     /** Drag to shift, slider to resize — the pocket art editor's feel, for
      * the single cover frame (3:4). Saves the placement with the cover. */
-    async function openCoverAdjust(img, existing) {
+    async function openCoverAdjust(img, existing, flip) {
       const nat = await loadNat(img);
       const CW = 100, CH = CW * (4 / 3);   // cover-units; the page is 3:4
       let vw, vx, vy;
@@ -3134,6 +3164,9 @@ async function renderBinderPage(id) {
       const im = h('img', { src: img, draggable: 'false', alt: '' });
       board.append(im);
       const scale = h('input', { type: 'range', min: '25', max: '300', step: '1' });
+      let { fx: flipX, fy: flipY } = flipParts(flip);
+      const flipXBtn = h('button', { class: 'btn ghost small', onclick: () => { flipX = !flipX; layout(); } });
+      const flipYBtn = h('button', { class: 'btn ghost small', onclick: () => { flipY = !flipY; layout(); } });
       let pxPerU = 1;
       function layout() {
         const bw = Math.min(330, Math.max(220, (view.clientWidth || 320) - 90));
@@ -3143,6 +3176,9 @@ async function renderBinderPage(id) {
         im.style.width = (vw * pxPerU) + 'px';
         im.style.left = (vx * pxPerU) + 'px';
         im.style.top = (vy * pxPerU) + 'px';
+        im.style.transform = (flipX || flipY) ? `scale(${flipX ? -1 : 1}, ${flipY ? -1 : 1})` : '';
+        flipXBtn.textContent = flipX ? '\u21cb Mirror X: on' : '\u21cb Mirror X: off';
+        flipYBtn.textContent = flipY ? '\u21f5 Mirror Y: on' : '\u21f5 Mirror Y: off';
         scale.value = String(Math.round((vw / CW) * 100));
       }
       let drag = null;
@@ -3169,12 +3205,14 @@ async function renderBinderPage(id) {
           h('h3', {}, 'Place your cover picture'),
           board,
           h('div', { class: 'row', style: 'gap:8px; align-items:center' }, h('span', { class: 'muted small' }, 'Size'), scale),
+          h('div', { class: 'row', style: 'gap:8px; flex-wrap:wrap; align-items:center' }, flipXBtn, flipYBtn),
           h('div', { class: 'muted small' }, 'Drag the picture to shift it.'),
           h('div', { class: 'row', style: 'justify-content:flex-end; gap:8px; margin-top:6px' },
             h('button', { class: 'btn ghost small', onclick: () => adj.remove() }, 'Cancel'),
             h('button', { class: 'btn small', onclick: async () => {
               adj.remove();
-              await setCover({ type: 'art', img, view: { x: vx, y: vy, s: vw } });
+              await setCover({ type: 'art', img, view: { x: vx, y: vy, s: vw },
+                ...(flipOf(flipX, flipY) ? { flip: flipOf(flipX, flipY) } : {}) });
             } }, 'Save'),
           ),
         ));
@@ -3190,7 +3228,7 @@ async function renderBinderPage(id) {
           const res = await fetch('api/binder-image', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': f.type || 'application/octet-stream' }, body: f });
           const data = await res.json();
           if (!res.ok) throw new Error(data.error || 'Upload failed');
-          openCoverAdjust(data.url, null);   // place it before saving
+          openCoverAdjust(data.url, null, null);   // place it before saving
         } catch (err) { toast(err.message); }
         e.target.value = '';
       });
@@ -3205,7 +3243,7 @@ async function renderBinderPage(id) {
       mode('Color only', () => setCover(null)),
     );
     if (binder.cover && binder.cover.type === 'art') {
-      modes.append(mode('\u270e Adjust picture', () => openCoverAdjust(binder.cover.img, binder.cover.view || null)));
+      modes.append(mode('\u270e Adjust picture', () => openCoverAdjust(binder.cover.img, binder.cover.view || null, binder.cover.flip)));
     }
     const overlay = h('div', { class: 'picker-overlay' },
       h('div', { class: 'picker-panel' },

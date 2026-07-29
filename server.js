@@ -240,7 +240,10 @@ function cleanBinderCover(c) {
     const view = (c.view && typeof c.view === 'object')
       ? { x: num(c.view.x, -5000, 5000) ?? 0, y: num(c.view.y, -5000, 5000) ?? 0, s: num(c.view.s, 5, 10000) }
       : null;
-    return view && view.s ? { type: 'art', img: c.img, view } : { type: 'art', img: c.img };
+    const flip = ['x', 'y', 'xy'].includes(c.flip) ? c.flip : null;
+    const out = view && view.s ? { type: 'art', img: c.img, view } : { type: 'art', img: c.img };
+    if (flip) out.flip = flip;
+    return out;
   }
   return null;
 }
@@ -1864,7 +1867,9 @@ async function handleApi(req, res, pathname, ip, url) {
               const view = (v.view && typeof v.view === 'object')
                 ? { x: num(v.view.x, -5000, 5000) ?? 0, y: num(v.view.y, -5000, 5000) ?? 0, s: num(v.view.s, 5, 10000) }
                 : null;
-              clean[i] = { img: v.img, cells, view: view && view.s ? view : null, gaps: v.gaps === 'without' ? 'without' : 'with' };
+              const flip = ['x', 'y', 'xy'].includes(v.flip) ? v.flip : null;
+              clean[i] = { img: v.img, cells, view: view && view.s ? view : null, gaps: v.gaps === 'without' ? 'without' : 'with',
+                ...(flip ? { flip } : {}) };
               continue;
             }
             // legacy rectangular span { img, w, h } (pre-editor clients)
