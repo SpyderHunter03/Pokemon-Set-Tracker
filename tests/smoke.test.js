@@ -343,6 +343,12 @@ const { chromium } = require('playwright');
   check('binder: the tapped pocket starts selected', (await page.locator('.art-cell.sel').count()) === 1);
   await page.click('.art-cell[data-cell="9"]');                         // include a second pocket
   await page.waitForFunction(() => document.querySelectorAll('.art-cell.sel').length === 2);
+  // exact numbers: type a position and the picture lands precisely there
+  await page.fill('.art-editor input.num-x', '0');
+  await page.fill('.art-editor input.num-y', '0');
+  check('binder: typed X/Y place the picture exactly (0,0 → top-left corner)',
+    (await page.locator('.art-editor .art-board img').getAttribute('style')).includes('left: 0px') &&
+    (await page.locator('.art-editor .art-board img').getAttribute('style')).includes('top: 0px'));
   await page.click('button:has-text("Cut: with pocket spacing")');      // toggle cut mode
   await page.waitForSelector('button:has-text("Cut: without spacing")');
   await page.click('.art-editor button:has-text("Mirror X: off")');     // mirror it too
@@ -364,6 +370,9 @@ const { chromium } = require('playwright');
   await page.setInputFiles('.picker-overlay input[type=file]', require('path').join(__dirname, 'fixtures', 'base1-4.png'));
   await page.waitForSelector('.cover-adjust .art-board img');
   check('binder: cover picture opens the placement editor', true);
+  check('binder: cover editor shows exact X/Y/Size fields',
+    (await page.locator('.cover-adjust input.num-x').count()) === 1 &&
+    (await page.locator('.cover-adjust input.num-s').inputValue()) !== '');
   await page.click('.cover-adjust button:has-text("Mirror Y: off")');
   await page.waitForSelector('.cover-adjust button:has-text("Mirror Y: on")');
   await page.click('.cover-adjust button:has-text("Save")');

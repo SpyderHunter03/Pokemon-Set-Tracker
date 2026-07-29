@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.36.1';
+const APP_VERSION = '3.37.0';
 
 /* ============================================================
  * Storage helpers
@@ -3018,6 +3018,9 @@ async function renderBinderPage(id) {
     const cellLayer = h('div', { class: 'art-cells' });
     board.append(im, cellLayer);
     const scale = h('input', { type: 'range', min: '25', max: '300', step: '1' });
+    // exact numbers: read them off one page, type them on the next to match
+    const numIn = (cls) => h('input', { type: 'number', step: '0.1', class: cls, style: 'flex:none; width:76px' });
+    const xNum = numIn('num-x'), yNum = numIn('num-y'), sNum = numIn('num-s');
     const gapBtn = h('button', { class: 'btn ghost small' });
     let { fx: flipX, fy: flipY } = flipParts(entry.flip);
     const flipXBtn = h('button', { class: 'btn ghost small', onclick: () => { flipX = !flipX; layout(); } });
@@ -3044,6 +3047,10 @@ async function renderBinderPage(id) {
         cell.style.height = (CARD_H * pxPerMm) + 'px';
         cellLayer.append(cell);
       }
+      const r1 = (n) => Math.round(n * 10) / 10;
+      if (document.activeElement !== xNum) xNum.value = String(r1(imgX));
+      if (document.activeElement !== yNum) yNum.value = String(r1(imgY));
+      if (document.activeElement !== sNum) sNum.value = String(r1((imgW / pageW()) * 100));
       im.style.transform = (flipX || flipY) ? `scale(${flipX ? -1 : 1}, ${flipY ? -1 : 1})` : '';
       flipXBtn.textContent = flipX ? '\u21cb Mirror X: on' : '\u21cb Mirror X: off';
       flipYBtn.textContent = flipY ? '\u21f5 Mirror Y: on' : '\u21f5 Mirror Y: off';
@@ -3081,6 +3088,10 @@ async function renderBinderPage(id) {
       layout();
     });
     gapBtn.addEventListener('click', () => { gaps = gaps === 'with' ? 'without' : 'with'; layout(); });
+    // typed values apply as-is (size keeps X/Y anchored, unlike the slider)
+    xNum.addEventListener('input', () => { const v = parseFloat(xNum.value); if (Number.isFinite(v)) { imgX = v; layout(); } });
+    yNum.addEventListener('input', () => { const v = parseFloat(yNum.value); if (Number.isFinite(v)) { imgY = v; layout(); } });
+    sNum.addEventListener('input', () => { const v = parseFloat(sNum.value); if (Number.isFinite(v) && v >= 5 && v <= 500) { imgW = (v / 100) * pageW(); layout(); } });
 
     const overlay = h('div', { class: 'picker-overlay' },
       h('div', { class: 'picker-panel art-editor' },
@@ -3090,6 +3101,11 @@ async function renderBinderPage(id) {
         h('div', { class: 'row', style: 'gap:8px; flex-wrap:wrap; align-items:center' }, gapBtn,
           h('span', { class: 'muted small' }, 'With: the picture flows continuously across the binder. Without: slices are cut edge-to-edge.')),
         h('div', { class: 'row', style: 'gap:8px; flex-wrap:wrap; align-items:center' }, flipXBtn, flipYBtn),
+        h('div', { class: 'row', style: 'gap:8px; flex-wrap:wrap; align-items:center' },
+          h('span', { class: 'muted small' }, 'Exact:'),
+          h('label', { class: 'ce-var' }, 'X ', xNum), h('label', { class: 'ce-var' }, 'Y ', yNum),
+          h('label', { class: 'ce-var' }, 'Size % ', sNum),
+          h('span', { class: 'muted small' }, 'mm from the page\u2019s top-left pocket \u2014 copy them to match another page exactly')),
         status,
         h('div', { class: 'row', style: 'justify-content:flex-end; gap:8px; margin-top:6px' },
           h('button', { class: 'btn ghost small', onclick: () => overlay.remove() }, 'Cancel'),
@@ -3164,6 +3180,8 @@ async function renderBinderPage(id) {
       const im = h('img', { src: img, draggable: 'false', alt: '' });
       board.append(im);
       const scale = h('input', { type: 'range', min: '25', max: '300', step: '1' });
+      const numIn = (cls) => h('input', { type: 'number', step: '0.1', class: cls, style: 'flex:none; width:76px' });
+      const xNum = numIn('num-x'), yNum = numIn('num-y'), sNum = numIn('num-s');
       let { fx: flipX, fy: flipY } = flipParts(flip);
       const flipXBtn = h('button', { class: 'btn ghost small', onclick: () => { flipX = !flipX; layout(); } });
       const flipYBtn = h('button', { class: 'btn ghost small', onclick: () => { flipY = !flipY; layout(); } });
@@ -3180,7 +3198,14 @@ async function renderBinderPage(id) {
         flipXBtn.textContent = flipX ? '\u21cb Mirror X: on' : '\u21cb Mirror X: off';
         flipYBtn.textContent = flipY ? '\u21f5 Mirror Y: on' : '\u21f5 Mirror Y: off';
         scale.value = String(Math.round((vw / CW) * 100));
+        const r1 = (n) => Math.round(n * 10) / 10;
+        if (document.activeElement !== xNum) xNum.value = String(r1(vx));
+        if (document.activeElement !== yNum) yNum.value = String(r1(vy));
+        if (document.activeElement !== sNum) sNum.value = String(r1((vw / CW) * 100));
       }
+      xNum.addEventListener('input', () => { const v = parseFloat(xNum.value); if (Number.isFinite(v)) { vx = v; layout(); } });
+      yNum.addEventListener('input', () => { const v = parseFloat(yNum.value); if (Number.isFinite(v)) { vy = v; layout(); } });
+      sNum.addEventListener('input', () => { const v = parseFloat(sNum.value); if (Number.isFinite(v) && v >= 5 && v <= 500) { vw = (v / 100) * CW; layout(); } });
       let drag = null;
       board.addEventListener('pointerdown', (e) => {
         drag = { x: e.clientX, y: e.clientY, ix: vx, iy: vy };
@@ -3206,6 +3231,11 @@ async function renderBinderPage(id) {
           board,
           h('div', { class: 'row', style: 'gap:8px; align-items:center' }, h('span', { class: 'muted small' }, 'Size'), scale),
           h('div', { class: 'row', style: 'gap:8px; flex-wrap:wrap; align-items:center' }, flipXBtn, flipYBtn),
+          h('div', { class: 'row', style: 'gap:8px; flex-wrap:wrap; align-items:center' },
+            h('span', { class: 'muted small' }, 'Exact:'),
+            h('label', { class: 'ce-var' }, 'X ', xNum), h('label', { class: 'ce-var' }, 'Y ', yNum),
+            h('label', { class: 'ce-var' }, 'Size % ', sNum),
+            h('span', { class: 'muted small' }, 'cover-units (100 = cover width)')),
           h('div', { class: 'muted small' }, 'Drag the picture to shift it.'),
           h('div', { class: 'row', style: 'justify-content:flex-end; gap:8px; margin-top:6px' },
             h('button', { class: 'btn ghost small', onclick: () => adj.remove() }, 'Cancel'),
