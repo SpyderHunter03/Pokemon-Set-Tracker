@@ -601,6 +601,69 @@ function fail(msg) {
   check('update: the install’s own local printing SURVIVED the master update',
     pika && pika.printings && pika.printings['my-local-promo'] === 'My Local Promo');
 
+  // ---- reviewed updates: the master ADDS a set, a card, and a variant;
+  //      the install's admin previews, takes some, soft-bypasses the rest ----
+  {
+    const { DatabaseSync } = require('node:sqlite');
+    const mdb = new DatabaseSync(path.join(ROOT, '.test-data', 'ptcg.db'));
+    mdb.exec("INSERT INTO sets (lang,id,name,official_count,position,source,hidden) VALUES ('en','promo-z','Promo Z',1,999,'master',0)");
+    mdb.exec("INSERT INTO cards (lang,id,set_id,local_id,name,variants_csv,position,source,hidden) VALUES ('en','promo-z-1','promo-z','1','Zapdos Promo','normal',0,'master',0)");
+    mdb.exec("INSERT INTO cards (lang,id,set_id,local_id,name,variants_csv,position,source,hidden) VALUES ('en','base1-200','base1','200','Extra Card','normal',9000,'master',0)");
+    mdb.exec("UPDATE cards SET variants_csv = variants_csv || ',reverse' WHERE lang='en' AND id='base1-58'");
+    mdb.close();
+  }
+  const pub6 = spawnSync('node', ['scripts/publish-images.js'], { cwd: ROOT, env: { ...process.env, ...r2env }, encoding: 'utf8' });
+  if (pub6.status !== 0) fail('v3 publish failed: ' + (pub6.stdout || '') + (pub6.stderr || ''));
+  const rvPrev = await jfetch('http://localhost:3117/api/catalog/preview', { method: 'POST', headers: pAuth, body: '{}' });
+  check('review: preview lists the master’s new set, new card, and new printing',
+    (rvPrev.newSets || []).some((x) => x.id === 'promo-z' && x.cards === 1) &&
+    (rvPrev.newCards || []).some((g) => g.set === 'base1' && g.cards.some((c) => c.id === 'base1-200')) &&
+    (rvPrev.newVariants || []).some((v) => v.card === 'base1-58' && v.variant === 'reverse') &&
+    rvPrev.additions >= 3);
+  // take the new card; bypass the new set and the new printing
+  await jfetch('http://localhost:3117/api/catalog/pull', { method: 'POST', headers: pAuth, body: JSON.stringify({
+    bypass: { sets: [{ lang: 'en', id: 'promo-z' }], cards: [], variants: [{ lang: 'en', card: 'base1-58', variant: 'reverse' }] },
+  }) });
+  let rvDone = null;
+  for (let i = 0; i < 120 && !rvDone; i++) {
+    const st = await jfetch('http://localhost:3117/api/build-status');
+    if (!st.running) rvDone = st; else await new Promise((r) => setTimeout(r, 300));
+  }
+  const rvIdx = await jfetch('http://localhost:3117/api/catalog/index?lang=en');
+  const rvBase = await jfetch('http://localhost:3117/api/catalog/set?lang=en&id=base1');
+  const rvNew = (rvBase.cards || []).find((c) => c.id === 'base1-200');
+  const rvPika = (rvBase.cards || []).find((c) => c.id === 'base1-58');
+  check('review: accepted card arrived; bypassed set and printing stay invisible',
+    rvDone && !rvDone.error && !!rvNew &&
+    !(rvIdx.sets || []).some((x) => x.id === 'promo-z') &&
+    rvPika && rvPika.variants && !rvPika.variants.reverse);
+  {
+    const { DatabaseSync } = require('node:sqlite');
+    const idb = new DatabaseSync(path.join(pullRoot, 'data', 'ptcg.db'));
+    const zs = idb.prepare("SELECT hidden, source FROM sets WHERE lang='en' AND id='promo-z'").get();
+    const zc = idb.prepare("SELECT hidden FROM cards WHERE lang='en' AND id='promo-z-1'").get();
+    const rv = idb.prepare("SELECT hidden, source FROM printings WHERE lang='en' AND card_id='base1-58' AND variant='reverse'").get();
+    idb.close();
+    check('review: bypassed items are stored hidden (soft), not dropped',
+      zs && zs.hidden === 1 && zs.source === 'local' &&
+      zc && zc.hidden === 1 &&
+      rv && rv.hidden === 1 && rv.source === 'local');
+  }
+  const rvPrev2 = await jfetch('http://localhost:3117/api/catalog/preview', { method: 'POST', headers: pAuth, body: '{}' });
+  check('review: a later preview does not re-offer bypassed items',
+    !(rvPrev2.newSets || []).some((x) => x.id === 'promo-z') &&
+    !(rvPrev2.newVariants || []).some((v) => v.card === 'base1-58' && v.variant === 'reverse') &&
+    !(rvPrev2.newCards || []).some((g) => g.cards.some((c) => c.id === 'base1-200')));
+  // a bypassed set can be restored later — cards come back with it
+  const hsList = await jfetch('http://localhost:3117/api/hidden-sets?lang=en', { headers: pAuth });
+  await jfetch('http://localhost:3117/api/set-hide', { method: 'POST', headers: pAuth, body: JSON.stringify({ id: 'promo-z', hidden: false, lang: 'en' }) });
+  const rvIdx2 = await jfetch('http://localhost:3117/api/catalog/index?lang=en');
+  const rvZ = await jfetch('http://localhost:3117/api/catalog/set?lang=en&id=promo-z');
+  check('review: a bypassed set restores later, cards included',
+    (hsList.sets || []).some((x) => x.id === 'promo-z') &&
+    (rvIdx2.sets || []).some((x) => x.id === 'promo-z') &&
+    ((rvZ && rvZ.cards) || []).some((c) => c.id === 'promo-z-1'));
+
   // ---- a workspace seeded by PULLING the master (no local image tree)
   //      can still publish — catalog only, images stay on the bucket ----
   // (the scan-index fallback caches into public/cdn, so clear it to get the
@@ -618,7 +681,7 @@ function fail(msg) {
   });
   const wsOut = (wsPub.stdout || '') + (wsPub.stderr || '');
   check('image-less workspace publishes the master catalog (no public/cdn needed)',
-    wsPub.status === 0 && /publishing the master catalog only/.test(wsOut) && /version 3/.test(wsOut));
+    wsPub.status === 0 && /publishing the master catalog only/.test(wsOut) && /version 4/.test(wsOut));   // v3 was the reviewed-additions publish above
 
   const pullOk = catRes.ok && pullCfg.remoteCatalog === 'http://localhost:3998/cards' && pullStats.cards > 10 &&
     pullCard && pullCard.printings && pullCard.printings['cracked-ice-holo'] === 'Cracked Ice Holo' &&

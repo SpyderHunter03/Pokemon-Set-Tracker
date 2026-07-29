@@ -907,3 +907,7 @@ body.printing-proxies #print-area {
 }
 .ce-vars { display: flex; flex-wrap: wrap; gap: 4px 14px; }
 .ce-var { display: inline-flex; align-items: center; gap: 5px; font-size: 14px; cursor: pointer; }
+
+/* ---------- master update review (choose additions before pulling) ---------- */
+.pr-row { display: flex; align-items: center; gap: 7px; padding: 3px 0; cursor: pointer; }
+.pr-head { margin: 12px 0 4px; }

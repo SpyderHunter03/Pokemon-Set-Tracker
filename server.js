@@ -926,15 +926,112 @@ async function importCatalogFromRemote(base, progressCb) {
   return { sets: nSets, cards: nCards, printings: nPrint, version };
 }
 
+/** Soft-bypass reviewed additions right after a pull: everything stays in the
+ * table, just hidden + source='local' — future pulls see the original row and
+ * bypass it, and the admin can restore any of it later. */
+function applyBypass(bp) {
+  let n = 0;
+  db.exec('BEGIN');
+  try {
+    for (const x of bp.sets || []) { _setHide.run(1, x.lang, x.id); _hideCardsOfSet.run(x.lang, x.id); n++; }
+    for (const x of bp.cards || []) { _cardHide.run(1, x.lang, x.id); n++; }
+    for (const x of bp.variants || []) { _printingHide.run(x.lang, x.card, x.variant); n++; }
+    db.exec('COMMIT');
+  } catch (e) { db.exec('ROLLBACK'); throw e; }
+  return n;
+}
+
+/** What would a master pull ADD to this install? New sets, new cards in
+ * existing sets, and new printings of existing cards — for the admin's
+ * review step. Reads only; nothing here mutates the database. */
+async function previewRemoteAdditions(base) {
+  base = base.replace(/\/+$/, '');
+  const { DatabaseSync } = require('node:sqlite');
+  const res = await fetch(base + '/catalog.db');
+  if (!res.ok) { const e = new Error('HTTP ' + res.status + ' for catalog.db'); e.status = res.status; throw e; }
+  const tmp = path.join(DATA_DIR, `.catalog-preview-${process.pid}.db`);
+  fs.writeFileSync(tmp, Buffer.from(await res.arrayBuffer()));
+  let src;
+  try {
+    src = new DatabaseSync(tmp);
+    let version = null;
+    try { version = Number((src.prepare("SELECT value FROM meta WHERE key='version'").get() || {}).value) || null; } catch { /* pre-versioning */ }
+    const haveSet = new Set(db.prepare('SELECT lang, id FROM sets').all().map((r) => r.lang + '\n' + r.id));
+    const localCards = new Map(db.prepare('SELECT lang, id, variants_csv FROM cards').all().map((r) => [r.lang + '\n' + r.id, r]));
+    const localPrints = new Set(db.prepare('SELECT lang, card_id, variant FROM printings').all().map((r) => r.lang + '\n' + r.card_id + '\n' + r.variant));
+    const splitVars = (csv) => (csv == null ? ['normal'] : csv.split(',')).filter(Boolean);
+
+    const masterSets = src.prepare('SELECT lang, id, name FROM sets WHERE hidden = 0 ORDER BY position').all();
+    const setNames = new Map(masterSets.map((x) => [x.lang + '\n' + x.id, x.name]));
+    const newSets = [], newSetKeys = new Set();
+    for (const x of masterSets) {
+      const k = x.lang + '\n' + x.id;
+      if (haveSet.has(k)) continue;   // present — visible OR already bypassed
+      newSets.push({ lang: x.lang, id: x.id, name: x.name,
+        cards: src.prepare('SELECT COUNT(*) AS n FROM cards WHERE lang = ? AND set_id = ? AND hidden = 0').get(x.lang, x.id).n });
+      newSetKeys.add(k);
+    }
+
+    const cardMeta = new Map();   // for naming variant rows
+    const newCardsBySet = new Map(), newVariants = [], seenVar = new Set();
+    for (const c of src.prepare('SELECT lang, id, set_id, local_id, name, variants_csv FROM cards WHERE hidden = 0 ORDER BY lang, set_id, position, local_id').all()) {
+      cardMeta.set(c.lang + '\n' + c.id, c);
+      if (newSetKeys.has(c.lang + '\n' + c.set_id)) continue;   // travels with its new set
+      const local = localCards.get(c.lang + '\n' + c.id);
+      if (!local) {
+        const k = c.lang + '\n' + c.set_id;
+        if (!newCardsBySet.has(k)) newCardsBySet.set(k, { lang: c.lang, set: c.set_id, setName: setNames.get(k) || c.set_id, cards: [] });
+        newCardsBySet.get(k).cards.push({ id: c.id, localId: c.local_id, name: c.name });
+        continue;
+      }
+      // existing card — printings the master has that this install lacks.
+      // A tombstoned printing counts as present, so it is never re-offered.
+      const localVars = new Set(splitVars(local.variants_csv));
+      for (const v of splitVars(c.variants_csv)) {
+        const vk = c.lang + '\n' + c.id + '\n' + v;
+        if (!localVars.has(v) && !localPrints.has(vk) && !seenVar.has(vk)) {
+          seenVar.add(vk);
+          newVariants.push({ lang: c.lang, card: c.id, localId: c.local_id, name: c.name, set: c.set_id, variant: v });
+        }
+      }
+    }
+    let mPrints;
+    try { mPrints = src.prepare('SELECT lang, card_id, variant, label, hidden FROM printings').all(); }
+    catch { mPrints = src.prepare('SELECT lang, card_id, variant, label FROM printings').all(); }
+    for (const pr of mPrints) {
+      if (pr.hidden) continue;
+      const vk = pr.lang + '\n' + pr.card_id + '\n' + pr.variant;
+      if (localPrints.has(vk) || seenVar.has(vk)) continue;
+      const meta = cardMeta.get(pr.lang + '\n' + pr.card_id);
+      if (!meta || !localCards.has(pr.lang + '\n' + pr.card_id)) continue;   // arrives with its card
+      if (newSetKeys.has(pr.lang + '\n' + meta.set_id)) continue;
+      seenVar.add(vk);
+      newVariants.push({ lang: pr.lang, card: pr.card_id, localId: meta.local_id, name: meta.name, set: meta.set_id, variant: pr.variant, label: pr.label || undefined });
+    }
+    const newCards = [...newCardsBySet.values()];
+    const additions = newSets.length + newCards.reduce((a, g) => a + g.cards.length, 0) + newVariants.length;
+    return { version, additions, newSets, newCards, newVariants };
+  } finally {
+    if (src) { try { src.close(); } catch { /* already closed */ } }
+    try { fs.rmSync(tmp, { force: true }); } catch { /* temp */ }
+  }
+}
+
 /** Background job: pull the catalog from a remote database into this DB. */
-function startCatalogPull(base) {
+function startCatalogPull(base, bypass) {
   build = { running: true, phase: 'import', startedAt: Date.now(), error: null, hashesOk: null, log: [] };
   pushLog('Loading the card database from ' + base);
   const progress = { startedAt: new Date().toISOString(), catalogPull: true, setsDone: 0, setTotal: 0, setName: null, done: false, error: null };
   const write = (extra) => { Object.assign(progress, extra); try { writeJSONAtomic(PROGRESS_FILE, progress); } catch { /* cosmetic */ } };
   write({});
   importCatalogFromRemote(base, (p) => write(p))
-    .then((r) => { write({ done: true, finishedAt: new Date().toISOString() }); build.running = false; build.phase = null; build.hashesOk = true; pushLog(`Card database loaded: ${r.cards} cards, ${r.sets} sets`); })
+    .then((r) => {
+      let skipped = 0;
+      if (bypass) { try { skipped = applyBypass(bypass); } catch (e) { pushLog('Review step failed: ' + e.message); } }
+      write({ done: true, finishedAt: new Date().toISOString() });
+      build.running = false; build.phase = null; build.hashesOk = true;
+      pushLog(`Card database loaded: ${r.cards} cards, ${r.sets} sets` + (skipped ? ` — ${skipped} addition(s) bypassed (stored hidden)` : ''));
+    })
     .catch((e) => { build.running = false; build.phase = null; build.error = 'Loading the card database failed: ' + e.message + ' (safe to retry)'; write({ error: e.message }); });
 }
 
@@ -1025,6 +1122,10 @@ const _localSetPut = db.prepare(`INSERT INTO sets (lang,id,name,release_date,log
 const _cardHide = db.prepare("UPDATE cards SET hidden = ?, source = 'local' WHERE lang = ? AND id = ?");
 const _printingHide = db.prepare(`INSERT INTO printings (lang, card_id, variant, hidden, source) VALUES (?,?,?, 1, 'local')
   ON CONFLICT(lang, card_id, variant) DO UPDATE SET hidden = 1, source = 'local'`);
+const _setHide = db.prepare("UPDATE sets SET hidden = ?, source = 'local' WHERE lang = ? AND id = ?");
+const _hideCardsOfSet = db.prepare("UPDATE cards SET hidden = 1, source = 'local' WHERE lang = ? AND set_id = ?");
+const _unhideCardsOfSet = db.prepare("UPDATE cards SET hidden = 0 WHERE lang = ? AND set_id = ? AND hidden = 1 AND source = 'local'");
+const _hiddenSets = db.prepare('SELECT id, name FROM sets WHERE lang = ? AND hidden = 1 ORDER BY position, id');
 const _allPrints = db.prepare('SELECT variant, hidden FROM printings WHERE lang = ? AND card_id = ?');
 const _printingUnhide = db.prepare("UPDATE printings SET hidden = 0, source = 'local' WHERE lang = ? AND card_id = ? AND variant = ? AND hidden = 1");
 const _hiddenOfSet = db.prepare('SELECT id, local_id, name FROM cards WHERE lang = ? AND set_id = ? AND hidden = 1 ORDER BY position, local_id');
@@ -1145,6 +1246,14 @@ async function handleApi(req, res, pathname, ip, url) {
     return sendJSON(res, 200, { cards: _hiddenOfSet.all(qLang, setId).map((c) => ({ id: c.id, localId: c.local_id, name: c.name })) });
   }
 
+  // hidden (bypassed) sets — lets the admin see and restore them
+  if (pathname === '/api/hidden-sets' && req.method === 'GET') {
+    const hUser = authUser(req);
+    if (!hUser || !isAdminUser(hUser)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    const qLang = LANG_RE.test(url.searchParams.get('lang') || '') ? url.searchParams.get('lang') : 'en';
+    return sendJSON(res, 200, { sets: _hiddenSets.all(qLang).map((x) => ({ id: x.id, name: x.name })) });
+  }
+
   // how many cards/sets/printings are in the database catalog
   if (pathname === '/api/catalog/stats' && req.method === 'GET') {
     return sendJSON(res, 200, catalogStats());
@@ -1248,8 +1357,29 @@ async function handleApi(req, res, pathname, ip, url) {
     if (build.running) return sendJSON(res, 409, { error: 'Another job is already running' });
     const base = configCdnBase();
     if (!base) return sendJSON(res, 400, { error: 'No remote database is configured (set cdnBase in public/config.js)' });
-    startCatalogPull(base);
+    // optional reviewed additions to bypass (from /api/catalog/preview):
+    // bypassed items still land in the table, just hidden + source='local'
+    const body = await readBody(req);
+    const bp = body && body.bypass && typeof body.bypass === 'object' && !Array.isArray(body.bypass) ? body.bypass : null;
+    const bypass = bp ? {
+      sets: (Array.isArray(bp.sets) ? bp.sets : []).filter((x) => x && LANG_RE.test(x.lang || '') && SET_ID_RE.test(x.id || '')).map((x) => ({ lang: x.lang, id: x.id })).slice(0, 5000),
+      cards: (Array.isArray(bp.cards) ? bp.cards : []).filter((x) => x && LANG_RE.test(x.lang || '') && CARD_ID_RE.test(x.id || '')).map((x) => ({ lang: x.lang, id: x.id })).slice(0, 20000),
+      variants: (Array.isArray(bp.variants) ? bp.variants : []).filter((x) => x && LANG_RE.test(x.lang || '') && CARD_ID_RE.test(x.card || '') && VARIANT_KEY_RE.test(x.variant || '')).map((x) => ({ lang: x.lang, card: x.card, variant: x.variant })).slice(0, 20000),
+    } : null;
+    startCatalogPull(base, bypass);
     return sendJSON(res, 200, { ok: true, started: true, source: base });
+  }
+
+  // what a master update would ADD — the admin reviews this before pulling
+  if (pathname === '/api/catalog/preview' && req.method === 'POST') {
+    if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
+    const admin = authUser(req);
+    if (!admin || !isAdminUser(admin)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    if (build.running) return sendJSON(res, 409, { error: 'Another job is already running' });
+    const base = configCdnBase();
+    if (!base) return sendJSON(res, 400, { error: 'No remote database is configured (set cdnBase in public/config.js)' });
+    try { return sendJSON(res, 200, await previewRemoteAdditions(base)); }
+    catch (e) { return sendJSON(res, 502, { error: 'Could not read the master database: ' + e.message }); }
   }
 
   if (pathname === '/api/build-status' && req.method === 'GET') {
@@ -1495,6 +1625,22 @@ async function handleApi(req, res, pathname, ip, url) {
     if (all.size <= 1) return sendJSON(res, 400, { error: 'A card needs at least one printing — hide the whole card instead' });
     _printingHide.run(cLang, cardId, variant);
     return sendJSON(res, 200, { ok: true, cardId, variant, removed: true });
+  }
+
+  // ---- admin: hide (tombstone) or restore a whole set ----
+  // Restoring also unhides the set's own soft-hidden cards.
+  if (pathname === '/api/set-hide' && req.method === 'POST') {
+    if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
+    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    const body = await readBody(req);
+    const cLang = LANG_RE.test(body.lang || '') ? body.lang : 'en';
+    const setId = typeof body.id === 'string' && SET_ID_RE.test(body.id) ? body.id : null;
+    if (!setId) return sendJSON(res, 400, { error: 'A valid set id is required' });
+    if (!_setRow.get(cLang, setId)) return sendJSON(res, 404, { error: `Set ${setId} not found in the ${cLang} database` });
+    const hide = body.hidden !== false;   // default: hide
+    _setHide.run(hide ? 1 : 0, cLang, setId);
+    if (hide) _hideCardsOfSet.run(cLang, setId); else _unhideCardsOfSet.run(cLang, setId);
+    return sendJSON(res, 200, { ok: true, id: setId, hidden: hide });
   }
 
   // ---- admin: upload the card's own picture (its base image) ----

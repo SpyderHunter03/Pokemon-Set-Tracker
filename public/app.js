@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.25.1';
+const APP_VERSION = '3.26.0';
 
 /* ============================================================
  * Storage helpers
@@ -818,8 +818,8 @@ async function startDatabaseBuild() {
 }
 
 // Pull the catalog from the configured remote database (R2) into this server's DB.
-async function startCatalogPull() {
-  return apiCall('catalog/pull', { method: 'POST', body: JSON.stringify({}) });
+async function startCatalogPull(bypass) {
+  return apiCall('catalog/pull', { method: 'POST', body: JSON.stringify(bypass ? { bypass } : {}) });
 }
 
 /** Live progress element; polls until the build finishes, then calls onDone. */
@@ -1027,14 +1027,38 @@ async function renderHome() {
   );
 
   const homeMe = await ensureMe();
-  const newSetBtn = (homeMe && homeMe.admin && !appConfig.readonly)
+  const homeAdmin = !!(homeMe && homeMe.admin) && !appConfig.readonly;
+  const newSetBtn = homeAdmin
     ? h('button', { class: 'chip', onclick: () => openSetCreator(() => renderHome()) }, '＋ New set')
     : null;
+
+  // admins can see and restore hidden (bypassed) sets
+  const hiddenSetsWrap = h('div', {});
+  if (homeAdmin) {
+    (async () => {
+      let hs;
+      try { hs = await apiCall('hidden-sets?lang=' + encodeURIComponent(lang)); } catch { return; }
+      if (!hs.sets || !hs.sets.length) return;
+      hiddenSetsWrap.append(
+        h('h3', { class: 'muted', style: 'margin:20px 0 6px' }, `Hidden sets (${hs.sets.length})`),
+        ...hs.sets.map((x) => h('div', { class: 'row', style: 'gap:10px; align-items:center; margin:4px 0' },
+          h('span', {}, x.name),
+          h('button', { class: 'btn ghost small', onclick: async () => {
+            try {
+              await apiCall('set-hide', { method: 'POST', body: JSON.stringify({ id: x.id, hidden: false, lang }) });
+              clearDataCaches();
+              toast(`${x.name} restored`);
+              renderHome();
+            } catch (e) { toast(e.message); }
+          } }, 'Restore'))));
+    })();
+  }
 
   view.replaceChildren(...(runningBanner ? [runningBanner] : []), banner,
     h('div', { class: 'set-filter' }, filterInput),
     h('div', { class: 'chips' }, ...[sortCtl, newSetBtn].filter(Boolean)),
-    grid);
+    grid,
+    hiddenSetsWrap);
 }
 
 function updateStatsBanner() {
@@ -1179,6 +1203,65 @@ function openSetCreator(onSaved) {
     ));
   view.append(overlay);
   nameIn.focus();
+}
+
+/** Review a master update's ADDITIONS before pulling. Everything defaults to
+ * "add"; unchecking an item bypasses it — it still lands in the database,
+ * just hidden, so future updates see it and leave it alone. */
+function openPullReview(prev) {
+  const boxes = [];
+  const mk = (kind, payload, main, sub) => {
+    const cb = h('input', { type: 'checkbox' });
+    cb.checked = true;
+    boxes.push({ cb, kind, payload });
+    return h('label', { class: 'pr-row' }, cb,
+      h('span', {}, main), sub ? h('span', { class: 'muted small' }, sub) : null);
+  };
+  const secs = [];
+  if ((prev.newSets || []).length) {
+    secs.push(h('h4', { class: 'pr-head' }, `New sets (${prev.newSets.length})`));
+    for (const x of prev.newSets) secs.push(mk('set', { lang: x.lang, id: x.id }, x.name, `${x.cards} card${x.cards === 1 ? '' : 's'} · ${x.lang}`));
+  }
+  for (const g of prev.newCards || []) {
+    const rows = g.cards.map((c) => mk('card', { lang: g.lang, id: c.id }, `#${c.localId} ${c.name}`));
+    const all = h('input', { type: 'checkbox' });
+    all.checked = true;
+    all.addEventListener('change', () => rows.forEach((r) => { r.querySelector('input').checked = all.checked; }));
+    secs.push(h('h4', { class: 'pr-head' }, h('label', { class: 'pr-row', style: 'padding:0' }, all, `New cards in ${g.setName} (${g.cards.length})`)), ...rows);
+  }
+  if ((prev.newVariants || []).length) {
+    secs.push(h('h4', { class: 'pr-head' }, `New printings of cards you already have (${prev.newVariants.length})`));
+    for (const v of prev.newVariants) {
+      secs.push(mk('variant', { lang: v.lang, card: v.card, variant: v.variant },
+        `${v.name} #${v.localId} — ${v.label || VARIANT_LABELS[v.variant] || v.variant}`, v.set));
+    }
+  }
+  const backToAdmin = () => { renderAccountModal(); accountModal.showModal(); };
+  const overlay = h('div', { class: 'picker-overlay' },
+    h('div', { class: 'picker-panel ce-panel' },
+      h('h3', { style: 'margin:0' }, `Master update${prev.version ? ' (v' + prev.version + ')' : ''} — review additions`),
+      h('p', { class: 'muted small' }, 'Choose what this install takes. Unchecked items are still recorded, just hidden — future updates leave them alone, and you can restore them any time (set page → Hidden cards, home → Hidden sets, or re-tick a printing in ✎ Edit card).'),
+      h('div', { class: 'picker-results', style: 'max-height:50vh' }, ...secs),
+      h('div', { class: 'row', style: 'justify-content:flex-end; gap:8px; margin-top:6px' },
+        h('button', { class: 'btn ghost small', onclick: () => { overlay.remove(); backToAdmin(); } }, 'Cancel'),
+        h('button', { class: 'btn small', onclick: async (e) => {
+          e.target.disabled = true;
+          const bypass = { sets: [], cards: [], variants: [] };
+          for (const b of boxes) {
+            if (b.cb.checked) continue;
+            if (b.kind === 'set') bypass.sets.push(b.payload);
+            else if (b.kind === 'card') bypass.cards.push(b.payload);
+            else bypass.variants.push(b.payload);
+          }
+          try {
+            await startCatalogPull(bypass);
+            overlay.remove();
+            backToAdmin();   // the admin panel shows the live pull progress
+          } catch (err) { e.target.disabled = false; toast(err.message); }
+        } }, '⬇️ Apply update'),
+      ),
+    ));
+  view.append(overlay);
 }
 
 /* ============================================================
@@ -1820,8 +1903,13 @@ async function renderAdminArea() {
             h('div', { class: 'row', style: 'margin-bottom:12px' },
               h('button', { class: 'btn small', onclick: async (e) => {
                 e.target.disabled = true;
-                try { await startCatalogPull(); renderControls(); }
-                catch (err) { e.target.disabled = false; toast(err.message); }
+                try {
+                  // review first: anything the master would ADD is the admin's
+                  // call — skipped items are stored hidden (soft-bypassed)
+                  const prev = await apiCall('catalog/preview', { method: 'POST', body: '{}' });
+                  if (!prev.additions) { await startCatalogPull(); renderControls(); }
+                  else { accountModal.close(); openPullReview(prev); }
+                } catch (err) { e.target.disabled = false; toast(err.message); }
               } }, `⬇️ Update cards from master (v${chk.localVersion} → v${chk.remoteVersion})`),
             ),
           );
