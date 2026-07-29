@@ -1536,6 +1536,13 @@ async function handleApi(req, res, pathname, ip, url) {
     const patch = sanitizeCardPatch(body);
     const csvOf = (arr) => (arr && arr.length ? arr.join(',') : null);
     const varsCsv = (v) => { const ks = v ? Object.keys(v).filter((k) => v[k]) : []; return ks.length ? ks.join(',') : 'normal'; };
+    // reuse another card's picture (duplicates, or "from an existing card")
+    let imgFrom;
+    if (typeof body.imageFrom === 'string' && CARD_ID_RE.test(body.imageFrom)) {
+      const ir = _cardRow.get(cLang, body.imageFrom);
+      if (!ir || (!ir.img_low && !ir.img_high)) return sendJSON(res, 400, { error: 'That card has no picture to reuse' });
+      imgFrom = { low: ir.img_low, high: ir.img_high };
+    }
     if (body.new) {
       const setId = typeof body.set === 'string' && SET_ID_RE.test(body.set) ? body.set : null;
       if (!setId) return sendJSON(res, 400, { error: 'New cards need a set id' });
@@ -1548,7 +1555,8 @@ async function handleApi(req, res, pathname, ip, url) {
       if (_cardRow.get(cLang, cardId)) return sendJSON(res, 409, { error: `${cardId} already exists — open that card and edit it instead` });
       _localCardPut.run(cLang, cardId, setId, localId, patch.name.trim(), patch.rarity || null, patch.category || null,
         csvOf(patch.dexId), csvOf(patch.types), patch.hp ?? null, patch.illustrator || null,
-        varsCsv(patch.variants), null, null, _maxCardPos.get(cLang, setId).p + 1, 0);
+        varsCsv(patch.variants), imgFrom ? imgFrom.low : null, imgFrom ? imgFrom.high : null,
+        _maxCardPos.get(cLang, setId).p + 1, 0);
       return sendJSON(res, 200, { ok: true, cardId, created: true });
     }
     // edit an existing card — the edited row becomes source='local', which
@@ -1565,7 +1573,7 @@ async function handleApi(req, res, pathname, ip, url) {
       patch.types !== undefined ? csvOf(patch.types) : row.types_csv,
       patch.hp !== undefined ? patch.hp : row.hp, pick(patch.illustrator, row.illustrator) || null,
       patch.variants !== undefined ? varsCsv(patch.variants) : (row.variants_csv ?? 'normal'),
-      row.img_low, row.img_high, row.position, row.hidden);
+      imgFrom ? imgFrom.low : row.img_low, imgFrom ? imgFrom.high : row.img_high, row.position, row.hidden);
     // re-ticking a printing lifts its soft-removal tombstone (scan and all)
     if (patch.variants) for (const [k, on] of Object.entries(patch.variants)) if (on) _printingUnhide.run(cLang, cardId, k);
     return sendJSON(res, 200, { ok: true, cardId });

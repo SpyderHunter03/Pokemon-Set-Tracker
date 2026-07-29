@@ -259,6 +259,16 @@ function fail(msg) {
   check('editor: restoring brings the card back',
     rsRes.ok === true && (rsSet.cards || []).some((c) => c.id === 'promo-x-1'));
 
+  // a new card can wear another card's picture (and imageless donors refuse)
+  const ifRes = await ovH('/api/card', { new: true, set: 'promo-x', localId: '2', name: 'Copy Cat', imageFrom: 'base1-4', lang: 'en' });
+  const ifSet = await jfetch('http://localhost:3115/api/catalog/set?lang=en&id=promo-x');
+  const ifCard = (ifSet.cards || []).find((c) => c.id === 'promo-x-2');
+  const ifB4 = (reSet.cards || []).find((c) => c.id === 'base1-4');
+  const ifBad = (await fetch('http://localhost:3115/api/card', { method: 'POST', headers: ovAuth, body: JSON.stringify({ new: true, set: 'promo-x', localId: '3', name: 'X', imageFrom: 'base1-102' }) })).status;
+  check('editor: a new card can reuse another card’s picture (imageless donor refused)',
+    ifRes.ok === true && ifCard && ifCard.img && !!ifCard.img.low &&
+    ifB4 && ifB4.img && ifCard.img.low === ifB4.img.low && ifBad === 400);
+
   // ---- removing printings (variants) of a card ----
   const vrCustom = await ovH('/api/variant-remove', { cardId: 'base1-4', variant: 'cosmos-holo', lang: 'en' });
   const vrSet = await jfetch('http://localhost:3115/api/catalog/set?lang=en&id=base1');

@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.29.1';
+const APP_VERSION = '3.30.0';
 
 /* ============================================================
  * Storage helpers
@@ -740,6 +740,10 @@ async function openCardModal(brief, { variant, onOwnershipChange } = {}) {
           cardModal.close();   // dialogs sit in the browser's top layer — the editor overlay must replace it
           openCardEditor({ card, onSaved: () => { clearDataCaches(); route(); } });
         } }, '✎ Edit card'),
+        h('button', { type: 'button', class: 'btn ghost small', onclick: () => {
+          cardModal.close();
+          openCardEditor({ duplicateOf: card, onSaved: () => { clearDataCaches(); route(); } });
+        } }, '⧉ Duplicate'),
         fileInput,
       ),
       h('p', { class: 'muted small', style: 'text-align:center; margin:6px 0 0' }, 'Admin: custom printings apply to this card; uploaded images replace the synthetic look.'),
@@ -1069,25 +1073,107 @@ function updateStatsBanner() {
  * Writes to this server's database: on the master workspace the change
  * publishes to every install; on a personal install it stays local and
  * survives master updates. opts.onSaved() re-renders the caller. */
-function openCardEditor(opts) {
+async function openCardEditor(opts) {
   const editing = opts.card || null;
-  const setId = editing ? setIdOf(editing.id) : opts.set;
+  const dup = opts.duplicateOf || null;
+  const src = editing || dup;
+  const homeSet = editing ? setIdOf(editing.id) : (opts.set || (dup ? setIdOf(dup.id) : null));
+  let allSets = [];
+  try { allSets = (await getIndex()).sets; } catch { /* editor still opens */ }
   const txt = (value, placeholder) => h('input', { type: 'text', value: value || '', placeholder: placeholder || '' });
-  const nameIn = txt(editing && editing.name, 'e.g. Eevee');
-  const numIn = txt(editing ? String(editing.localId) : (opts.nextNumber || ''), 'e.g. 51 or SWSH087');
-  const rarityIn = txt(editing && editing.rarity, 'e.g. Rare Holo');
-  const catSel = h('select', {}, ...['', 'Pokemon', 'Trainer', 'Energy'].map((c) => h('option', { value: c }, c || '— none —')));
-  if (editing && editing.category) catSel.value = editing.category;
-  const hpIn = h('input', { type: 'number', min: '0', max: '9999', value: editing && editing.hp ? String(editing.hp) : '' });
-  const typesIn = txt(editing && editing.types ? editing.types.join(', ') : '', 'e.g. Lightning');
-  const dexIn = txt(editing && editing.dexId ? editing.dexId.join(', ') : '', 'e.g. 133');
-  const illusIn = txt(editing && editing.illustrator, '');
+  const nameIn = txt(src && src.name, 'e.g. Eevee');
+  const numIn = txt(editing ? String(editing.localId) : (opts.nextNumber || ''), dup ? 'pick a free number' : 'e.g. 51 or SWSH087');
+  const rarityIn = txt(src && src.rarity, 'e.g. Rare Holo');
+  const catSel = h('select', {}, ...['', 'Pokemon', 'Trainer', 'Energy'].map((c) => h('option', { value: c }, c || '\u2014 none \u2014')));
+  if (src && src.category) catSel.value = src.category;
+  const hpIn = h('input', { type: 'number', min: '0', max: '9999', value: src && src.hp ? String(src.hp) : '' });
+  const typesIn = txt(src && src.types ? src.types.join(', ') : '', 'e.g. Lightning');
+  const dexIn = txt(src && src.dexId ? src.dexId.join(', ') : '', 'e.g. 133');
+  const illusIn = txt(src && src.illustrator, '');
+  // new cards (and duplicates) can land in any set
+  const setSel = editing ? null : h('select', {}, ...allSets.map((x) => h('option', { value: x.id }, x.name)));
+  if (setSel && homeSet) setSel.value = homeSet;
   const varBoxes = VARIANT_DEFS.filter(([k]) => k !== 'other').map(([k, lbl]) => {
     const cb = h('input', { type: 'checkbox' });
-    cb.checked = editing ? !!(editing.variants && editing.variants[k]) : k === 'normal';
+    cb.checked = src ? !!(src.variants && src.variants[k]) : k === 'normal';
     return { k, cb, el: h('label', { class: 'ce-var' }, cb, ' ' + lbl) };
   });
+
+  // your own printings, right in the form: pending additions + existing ones
+  const customPend = dup && dup.printings ? Object.values(dup.printings).slice() : [];
+  const customRemove = new Set();
+  const existingCustom = editing && editing.printings ? Object.entries(editing.printings) : [];
+  const cvList = h('div', { class: 'ce-vars' });
+  const cvInput = h('input', { type: 'text', placeholder: 'e.g. Cracked Ice Holo' });
+  function renderCustom() {
+    cvList.replaceChildren(
+      ...existingCustom.filter(([k]) => !customRemove.has(k)).map(([k, lbl]) =>
+        h('span', { class: 'chip' }, lbl + ' ', h('button', { type: 'button', class: 'chip-x', onclick: () => { customRemove.add(k); renderCustom(); } }, '\u2715'))),
+      ...customPend.map((lbl, i) =>
+        h('span', { class: 'chip' }, lbl + ' ', h('button', { type: 'button', class: 'chip-x', onclick: () => { customPend.splice(i, 1); renderCustom(); } }, '\u2715'))),
+    );
+  }
+  renderCustom();
+  const addCustom = () => {
+    const v = cvInput.value.trim();
+    if (v.length < 2) { toast('Give the printing a name (2+ characters)'); return; }
+    customPend.push(v);
+    cvInput.value = '';
+    renderCustom();
+  };
+  cvInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); addCustom(); } });
+
+  // picture: upload a file, or reuse one from a card already in the system
+  let imageFrom = dup ? dup.id : null;
+  let imageFromLabel = dup ? `${dup.name} (#${dup.localId})` : '';
   const fileIn = h('input', { type: 'file', accept: 'image/*' });
+  const picChoice = h('div', { class: 'muted small' });
+  function renderPicChoice() {
+    picChoice.replaceChildren(...(imageFrom
+      ? [h('span', {}, `Using the picture of ${imageFromLabel} `),
+         h('button', { type: 'button', class: 'chip-x', onclick: () => { imageFrom = null; renderPicChoice(); } }, '\u2715')]
+      : []));
+  }
+  renderPicChoice();
+  fileIn.addEventListener('change', () => { if (fileIn.files && fileIn.files[0]) { imageFrom = null; renderPicChoice(); } });
+  async function openImagePicker() {
+    let cards = [], setNames = new Map();
+    try {
+      const [sx, ix] = await Promise.all([getSearchIndex(), getIndex()]);
+      cards = sx.cards.filter((c) => cardImg(c, 'low'))
+        .sort((a, b) => a.name.localeCompare(b.name) || String(a.localId).localeCompare(String(b.localId), undefined, { numeric: true }));
+      setNames = new Map(ix.sets.map((x) => [x.id, x.name]));
+    } catch { toast('Could not load the card list'); return; }
+    const input = h('input', { type: 'text', placeholder: 'Search cards by name\u2026' });
+    const results = h('div', { class: 'picker-results' });
+    const render = () => {
+      const q = input.value.trim().toLowerCase();
+      const hits = q ? cards.filter((c) => c.name.toLowerCase().includes(q)) : cards;
+      results.replaceChildren(
+        h('p', { class: 'muted small' }, `${hits.length} card${hits.length === 1 ? '' : 's'}${hits.length > 60 ? ' \u2014 showing 60, type to narrow' : ''}`),
+        ...hits.slice(0, 60).map((c) => h('div', { class: 'picker-row', onclick: () => {
+          imageFrom = c.id;
+          imageFromLabel = `${c.name} (#${c.localId})`;
+          fileIn.value = '';
+          ov.remove();
+          renderPicChoice();
+        } },
+          h('img', { src: cardImg(c, 'low'), loading: 'lazy' }),
+          h('div', { class: 'picker-info' }, h('div', {}, c.name),
+            h('div', { class: 'muted small' }, (setNames.get(setIdOf(c.id)) || setIdOf(c.id)) + ' \u00b7 #' + c.localId)))));
+    };
+    input.addEventListener('input', render);
+    const ov = h('div', { class: 'picker-overlay' },
+      h('div', { class: 'picker-panel' },
+        h('div', { class: 'row', style: 'gap:8px' }, input,
+          h('button', { class: 'btn ghost small', onclick: () => ov.remove() }, 'Close')),
+        results,
+      ));
+    render();
+    view.append(ov);
+    input.focus();
+  }
+
   const status = h('div', { class: 'muted small' });
   const field = (label, input) => h('label', { class: 'ce-field' }, h('span', { class: 'muted small' }, label), input);
 
@@ -1095,6 +1181,7 @@ function openCardEditor(opts) {
   async function saveCard() {
     if (!nameIn.value.trim()) { toast('The card needs a name'); return; }
     if (!editing && !numIn.value.trim()) { toast('The card needs a number'); return; }
+    const hasFile = !!(fileIn.files && fileIn.files[0]);
     const payload = {
       lang,
       name: nameIn.value.trim(), localId: numIn.value.trim(),
@@ -1103,55 +1190,70 @@ function openCardEditor(opts) {
       types: listOf(typesIn.value), dexId: listOf(dexIn.value).map((d) => parseInt(d, 10)).filter((d) => d > 0),
       illustrator: illusIn.value.trim(),
       variants: Object.fromEntries(varBoxes.map((b) => [b.k, b.cb.checked])),
-      ...(editing ? { cardId: editing.id } : { new: true, set: setId }),
+      ...(editing ? { cardId: editing.id } : { new: true, set: setSel ? setSel.value : homeSet }),
+      ...(imageFrom && !hasFile ? { imageFrom } : {}),
     };
     try {
-      status.textContent = 'Saving…';
+      status.textContent = 'Saving\u2026';
       const res = await apiCall('card', { method: 'POST', body: JSON.stringify(payload) });
-      const f = fileIn.files && fileIn.files[0];
-      if (f) {
-        status.textContent = 'Uploading picture…';
+      for (const lbl of customPend) {
+        await apiCall('custom-variant', { method: 'POST', body: JSON.stringify({ cardId: res.cardId, label: lbl, lang }) });
+      }
+      for (const k of customRemove) {
+        await apiCall('variant-remove', { method: 'POST', body: JSON.stringify({ cardId: res.cardId, variant: k, lang }) });
+      }
+      if (hasFile) {
+        status.textContent = 'Uploading picture\u2026';
         const up = await fetch(`api/card-image?cardId=${encodeURIComponent(res.cardId)}&lang=${encodeURIComponent(lang)}`, {
-          method: 'POST', headers: { ...authHeaders(), 'Content-Type': f.type || 'application/octet-stream' }, body: f,
+          method: 'POST', headers: { ...authHeaders(), 'Content-Type': fileIn.files[0].type || 'application/octet-stream' }, body: fileIn.files[0],
         });
         const upData = await up.json().catch(() => ({}));
         if (!up.ok) throw new Error(upData.error || 'The card saved, but the picture upload failed');
       }
       overlay.remove();
       clearDataCaches();
-      toast(editing ? `${payload.name} updated` : `${payload.name} added to the set`);
+      toast(editing ? `${payload.name} updated` : `${payload.name} added`);
       if (opts.onSaved) opts.onSaved(res.cardId);
     } catch (e) { status.textContent = ''; toast(e.message); }
   }
 
   async function hideCard() {
     if (!confirm(`Hide "${editing.name}" from the database?` +
-      (appConfig.master ? '\n\nThis is the master workspace — publishing afterwards removes the card from every install.' : '\n\nOnly this install is affected; master updates will not bring it back.'))) return;
+      (appConfig.master ? '\n\nThis is the master workspace \u2014 publishing afterwards removes the card from every install.' : '\n\nOnly this install is affected; master updates will not bring it back.'))) return;
     try {
       await apiCall('card-hide', { method: 'POST', body: JSON.stringify({ cardId: editing.id, hidden: true, lang }) });
       overlay.remove();
       clearDataCaches();
-      toast(`${editing.name} hidden — restore it from the set page`);
+      toast(`${editing.name} hidden \u2014 restore it from the set page`);
       if (opts.onSaved) opts.onSaved(editing.id);
     } catch (e) { toast(e.message); }
   }
 
   const overlay = h('div', { class: 'picker-overlay' },
     h('div', { class: 'picker-panel ce-panel' },
-      h('h3', { style: 'margin:0' }, editing ? `Edit ${editing.name}` : `New card in ${setId}`),
+      h('h3', { style: 'margin:0' }, editing ? `Edit ${editing.name}` : dup ? `Duplicate ${dup.name}` : 'New card'),
       editing ? h('p', { class: 'muted small', style: 'margin:2px 0 0' }, `Card id: ${editing.id}`) : null,
       h('div', { class: 'ce-grid' },
+        setSel ? field('Set *', setSel) : null,
         field('Name *', nameIn), field('Number *', numIn),
         field('Rarity', rarityIn), field('Category', catSel),
         field('HP', hpIn), field('Types (comma-separated)', typesIn),
-        field('Pokédex numbers', dexIn), field('Illustrator', illusIn),
+        field('Pok\u00e9dex numbers', dexIn), field('Illustrator', illusIn),
       ),
       h('div', { class: 'ce-field' }, h('span', { class: 'muted small' }, 'Printings this card exists in'),
         h('div', { class: 'ce-vars' }, ...varBoxes.map((b) => b.el))),
-      field(editing ? 'Replace picture (optional)' : 'Picture (optional — a clean text tile is shown without one)', fileIn),
+      h('div', { class: 'ce-field' }, h('span', { class: 'muted small' }, 'Your own printings (e.g. stamped promos)'),
+        cvList,
+        h('div', { class: 'row', style: 'gap:6px; align-items:center' }, cvInput,
+          h('button', { type: 'button', class: 'btn ghost small', onclick: addCustom }, '\uff0b Add'))),
+      h('div', { class: 'ce-field' }, h('span', { class: 'muted small' },
+        editing ? 'Picture (optional \u2014 upload or reuse another card\u2019s)' : 'Picture (optional \u2014 a clean text tile is shown without one)'),
+        h('div', { class: 'row', style: 'gap:8px; align-items:center; flex-wrap:wrap' }, fileIn,
+          h('button', { type: 'button', class: 'btn ghost small', onclick: openImagePicker }, '\ud83c\udccf From another card')),
+        picChoice),
       status,
       h('div', { class: 'row', style: 'justify-content:flex-end; gap:8px; margin-top:6px; flex-wrap:wrap' },
-        editing ? h('button', { class: 'btn ghost small', style: 'margin-right:auto', onclick: hideCard }, '🗑 Hide card') : null,
+        editing ? h('button', { class: 'btn ghost small', style: 'margin-right:auto', onclick: hideCard }, '\ud83d\uddd1 Hide card') : null,
         h('button', { class: 'btn ghost small', onclick: () => overlay.remove() }, 'Cancel'),
         h('button', { class: 'btn small', onclick: saveCard }, editing ? 'Save changes' : 'Add card'),
       ),

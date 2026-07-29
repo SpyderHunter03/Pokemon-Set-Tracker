@@ -895,3 +895,7 @@ body.printing-proxies #print-area {
 /* ---------- master update review (choose additions before pulling) ---------- */
 .pr-row { display: flex; align-items: center; gap: 7px; padding: 3px 0; cursor: pointer; }
 .pr-head { margin: 12px 0 4px; }
+
+/* inline ✕ inside label chips (editor's custom printings, picture source) */
+.chip-x { border: 0; background: transparent; color: inherit; cursor: pointer; font-size: 11px; padding: 0 2px; }
+span.chip { display: inline-flex; align-items: center; gap: 2px; }

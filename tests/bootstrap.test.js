@@ -175,6 +175,33 @@ const { chromium } = require('playwright');
   await page.waitForSelector('.tcg-card[data-card-id="test-promos-1"]');
   check('editor: restoring brings it back', true);
 
+  // ---- editor: your own printings in the form + duplicating a card ----
+  await page.click('.tcg-card[data-card-id="test-promos-1"] .info-btn');
+  await page.waitForSelector('#card-modal[open] button:has-text("Edit card")');
+  await page.click('#card-modal button:has-text("Edit card")');
+  await page.waitForSelector('.ce-panel');
+  await page.fill('.ce-panel input[placeholder="e.g. Cracked Ice Holo"]', 'Sparkle Foil');
+  await page.click('.ce-panel button:has-text("＋ Add")');
+  await page.waitForSelector('.ce-panel .chip:has-text("Sparkle Foil")');
+  await page.click('.ce-panel button:has-text("Save changes")');
+  await page.waitForSelector('.tcg-card[data-variant="sparkle-foil"]');
+  check('editor: your own printing added right in the card form', true);
+
+  // duplicate it — details, printings, and the picture come along
+  await page.click('.tcg-card[data-card-id="test-promos-1"] >> nth=0 >> .info-btn');
+  await page.waitForSelector('#card-modal[open] button:has-text("Duplicate")');
+  await page.click('#card-modal button:has-text("Duplicate")');
+  await page.waitForSelector('.ce-panel h3:has-text("Duplicate")');
+  check('editor: duplicate pre-fills from the source card',
+    (await page.locator('.ce-panel input[placeholder="e.g. Eevee"]').inputValue()) === 'Eevee Star EX' &&
+    (await page.textContent('.ce-panel')).includes('Using the picture of'));
+  await page.fill('.ce-panel input[placeholder="pick a free number"]', '2');
+  await page.click('.ce-panel button:has-text("Add card")');
+  await page.waitForSelector('.tcg-card[data-card-id="test-promos-2"]');
+  check('editor: duplicated card reuses the source picture and printings',
+    ((await page.locator('.tcg-card[data-card-id="test-promos-2"] >> nth=0 >> img').getAttribute('src')) || '').includes('test-promos/1/card-low.webp') &&
+    (await page.locator('.tcg-card[data-card-id="test-promos-2"][data-variant="sparkle-foil"]').count()) === 1);
+
   // sign the admin out so the main suite's fresh user is a clean non-admin test
   await page.click('#account-btn');
   await page.waitForSelector('#account-status button:has-text("Sign out")');
