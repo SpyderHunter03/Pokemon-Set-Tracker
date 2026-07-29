@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.26.1';
+const APP_VERSION = '3.27.0';
 
 /* ============================================================
  * Storage helpers
@@ -2128,12 +2128,25 @@ async function renderBindersPage() {
   const grid = h('div', { class: 'binder-list' });
   for (const b of list) {
     const src = coverSrcOf(b);
-    grid.append(h('a', { class: `binder-cover b-${b.color}`, href: '#/binder/' + b.id },
-      src ? h('img', { class: 'binder-cover-img' + (b.cover.type === 'set' ? ' logo' : ''), src, loading: 'lazy', alt: '' }) : null,
+    const artV = b.cover && b.cover.type === 'art' && b.cover.view && b.cover.view.s ? b.cover.view : null;
+    const tile = h('a', { class: `binder-cover b-${b.color}`, href: '#/binder/' + b.id },
+      src && !artV ? h('img', { class: 'binder-cover-img' + (b.cover.type === 'set' ? ' logo' : ''), src, loading: 'lazy', alt: '' }) : null,
       h('div', { class: 'binder-name' }, b.name),
       h('div', { class: 'binder-meta' }, `${b.size}\u00d7${b.size} \u00b7 ${b.pages} page${b.pages === 1 ? '' : 's'}`),
       h('div', { class: 'binder-meta' }, b.filled ? `${b.have} / ${b.filled} in hand` : 'empty'),
-    ));
+    );
+    if (src && artV) {
+      const bg = h('div', { class: 'binder-cover-img' });
+      tile.prepend(bg);
+      requestAnimationFrame(() => {
+        const pw = (bg.clientWidth || 200) / 100;
+        bg.style.backgroundImage = `url("${src}")`;
+        bg.style.backgroundRepeat = 'no-repeat';
+        bg.style.backgroundSize = (artV.s * pw) + 'px auto';
+        bg.style.backgroundPosition = (artV.x * pw) + 'px ' + (artV.y * pw) + 'px';
+      });
+    }
+    grid.append(tile);
   }
 
   let color = BINDER_COLORS[0];
@@ -2291,13 +2304,26 @@ async function renderBinderPage(id) {
     if (c.type === 'card') { const cd = cardsById.get(c.card); return cd ? (cardImg(cd, 'high', c.variant || null) || cardImg(cd, 'low', c.variant || null)) : null; }
     return null;
   }
+  /** paint an adjusted cover picture: view is in cover-units (100 = element
+   * width), so the same placement scales to the book page and the list tile */
+  function coverArtCss(el, img, v) {
+    requestAnimationFrame(() => {
+      const pw = (el.clientWidth || 300) / 100;
+      el.style.backgroundImage = `url("${img}")`;
+      el.style.backgroundRepeat = 'no-repeat';
+      el.style.backgroundSize = (v.s * pw) + 'px auto';
+      el.style.backgroundPosition = (v.x * pw) + 'px ' + (v.y * pw) + 'px';
+    });
+  }
   function coverFace() {
     const src = coverImgSrc();
+    const av = binder.cover && binder.cover.type === 'art' && binder.cover.view && binder.cover.view.s ? binder.cover.view : null;
     const el = h('div', { class: 'binder-cover-page b-' + binder.color },
-      src ? h('img', { src, alt: '', class: binder.cover.type === 'set' ? 'cover-logo' : 'cover-photo' }) : null,
+      src && !av ? h('img', { src, alt: '', class: binder.cover.type === 'set' ? 'cover-logo' : 'cover-photo' }) : null,
       h('div', { class: 'cover-name' }, binder.name),
       h('div', { class: 'cover-hint muted small' }, 'Open \u2192'),
     );
+    if (src && av) coverArtCss(el, src, av);
     el.addEventListener('click', () => navTo(1, 1));
     return el;
   }
@@ -2880,6 +2906,69 @@ async function renderBinderPage(id) {
       rr();
       input.focus();
     };
+    /** Drag to shift, slider to resize — the pocket art editor's feel, for
+     * the single cover frame (3:4). Saves the placement with the cover. */
+    async function openCoverAdjust(img, existing) {
+      const nat = await loadNat(img);
+      const CW = 100, CH = CW * (4 / 3);   // cover-units; the page is 3:4
+      let vw, vx, vy;
+      if (existing && existing.s) { vw = existing.s; vx = existing.x; vy = existing.y; }
+      else {
+        vw = Math.max(CW, CH * (nat.w / nat.h));   // centered, cover-filling
+        vx = (CW - vw) / 2;
+        vy = (CH - vw * (nat.h / nat.w)) / 2;
+      }
+      const board = h('div', { class: 'art-board' });
+      const im = h('img', { src: img, draggable: 'false', alt: '' });
+      board.append(im);
+      const scale = h('input', { type: 'range', min: '25', max: '300', step: '1' });
+      let pxPerU = 1;
+      function layout() {
+        const bw = Math.min(330, Math.max(220, (view.clientWidth || 320) - 90));
+        pxPerU = bw / CW;
+        board.style.width = bw + 'px';
+        board.style.height = (CH * pxPerU) + 'px';
+        im.style.width = (vw * pxPerU) + 'px';
+        im.style.left = (vx * pxPerU) + 'px';
+        im.style.top = (vy * pxPerU) + 'px';
+        scale.value = String(Math.round((vw / CW) * 100));
+      }
+      let drag = null;
+      board.addEventListener('pointerdown', (e) => {
+        drag = { x: e.clientX, y: e.clientY, ix: vx, iy: vy };
+        try { board.setPointerCapture(e.pointerId); } catch { /* synthetic events */ }
+      });
+      board.addEventListener('pointermove', (e) => {
+        if (!drag) return;
+        vx = drag.ix + (e.clientX - drag.x) / pxPerU;
+        vy = drag.iy + (e.clientY - drag.y) / pxPerU;
+        layout();
+      });
+      board.addEventListener('pointerup', () => { drag = null; });
+      scale.addEventListener('input', () => {
+        const cx = vx + vw / 2, cy = vy + (vw * nat.h / nat.w) / 2;
+        vw = (parseInt(scale.value, 10) / 100) * CW;
+        vx = cx - vw / 2;
+        vy = cy - (vw * nat.h / nat.w) / 2;
+        layout();
+      });
+      const adj = h('div', { class: 'picker-overlay' },
+        h('div', { class: 'picker-panel art-editor cover-adjust' },
+          h('h3', {}, 'Place your cover picture'),
+          board,
+          h('div', { class: 'row', style: 'gap:8px; align-items:center' }, h('span', { class: 'muted small' }, 'Size'), scale),
+          h('div', { class: 'muted small' }, 'Drag the picture to shift it.'),
+          h('div', { class: 'row', style: 'justify-content:flex-end; gap:8px; margin-top:6px' },
+            h('button', { class: 'btn ghost small', onclick: () => adj.remove() }, 'Cancel'),
+            h('button', { class: 'btn small', onclick: async () => {
+              adj.remove();
+              await setCover({ type: 'art', img, view: { x: vx, y: vy, s: vw } });
+            } }, 'Save'),
+          ),
+        ));
+      view.append(adj);
+      layout();
+    }
     const showUpload = () => {
       const fileIn = h('input', { type: 'file', accept: 'image/*', hidden: '' });
       fileIn.addEventListener('change', async (e) => {
@@ -2889,12 +2978,12 @@ async function renderBinderPage(id) {
           const res = await fetch('api/binder-image', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': f.type || 'application/octet-stream' }, body: f });
           const data = await res.json();
           if (!res.ok) throw new Error(data.error || 'Upload failed');
-          await setCover({ type: 'art', img: data.url });
+          openCoverAdjust(data.url, null);   // place it before saving
         } catch (err) { toast(err.message); }
         e.target.value = '';
       });
       content.replaceChildren(
-        h('p', { class: 'muted small' }, 'Use one of your own pictures as the cover.'),
+        h('p', { class: 'muted small' }, 'Use one of your own pictures as the cover \u2014 you place and size it next.'),
         h('button', { class: 'btn small', onclick: () => fileIn.click() }, '\u2b06 Upload image'), fileIn);
     };
     modes.append(
@@ -2903,6 +2992,9 @@ async function renderBinderPage(id) {
       mode('My image', showUpload),
       mode('Color only', () => setCover(null)),
     );
+    if (binder.cover && binder.cover.type === 'art') {
+      modes.append(mode('\u270e Adjust picture', () => openCoverAdjust(binder.cover.img, binder.cover.view || null)));
+    }
     const overlay = h('div', { class: 'picker-overlay' },
       h('div', { class: 'picker-panel' },
         h('div', { class: 'row', style: 'justify-content:space-between; align-items:center' },

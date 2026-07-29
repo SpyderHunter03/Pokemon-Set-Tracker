@@ -302,6 +302,21 @@ const { chromium } = require('playwright');
   });
   check('binder: picture sliced across the chosen pockets (each piece its own slice)', true);
 
+  // own cover picture: upload → place it with the drag/resize editor
+  await page.click('button:has-text("Cover")');
+  await page.waitForSelector('.picker-panel h3:has-text("Binder cover")');
+  await page.click('.picker-panel .chip:has-text("My image")');
+  await page.waitForSelector('.picker-overlay input[type=file]', { state: 'attached' });
+  await page.setInputFiles('.picker-overlay input[type=file]', require('path').join(__dirname, 'fixtures', 'base1-4.png'));
+  await page.waitForSelector('.cover-adjust .art-board img');
+  check('binder: cover picture opens the placement editor', true);
+  await page.click('.cover-adjust button:has-text("Save")');
+  await page.waitForFunction(() => {
+    const el = document.querySelector('.binder-cover-page');
+    return el && (el.style.backgroundImage || '').includes('/bimg/');
+  });
+  check('binder: adjusted cover picture painted on the cover page', true);
+
   // pick a set logo as the binder cover
   await page.click('button:has-text("Cover")');
   await page.waitForSelector('.picker-row:has-text("Base Set")');

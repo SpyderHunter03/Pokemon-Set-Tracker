@@ -234,7 +234,13 @@ function cleanBinderCover(c) {
     return v ? { type: 'card', card: c.card, variant: v } : { type: 'card', card: c.card };
   }
   if (c.type === 'art' && typeof c.img === 'string' && /^\/bimg\/[a-f0-9-]{36}\.webp$/.test(c.img)) {
-    return { type: 'art', img: c.img };
+    // optional placement (drag/resize in the cover editor) — cover-units,
+    // everything scaled by the cover's rendered width
+    const num = (n, lo, hi) => (Number.isFinite(n) ? Math.max(lo, Math.min(hi, n)) : null);
+    const view = (c.view && typeof c.view === 'object')
+      ? { x: num(c.view.x, -5000, 5000) ?? 0, y: num(c.view.y, -5000, 5000) ?? 0, s: num(c.view.s, 5, 10000) }
+      : null;
+    return view && view.s ? { type: 'art', img: c.img, view } : { type: 'art', img: c.img };
   }
   return null;
 }

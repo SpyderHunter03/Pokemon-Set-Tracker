@@ -387,6 +387,13 @@ function fail(msg) {
   check('binder: cells-based art (arbitrary pockets + view + cut mode) persists',
     Array.isArray(e6.cells) && e6.cells.join(',') === '6,7' && e6.gaps === 'without' &&
     e6.view && Math.round(e6.view.s) === 200 && Math.round(e6.view.x * 2) === -21);
+  // an art cover can carry its placement (drag/resize view, cover-units)
+  const cvPut = await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { method: 'PUT', headers: buAuth, body: JSON.stringify({ cover: { type: 'art', img: up.url, view: { x: -20.5, y: 5, s: 180 } } }) });
+  const cvGet = await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { headers: buAuth });
+  check('binder: adjustable art cover placement persists',
+    cvPut.ok === true && cvGet.binder.cover && cvGet.binder.cover.type === 'art' &&
+    cvGet.binder.cover.view && cvGet.binder.cover.view.s === 180 && Math.round(cvGet.binder.cover.view.x * 2) === -41);
+
   // copy counts ride along on card entries (clamped; ×1 stays implicit)
   const nSlots = { ...bArt2.binder.slots };
   nSlots['4'] = { ...nSlots['4'], n: 3 };
