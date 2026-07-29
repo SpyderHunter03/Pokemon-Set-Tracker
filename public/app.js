@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.38.0';
+const APP_VERSION = '3.39.0';
 
 /* ============================================================
  * Storage helpers
@@ -3289,6 +3289,10 @@ async function renderBinderPage(id) {
 
   function openProxyPrintDialog() {
     let which = 'missing', paper = 'letter';
+    // what goes on the page: the cards, the pictures you placed, or both.
+    // "Missing only" filters the CARDS — it never hides your pictures.
+    let include = lsGet('ptcg.proxy.include') || 'both';
+    if (!['both', 'cards', 'art'].includes(include)) include = 'both';
     // pocket sizes vary between binders — offer presets and a custom entry
     const SIZES = { std: { w: 63, h: 88 }, small: { w: 59, h: 86 }, jumbo: { w: 89, h: 127 } };
     let sizeKey = lsGet('ptcg.proxy.size') || 'std';
@@ -3322,11 +3326,15 @@ async function renderBinderPage(id) {
         set(v);
         [...e.target.parentElement.querySelectorAll('.chip')].forEach((c) => c.classList.toggle('active', c === e.target));
       } }, txt)));
+    const cardsRow = optRow('Cards', [['missing', 'Missing only'], ['all', 'All pockets']], () => which, (v) => which = v);
+    const syncCardsRow = () => { cardsRow.style.display = include === 'art' ? 'none' : ''; };
     const overlay = h('div', { class: 'picker-overlay' },
       h('div', { class: 'picker-panel' },
         h('h3', {}, 'Print proxies'),
         h('p', { class: 'muted small' }, 'Prints cards at pocket size with cut guides \u2014 stand-ins for your physical binder\u2019s pockets until the real card arrives.'),
-        optRow('Cards', [['missing', 'Missing only'], ['all', 'All pockets']], () => which, (v) => which = v),
+        optRow('Print', [['both', 'Cards + pictures'], ['cards', 'Cards only'], ['art', 'Pictures only']],
+          () => include, (v) => { include = v; syncCardsRow(); }),
+        cardsRow,
         optRow('Size', [['std', 'Standard 63\u00d788'], ['small', 'Small 59\u00d786'], ['jumbo', 'Jumbo 89\u00d7127'], ['custom', 'Custom\u2026']],
           () => sizeKey, (v) => { sizeKey = v; syncCustomRow(); }),
         customRow,
@@ -3337,23 +3345,36 @@ async function renderBinderPage(id) {
             const clamp = (el, dflt) => Math.min(150, Math.max(20, parseFloat(el.value) || dflt));
             const size = sizeKey === 'custom' ? { w: clamp(wIn, 63), h: clamp(hIn, 88) } : SIZES[sizeKey];
             lsSet('ptcg.proxy.size', sizeKey);
+            lsSet('ptcg.proxy.include', include);
             if (sizeKey === 'custom') { lsSet('ptcg.proxy.customW', String(size.w)); lsSet('ptcg.proxy.customH', String(size.h)); }
             overlay.remove();
-            printProxies(which, paper, size);
+            printProxies(which, paper, size, include);
           } }, '\ud83d\udda8 Print'),
         ),
       ));
     view.append(overlay);
-    syncCustomRow();
+    syncCustomRow(); syncCardsRow();
   }
 
-  function printProxies(which, paper, size) {
+  function printProxies(which, paper, size, include) {
     const pw = (size && size.w) || 63, ph = (size && size.h) || 88;
+    const inc = include || 'both';
     const entries = Object.entries(binder.slots)
       .map(([k, v]) => [parseInt(k, 10), v])
       .sort((a, b) => a[0] - b[0])
-      .filter(([, v]) => which === 'all' ? true : (v.card && !v.have));
-    if (!entries.length) { toast('Nothing to print \u2014 every pocket is already in hand'); return; }
+      // your pictures ride along with whatever the card filter says \u2014 "Missing
+      // only" narrows the CARDS, it never drops the art you placed
+      .filter(([, v]) => {
+        if (v.img) return inc !== 'cards';
+        if (!v.card || inc === 'art') return false;
+        return which === 'all' ? true : !v.have;
+      });
+    if (!entries.length) {
+      toast(inc === 'art' ? 'Nothing to print \u2014 this binder has no pictures placed'
+        : which === 'missing' ? 'Nothing to print \u2014 every pocket is already in hand'
+        : 'Nothing to print \u2014 this binder is empty');
+      return;
+    }
     const area = h('div', { id: 'print-area' });
     for (const [, v] of entries) {
       if (v.img) {

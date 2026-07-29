@@ -361,6 +361,44 @@ const { chromium } = require('playwright');
   check('binder: mirrored pieces render flipped',
     (await page.locator('.binder-grid .pocket.art .art-bg >> nth=0').getAttribute('style')).includes('scale(-1, 1)'));
 
+  // print scope: "Missing only" narrows the CARDS and never drops your pictures,
+  // and either half can be printed on its own
+  await page.evaluate(() => { delete document.body.dataset.printed; });
+  await page.click('button:has-text("Print proxies")');
+  await page.waitForSelector('.picker-panel h3:has-text("Print proxies")');
+  await page.click('.picker-panel .btn:has-text("Print")');
+  await page.waitForFunction(() => document.body.dataset.printed === '1');
+  check('proxies: missing-only still prints the pictures you placed (6 cards + 2 art)',
+    (await page.locator('#print-area .print-cell').count()) === 8 &&
+    (await page.locator('#print-area .print-cell.print-art').count()) === 2);
+  await page.evaluate(() => window.dispatchEvent(new Event('afterprint')));
+
+  await page.evaluate(() => { delete document.body.dataset.printed; });
+  await page.click('button:has-text("Print proxies")');
+  await page.waitForSelector('.picker-panel h3:has-text("Print proxies")');
+  await page.click('.picker-panel .chip:has-text("Pictures only")');
+  check('proxies: Pictures only hides the missing/all card filter',
+    await page.evaluate(() => [...document.querySelectorAll('.picker-panel .row')]
+      .some((r) => r.textContent.includes('Missing only') && r.style.display === 'none')));
+  await page.click('.picker-panel .btn:has-text("Print")');
+  await page.waitForFunction(() => document.body.dataset.printed === '1');
+  check('proxies: Pictures only prints just the art pieces',
+    (await page.locator('#print-area .print-cell').count()) === 2 &&
+    (await page.locator('#print-area .print-cell.print-art').count()) === 2);
+  await page.evaluate(() => window.dispatchEvent(new Event('afterprint')));
+
+  await page.evaluate(() => { delete document.body.dataset.printed; });
+  await page.click('button:has-text("Print proxies")');
+  await page.waitForSelector('.picker-panel h3:has-text("Print proxies")');
+  await page.click('.picker-panel .chip:has-text("Cards only")');
+  await page.click('.picker-panel .btn:has-text("Print")');
+  await page.waitForFunction(() => document.body.dataset.printed === '1');
+  check('proxies: Cards only leaves the pictures out',
+    (await page.locator('#print-area .print-cell').count()) === 6 &&
+    (await page.locator('#print-area .print-cell.print-art').count()) === 0);
+  await page.evaluate(() => window.dispatchEvent(new Event('afterprint')));
+  await page.evaluate(() => localStorage.setItem('ptcg.proxy.include', 'both'));
+
   // own cover picture: upload → place it with the drag/resize editor
   await page.click('button:has-text("Cover")');
   await page.waitForSelector('.picker-panel h3:has-text("Binder cover")');
