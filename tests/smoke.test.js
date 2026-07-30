@@ -450,6 +450,42 @@ const { chromium } = require('playwright');
   check('binder: cover shows live progress (art not counted)', (await page.textContent('.binder-cover')).includes('1 / 7 in hand'));
   check('binder: list cover carries the chosen image', (await page.locator('.binder-cover .binder-cover-img').count()) === 1);
 
+  // ---- removing pages: ⊟ pulls a whole sheet, later pages slide forward ----
+  await page.click('.binder-cover');
+  await page.waitForSelector('.binder-cover-page');
+  await page.click('.binder-cover-page');
+  await page.waitForSelector('.binder-grid .pocket');
+  check('binder: view mode shows no page-remove buttons', (await page.locator('.page-remove').count()) === 0);
+  await page.click('button:has-text("Edit binder")');
+  await page.waitForSelector('.page-remove');
+  await page.click('button:has-text("›")');                             // pages 2–3
+  await page.waitForFunction(() => (document.querySelector('#view').textContent || '').includes('Pages 2–3 of 3'));
+  await page.waitForFunction(() => !document.querySelector('.flip-sheet'));   // let the turn finish
+  check('binder: every visible page gets its own ⊟', (await page.locator('.page-remove').count()) === 2);
+  page.once('dialog', (d) => d.accept());                               // page 3 holds a picture → confirm
+  await page.click('.page-remove[data-page="2"]');
+  await page.waitForFunction(() => (document.querySelector('#view').textContent || '').includes('of 2'));
+  check('binder: removing a page takes its contents out with it',
+    (await page.locator('.binder-grid .pocket.art').count()) === 0 &&
+    (await page.textContent('#view')).includes('1 / 7 in hand'));
+
+  await page.click('button:has-text("‹")');
+  await page.waitForFunction(() => (document.querySelector('#view').textContent || '').includes('Page 1 of 2'));
+  page.once('dialog', (d) => d.accept());
+  await page.click('.page-remove[data-page="0"]');
+  await page.waitForFunction(() => (document.querySelector('#view').textContent || '').includes('of 1'));
+  check('binder: later pages slide forward onto the removed sheet',
+    (await page.locator('.binder-grid .pocket.filled').count()) === 3 &&
+    (await page.locator('.pocket[data-pocket="1"].filled').count()) === 1 &&
+    (await page.locator('.pocket[data-pocket="4"].filled').count()) === 1 &&
+    (await page.locator('.pocket[data-pocket="0"].filled').count()) === 0);
+  check('binder: the removed sheet’s cards left the binder (7 → 3)',
+    (await page.textContent('#view')).includes('0 / 3 in hand'));
+  await page.click('.page-remove[data-page="0"]');                      // the last sheet is refused
+  await page.waitForTimeout(250);
+  check('binder: a binder always keeps at least one page',
+    (await page.textContent('#view')).includes('of 1') && (await page.locator('.binder-grid').count()) === 1);
+
   // ---- language switching ----
   await page.click('#account-btn');
   await page.waitForSelector('#language-area select');

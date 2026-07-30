@@ -447,6 +447,26 @@ function fail(msg) {
     bRe.binder.slots['12'] && (bRe.binder.slots['12'].cells || []).join(',') === '12,13' &&
     bRe.binder.slots['4'] && typeof bRe.binder.slots['4'].card === 'string');
 
+  // ⊟ remove page: a bare shrink must not orphan page-2 pockets, but a shrink
+  // that ships the shifted-forward slots persists
+  await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { method: 'PUT', headers: buAuth, body: JSON.stringify({ pages: 1 }) });
+  const bKeep = await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { headers: buAuth });
+  const shifted = {};
+  for (const [k, v] of Object.entries(bRe.binder.slots)) {
+    const i = parseInt(k, 10);
+    if (i < 9) continue;                                  // page 1 comes out with the sheet
+    if (v.cells) { const cells = v.cells.map((c) => c - 9).sort((a, b) => a - b); shifted[cells[0]] = { ...v, cells }; }
+    else shifted[i - 9] = v;
+  }
+  await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { method: 'PUT', headers: buAuth, body: JSON.stringify({ pages: 1, slots: shifted }) });
+  const bRm = await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { headers: buAuth });
+  check('binder: page removal persists — later pockets shift forward, orphaning refused',
+    bKeep.binder.pages === 2 &&
+    bRm.binder.pages === 1 && Object.keys(bRm.binder.slots).length === 2 &&
+    bRm.binder.slots['0'] && bRm.binder.slots['0'].n === 3 && bRm.binder.slots['0'].have === 1 &&
+    bRm.binder.slots['3'] && (bRm.binder.slots['3'].cells || []).join(',') === '3,4' &&
+    !bRm.binder.slots['4'] && !bRm.binder.slots['9'] && !bRm.binder.slots['12']);
+
   const bDel = await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { method: 'DELETE', headers: buAuth });
   const bGone = (await fetch(`http://localhost:3115/api/binders/${bd.id}`, { headers: buAuth })).status;
   check('binder: delete removes it', bDel.ok === true && bGone === 404);

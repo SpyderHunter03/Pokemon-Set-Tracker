@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.39.0';
+const APP_VERSION = '3.40.0';
 
 /* ============================================================
  * Storage helpers
@@ -2580,8 +2580,15 @@ async function renderBinderPage(id) {
   }
   const blankPanel = (inside) => h('div', { class: 'book-blank' + (inside ? ' inside' : '') });
   function sideContent(pIdx, insideBlank) {
-    if (pIdx !== null) return renderPageGrid(pIdx);
-    return blankPanel(insideBlank);
+    if (pIdx === null) return blankPanel(insideBlank);
+    const grid = renderPageGrid(pIdx);
+    if (!editMode) return grid;
+    // while editing, each page carries its own ⊟ in the corner
+    return h('div', { class: 'page-wrap' }, grid,
+      h('button', {
+        class: 'page-remove', title: `Remove page ${pIdx + 1}`, 'data-page': String(pIdx),
+        onclick: (e) => { e.stopPropagation(); removePage(pIdx); },
+      }, '⊟'));
   }
   function renderBook() {
     book.classList.toggle('spread', isSpread() && viewIdx !== 0);
@@ -2691,8 +2698,45 @@ async function renderBinderPage(id) {
         h('div', { style: `width:${Math.round((got / total) * 100)}%` })) : null,
       h('div', { class: 'row', style: 'gap:8px; flex-wrap:wrap' }, ...buttons),
       editMode ? h('p', { class: 'muted small', style: 'margin:6px 0 0' },
-        'Editing \u2014 tap an empty pocket to add a card, drag or \u2194 Move to rearrange, \u22ef for pocket options.') : null,
+        'Editing \u2014 tap an empty pocket to add a card, drag or \u2194 Move to rearrange, \u22ef for pocket options, ' +
+        '\u229f in a page\u2019s corner to pull that whole sheet out.') : null,
     ].filter(Boolean));
+  }
+
+  /** pull a whole sheet out of the binder: what sits on it comes out with it
+   * (collection counts are untouched) and every later page slides forward. */
+  async function removePage(pIdx) {
+    if (binder.pages <= 1) { toast('A binder needs at least one page'); return; }
+    const base = pIdx * per, end = base + per;
+    const entries = Object.entries(binder.slots).map(([k, e]) => [parseInt(k, 10), e]);
+    const onPage = (k, e) => (e.img && e.cells) ? e.cells.some((c) => c >= base && c < end) : (k >= base && k < end);
+    let cards = 0, arts = 0;
+    for (const [k, e] of entries) {
+      if (!onPage(k, e)) continue;
+      if (e.img && e.cells) arts++; else if (e.card) cards++;
+    }
+    const what = [cards ? `${cards} card${cards === 1 ? '' : 's'}` : null,
+      arts ? `${arts} picture${arts === 1 ? '' : 's'}` : null].filter(Boolean).join(' and ');
+    if (what && !confirm(`Remove page ${pIdx + 1}? It still holds ${what}, which will come out of the binder — ` +
+      'your collection counts do not change. Every later page slides forward.')) return;
+    const slots = {};
+    for (const [k, e] of entries) {
+      if (onPage(k, e)) continue;                      // out with the sheet
+      if (e.img && e.cells) {
+        const cells = e.cells.map((c) => (c >= end ? c - per : c)).sort((a, b) => a - b);
+        slots[cells[0]] = { ...e, cells };
+      } else if (e.card) {
+        slots[k >= end ? k - per : k] = e;
+      }
+    }
+    const pages = binder.pages - 1;
+    try {
+      await apiCall('binders/' + id, { method: 'PUT', body: JSON.stringify({ pages, slots }) });
+      binder.pages = pages; binder.slots = slots;
+      viewIdx = Math.max(1, Math.min(viewIdx, maxView()));
+      renderHead(); renderNav(); renderBook();
+      toast(`Page ${pIdx + 1} removed`);
+    } catch (e) { toast(e.message); }
   }
 
   /** re-lay the binder for a new pockets-per-side: cards keep their page and

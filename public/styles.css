@@ -807,6 +807,17 @@ body.printing-proxies #print-area {
 .book-page.right { border-radius: 2px 12px 12px 2px; box-shadow: inset 14px 0 18px -14px rgba(0,0,0,.7); }
 .book-page.single { border-radius: 12px; max-width: 480px; margin: 0 auto; }
 .book-page .binder-grid { max-width: none; }
+/* edit mode: each page carries its own ⊟ remove-sheet button */
+.page-wrap { position: relative; }
+.page-wrap .binder-grid { max-width: none; }
+.page-remove {
+  position: absolute; top: -4px; right: -4px; z-index: 3;
+  width: 26px; height: 26px; display: grid; place-items: center;
+  border: 1px solid var(--line, #2a3040); border-radius: 8px;
+  background: rgba(10, 12, 22, .82); color: #dfe4f2;
+  font-size: 14px; line-height: 1; cursor: pointer; opacity: .8;
+}
+.page-remove:hover { opacity: 1; border-color: #e05a5a; color: #ff9b9b; }
 .book-blank { min-height: 200px; height: 100%; opacity: .35; background: repeating-linear-gradient(45deg, transparent 0 12px, rgba(255,255,255,.03) 12px 24px); border-radius: 8px; }
 .binder-cover-page {
   position: relative; max-width: 440px; margin: 0 auto; aspect-ratio: 3 / 4;
