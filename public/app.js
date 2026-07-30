@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.44.0';
+const APP_VERSION = '3.45.0';
 
 /* ============================================================
  * Storage helpers
@@ -674,6 +674,47 @@ function toast(msg) {
 
 function spinner() { return h('div', { class: 'spinner' }); }
 
+/** "Are you sure?" as a panel of the app rather than the browser's own dialog.
+ * Every path that throws something away comes through here, so the warning
+ * always looks the same and always says what specifically is about to go.
+ * Native confirm() couldn't do that job: it's suppressed outright in some
+ * standalone PWAs, and where it does appear it reads as a browser warning
+ * rather than as part of the app.
+ * Cancel holds the focus, and Escape and the backdrop both mean no — the safe
+ * answer should be the effortless one.
+ * @returns {Promise<boolean>} */
+function confirmDestructive({ title, body, confirmLabel = 'Delete', cancelLabel = 'Cancel' }) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (yes) => {
+      if (done) return;
+      done = true;
+      document.removeEventListener('keydown', onKey, true);
+      ov.remove();
+      resolve(yes);
+    };
+    const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); finish(false); } };
+    const noBtn = h('button', { class: 'btn ghost', onclick: () => finish(false) }, cancelLabel);
+    const ov = h('div', { class: 'picker-overlay confirm-overlay', onclick: (e) => { if (e.target === ov) finish(false); } },
+      h('div', { class: 'picker-panel confirm-panel' },
+        h('h3', {}, title),
+        // the lines are already written as sentences; keep the author's breaks
+        ...String(body || '').split('\n').filter((p) => p.trim())
+          .map((p) => h('p', { class: 'muted small', style: 'margin:0' }, p)),
+        h('div', { class: 'row', style: 'justify-content:flex-end; gap:8px; margin-top:2px' },
+          noBtn,
+          h('button', { class: 'btn danger', 'data-confirm': '', onclick: () => finish(true) }, confirmLabel))));
+    document.addEventListener('keydown', onKey, true);
+    // A <dialog> opened with showModal() sits in the browser's top layer, above
+    // everything in the document however you stack it — so a confirmation
+    // appended to <body> would be drawn *behind* the card modal that asked for
+    // it, visible but unclickable. Going inside the dialog puts it back on top.
+    const modals = document.querySelectorAll('dialog[open]');
+    (modals[modals.length - 1] || document.body).append(ov);
+    noBtn.focus();
+  });
+}
+
 /* ============================================================
  * Card grid rendering (shared by set, search, pokémon, scan pages)
  * ============================================================ */
@@ -877,10 +918,14 @@ async function openCardModal(brief, { variant, onOwnershipChange, onCardChanged 
         h('button', { type: 'button', class: 'btn ghost small', onclick: () => fileInput.click() }, `⬆ Upload ${variantLabel(card, active)} image`),
         (realVariants(card).includes(active) && realVariants(card).length > 1)
           ? h('button', { type: 'button', class: 'btn ghost small', onclick: async () => {
-              if (!confirm(`Remove the ${variantLabel(card, active)} printing of ${card.name}?` +
-                (appConfig.master
-                  ? '\n\nThis is the master workspace — publishing afterwards removes it from every install.'
-                  : '\n\nOnly this install is affected; master updates will not bring it back. Restore it any time: re-tick it in \u270e Edit card, or re-add a printing with the same name.'))) return;
+              if (!await confirmDestructive({
+                title: `Remove the ${variantLabel(card, active)} printing?`,
+                body: `${card.name} keeps its other printings — only ${variantLabel(card, active)} goes.\n` +
+                  (appConfig.master
+                    ? 'This is the master workspace: publishing afterwards removes it from every install.'
+                    : 'Only this install is affected; master updates will not bring it back. Restore it any time: re-tick it in \u270e Edit card, or re-add a printing with the same name.'),
+                confirmLabel: 'Remove printing',
+              })) return;
               try {
                 await apiCall('variant-remove', { method: 'POST', body: JSON.stringify({ cardId: card.id, variant: active, lang }) });
                 clearDataCaches();
@@ -1289,7 +1334,16 @@ async function openCardEditor(opts) {
   function renderCustom() {
     cvList.replaceChildren(
       ...existingCustom.filter(([k]) => !customRemove.has(k)).map(([k, lbl]) =>
-        h('span', { class: 'chip' }, lbl + ' ', h('button', { type: 'button', class: 'chip-x', onclick: () => { customRemove.add(k); renderCustom(); } }, '\u2715'))),
+        // staged, not gone — but the only way back is to cancel the whole edit,
+        // so it gets the same "are you sure" as anything else that throws work away
+        h('span', { class: 'chip' }, lbl + ' ', h('button', { type: 'button', class: 'chip-x', onclick: async () => {
+          if (!await confirmDestructive({
+            title: `Remove the "${lbl}" printing?`,
+            body: 'It goes when you save this card. Cancel the edit instead if you change your mind before then.',
+            confirmLabel: 'Remove printing',
+          })) return;
+          customRemove.add(k); renderCustom();
+        } }, '\u2715'))),
       ...customPend.map((lbl, i) =>
         h('span', { class: 'chip' }, lbl + ' ', h('button', { type: 'button', class: 'chip-x', onclick: () => { customPend.splice(i, 1); renderCustom(); } }, '\u2715'))),
     );
@@ -1430,8 +1484,13 @@ async function openCardEditor(opts) {
   }
 
   async function hideCard() {
-    if (!confirm(`Hide "${editing.name}" from the database?` +
-      (appConfig.master ? '\n\nThis is the master workspace \u2014 publishing afterwards removes the card from every install.' : '\n\nOnly this install is affected; master updates will not bring it back.'))) return;
+    if (!await confirmDestructive({
+      title: `Hide "${editing.name}" from the database?`,
+      body: 'It stops appearing in sets, searches and the scanner. Binders that hold it keep their pocket.\n' +
+        (appConfig.master ? 'This is the master workspace: publishing afterwards removes the card from every install.'
+          : 'Only this install is affected; master updates will not bring it back. Restore it from the set page.'),
+      confirmLabel: 'Hide card',
+    })) return;
     try {
       await apiCall('card-hide', { method: 'POST', body: JSON.stringify({ cardId: editing.id, hidden: true, lang }) });
       overlay.remove();
@@ -2521,18 +2580,58 @@ async function renderBindersPage() {
       color = c;
       swatches.querySelectorAll('.swatch').forEach((el) => el.classList.toggle('active', el === e.target));
     } })));
-  const setSel = h('select', {}, h('option', { value: '' }, 'Start empty'));
-  try {
-    const idx = await getIndex();
-    for (const s of [...idx.sets].reverse()) setSel.append(h('option', { value: s.id }, 'Fill from: ' + s.name));
-  } catch { /* empty-start only */ }
+  /* ---- what goes in it: nothing, a whole set, or every card of one Pok\u00e9mon ----
+     There were 150-odd sets in one dropdown already and a species list is far
+     longer still, so this is a searchable picker rather than a scroll. */
+  let fill = null;   // { kind: 'set'|'dex', id, label }
+  const fillBtn = h('button', { type: 'button', class: 'btn ghost', 'data-fill': '' });
+  const syncFill = () => { fillBtn.textContent = fill ? 'Fill from: ' + fill.label : 'Start empty'; };
+  syncFill();
+  fillBtn.addEventListener('click', async () => {
+    let sets = [], species = [];
+    try {
+      const [idx, sx] = await Promise.all([getIndex(), getSearchIndex()]);
+      sets = [...idx.sets].reverse().map((s) => ({ kind: 'set', id: s.id, label: s.name, sub: 'Set' }));
+      species = sx.species.map((sp) => ({ kind: 'dex', id: String(sp.dex), label: sp.name,
+        sub: `Pok\u00e9mon #${String(sp.dex).padStart(3, '0')} \u00b7 ${sp.cards.length} card${sp.cards.length === 1 ? '' : 's'}` }));
+    } catch { toast('Could not load the card list'); return; }
+    const all = [{ kind: null, id: '', label: 'Start empty', sub: 'Add cards yourself' }, ...sets, ...species];
+    const input = h('input', { type: 'text', placeholder: 'Search sets and Pok\u00e9mon\u2026' });
+    const results = h('div', { class: 'picker-results' });
+    const pick = (o) => { fill = o.kind ? o : null; syncFill(); ov.remove(); };
+    const render = () => {
+      const q = input.value.trim().toLowerCase();
+      const hits = q ? all.filter((o) => o.label.toLowerCase().includes(q) || o.id.toLowerCase() === q) : all;
+      results.replaceChildren();
+      if (!hits.length) { results.append(h('p', { class: 'muted small' }, 'Nothing matches.')); return; }
+      // long lists render in chunks so typing stays instant on a phone
+      let shown = 0;
+      const more = () => { for (const o of hits.slice(shown, shown + 40)) results.append(
+        h('div', { class: 'picker-row', onclick: () => pick(o) },
+          h('div', { class: 'picker-info' }, h('div', {}, o.label), h('div', { class: 'muted small' }, o.sub)))); shown = Math.min(shown + 40, hits.length); };
+      more();
+      results.onscroll = () => { if (shown < hits.length && results.scrollTop + results.clientHeight > results.scrollHeight - 300) more(); };
+    };
+    input.addEventListener('input', render);
+    const ov = h('div', { class: 'picker-overlay' },
+      h('div', { class: 'picker-panel' },
+        h('h3', {}, 'Fill the binder with'),
+        input, results,
+        h('div', { class: 'row', style: 'justify-content:flex-end; margin-top:6px' },
+          h('button', { class: 'btn ghost small', onclick: () => ov.remove() }, 'Cancel'))));
+    view.append(ov);
+    render();
+    input.focus();
+  });
   const createBtn = h('button', { class: 'btn', onclick: async () => {
     const name = nameIn.value.trim();
     if (!name) { toast('Give the binder a name'); return; }
     createBtn.disabled = true;
     try {
       const r = await apiCall('binders', { method: 'POST', body: JSON.stringify({
-        name, size: parseInt(sizeSel.value, 10), color, fillFromSet: setSel.value || undefined, lang,
+        name, size: parseInt(sizeSel.value, 10), color, lang,
+        fillFromSet: fill && fill.kind === 'set' ? fill.id : undefined,
+        fillFromPokemon: fill && fill.kind === 'dex' ? fill.id : undefined,
       }) });
       location.hash = '#/binder/' + r.binder.id;
     } catch (e) { createBtn.disabled = false; toast(e.message); }
@@ -2544,7 +2643,7 @@ async function renderBindersPage() {
     grid,
     h('div', { class: 'binder-create' },
       h('h3', {}, 'New binder'),
-      h('div', { class: 'row', style: 'flex-wrap:wrap; gap:8px' }, nameIn, sizeSel, setSel),
+      h('div', { class: 'row', style: 'flex-wrap:wrap; gap:8px' }, nameIn, sizeSel, fillBtn),
       swatches,
       createBtn,
     ),
@@ -2649,7 +2748,7 @@ async function renderBinderPage(id) {
 
   const head = h('div', {});
   const pickBar = h('div', {});
-  const nav = h('div', { class: 'row', style: 'justify-content:center; align-items:center; gap:12px; margin:10px 0' });
+  const nav = h('div', { class: 'row binder-nav', style: 'justify-content:center; align-items:center; gap:8px; margin:10px 0' });
   const book = h('div', { class: 'binder-book' });
   const actions = h('div', {});
 
@@ -2697,12 +2796,17 @@ async function renderBinderPage(id) {
     if (pIdx === null) return blankPanel(insideBlank);
     const grid = renderPageGrid(pIdx);
     if (!editMode) return grid;
-    // while editing, each page carries its own ⊟ in the corner
+    // A bare ⊟ in the corner used to sit here, and nobody should have to guess
+    // what a glyph does before finding out by pressing it. It says what it is,
+    // in words, under the page it belongs to — and it says which page, which
+    // matters most in a two-page spread where the corners are ambiguous.
     return h('div', { class: 'page-wrap' }, grid,
       h('button', {
-        class: 'page-remove', title: `Remove page ${pIdx + 1}`, 'data-page': String(pIdx),
+        class: 'page-remove', 'data-page': String(pIdx),
+        title: `Take page ${pIdx + 1} out of this binder`,
         onclick: (e) => { e.stopPropagation(); removePage(pIdx); },
-      }, '⊟'));
+      }, h('span', { class: 'page-remove-icon', 'aria-hidden': 'true' }, '\ud83d\uddd1'),
+         h('span', {}, `Remove page ${pIdx + 1}`)));
   }
   function renderBook() {
     book.classList.toggle('spread', isSpread() && viewIdx !== 0);
@@ -2756,12 +2860,53 @@ async function renderBinderPage(id) {
     requestAnimationFrame(() => requestAnimationFrame(() => sheet.classList.add('go')));
   }
   function renderNav() {
+    // a full binder is 30+ views deep; jumping to either end beats 30 taps.
+    // Clamping here and not just in navTo is what lets a button that can't go
+    // anywhere look like it: greyed out rather than dead on arrival.
+    const jump = (raw, dir, label, title) => {
+      const idx = Math.max(0, Math.min(maxView(), raw));
+      return h('button', {
+        class: 'btn ghost small', title, 'aria-label': title,
+        disabled: viewIdx === idx ? '' : null,
+        onclick: () => navTo(idx, dir),
+      }, label);
+    };
     nav.replaceChildren(
-      h('button', { class: 'btn ghost small', onclick: () => navTo(viewIdx - 1, -1) }, '\u2039'),
+      jump(0, -1, '\u00ab', 'First page'),
+      jump(viewIdx - 1, -1, '\u2039', 'Previous page'),
       h('span', { class: 'muted', style: 'min-width:130px; text-align:center' }, navLabel()),
-      h('button', { class: 'btn ghost small', onclick: () => navTo(viewIdx + 1, 1) }, '\u203a'),
+      jump(viewIdx + 1, 1, '\u203a', 'Next page'),
+      jump(maxView(), 1, '\u00bb', 'Last page'),
     );
   }
+
+  /* ---- swipe to turn the page ----
+     Thumb on the page and drag, the way you'd flip a real binder. Only a
+     clearly horizontal, clearly deliberate drag counts: a vertical scroll or a
+     stray finger during a tap must never cost you your place. */
+  let touch = null;
+  book.addEventListener('touchstart', (e) => {
+    if (e.touches.length !== 1) { touch = null; return; }   // a pinch is not a swipe
+    const t = e.touches[0];
+    touch = { x: t.clientX, y: t.clientY, t: Date.now(), live: true };
+  }, { passive: true });
+  book.addEventListener('touchmove', (e) => {
+    if (!touch || !touch.live || e.touches.length !== 1) return;
+    const t = e.touches[0];
+    // once the finger commits to the vertical, this gesture is a scroll for good
+    if (Math.abs(t.clientY - touch.y) > Math.abs(t.clientX - touch.x) && Math.abs(t.clientY - touch.y) > 12) touch.live = false;
+  }, { passive: true });
+  book.addEventListener('touchend', (e) => {
+    const start = touch;
+    touch = null;
+    if (!start || !start.live || editMode || pickMode) return;   // editing/picking owns the touch
+    const t = e.changedTouches[0];
+    if (!t) return;
+    const dx = t.clientX - start.x, dy = t.clientY - start.y;
+    if (Math.abs(dx) < 60 || Math.abs(dx) < Math.abs(dy) * 1.6) return;
+    if (Date.now() - start.t > 800) return;                      // a slow drag is a fidget, not a flip
+    navTo(viewIdx + (dx < 0 ? 1 : -1), dx < 0 ? 1 : -1);         // drag left = forward, like a real book
+  }, { passive: true });
   spreadMq.addEventListener('change', () => { viewIdx = Math.min(viewIdx, maxView()); renderNav(); renderBook(); });
 
   const setEditMode = (on) => {
@@ -2826,7 +2971,12 @@ async function renderBinderPage(id) {
       // wrapped, not passed bare: the handler's Event must not land in `only`
       h('button', { class: 'btn ghost small', onclick: () => openProxyPrintDialog() }, '\ud83d\udda8 Print proxies'),
       h('button', { class: 'btn ghost small', onclick: async () => {
-        if (!confirm(`Delete "${binder.name}"? This cannot be undone.`)) return;
+        if (!await confirmDestructive({
+          title: `Delete the binder "${binder.name}"?`,
+          body: `All ${binder.pages} page${binder.pages === 1 ? '' : 's'} and everything laid out in them go with it. ` +
+            'Your collection counts are not touched — only this arrangement of them. This cannot be undone.',
+          confirmLabel: 'Delete binder',
+        })) return;
         try { await apiCall('binders/' + id, { method: 'DELETE' }); location.hash = '#/binders'; }
         catch (e) { toast(e.message); }
       } }, '\ud83d\uddd1 Delete'),
@@ -2850,7 +3000,7 @@ async function renderBinderPage(id) {
       h('div', { class: 'row', style: 'gap:8px; flex-wrap:wrap' }, ...buttons),
       editMode ? h('p', { class: 'muted small', style: 'margin:6px 0 0' },
         'Editing \u2014 tap an empty pocket to add a card, drag or \u2194 Move to rearrange, \u22ef for pocket options, ' +
-        '\u229f in a page\u2019s corner to pull that whole sheet out.') : null,
+        'and \u201cRemove page\u201d under a page to pull that whole sheet out.') : null,
       pickMode ? h('p', { class: 'muted small', style: 'margin:6px 0 0' },
         'Selecting \u2014 tap the pockets you want as proxies, then turn the page and keep going; they all print on the ' +
         'same sheets. Tapping will not change what\u2019s in hand while you\u2019re picking.') : null,
@@ -2871,8 +3021,14 @@ async function renderBinderPage(id) {
     }
     const what = [cards ? `${cards} card${cards === 1 ? '' : 's'}` : null,
       arts ? `${arts} picture${arts === 1 ? '' : 's'}` : null].filter(Boolean).join(' and ');
-    if (what && !confirm(`Remove page ${pIdx + 1}? It still holds ${what}, which will come out of the binder — ` +
-      'your collection counts do not change. Every later page slides forward.')) return;
+    // asked every time, empty page or not: pulling a sheet renumbers everything
+    // after it, which is not a thing you want to discover by accident
+    if (!await confirmDestructive({
+      title: `Pull page ${pIdx + 1} out of the binder?`,
+      body: (what ? `It still holds ${what}, which comes out with it. Your collection counts do not change.\n` : 'The page is empty.\n') +
+        `Every later page slides forward, so the binder goes from ${binder.pages} pages to ${binder.pages - 1}.`,
+      confirmLabel: `Remove page ${pIdx + 1}`,
+    })) return;
     const slots = {};
     for (const [k, e] of entries) {
       if (onPage(k, e)) continue;                      // out with the sheet
@@ -3004,6 +3160,12 @@ async function renderBinderPage(id) {
         h('span', { class: 'muted small' }, `Your image \u2014 ${s.cells.length} pocket${s.cells.length === 1 ? '' : 's'}`),
         h('button', { class: 'btn small', onclick: () => openArtEditor(i) }, '\u270e Adjust'),
         h('button', { class: 'btn small', onclick: async () => {
+          if (!await confirmDestructive({
+            title: 'Take this picture out of the binder?',
+            body: `It frees up the ${s.cells.length} pocket${s.cells.length === 1 ? '' : 's'} it covers. ` +
+              'The image itself is gone from the binder — you would have to upload it again.',
+            confirmLabel: 'Remove picture',
+          })) return;
           delete binder.slots[i]; await save(); actions.replaceChildren(); renderHead(); renderBook();
         } }, '\u2715 Remove'),
         h('button', { class: 'btn ghost small', onclick: () => actions.replaceChildren() }, 'Cancel'),
@@ -3020,6 +3182,12 @@ async function renderBinderPage(id) {
       } }, '\u2194 Move'),
       card ? h('button', { class: 'btn small', onclick: () => openCardModal(card, cardModalOpts(s)) }, '\u24d8 Details') : null,
       h('button', { class: 'btn small', onclick: async () => {
+        if (s && !await confirmDestructive({
+          title: `Empty pocket ${i + 1}?`,
+          body: `${card ? card.name : s.card} comes out of the binder. How many you own does not change — ` +
+            'this only clears the pocket.',
+          confirmLabel: 'Empty pocket',
+        })) return;
         delete binder.slots[i]; await save(); actions.replaceChildren(); renderHead(); renderBook();
       } }, '\u2715 Remove'),
       h('button', { class: 'btn ghost small', onclick: () => actions.replaceChildren() }, 'Cancel'),
@@ -3681,8 +3849,23 @@ async function renderBinderPage(id) {
   view.replaceChildren(head, pickBar, nav, book, actions);
 }
 
+/* iOS keeps a zoom across in-app navigation — and it auto-zooms whenever you
+ * focus a small field — so you land on the next page magnified, scrolled
+ * sideways, with no obvious way back. Briefly pinning the viewport to scale 1
+ * snaps it out; the pin is lifted straight after so you can still pinch in to
+ * study a card's artwork. */
+function resetZoom() {
+  const meta = document.querySelector('meta[name=viewport]');
+  if (!meta || meta.dataset.pinned) return;
+  const original = meta.getAttribute('content');
+  meta.dataset.pinned = '1';
+  meta.setAttribute('content', 'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=0, viewport-fit=cover');
+  setTimeout(() => { meta.setAttribute('content', original); delete meta.dataset.pinned; }, 300);
+}
+
 function route() {
   const hash = location.hash.slice(1) || '/';
+  resetZoom();
   stopScanner(); // release the camera when leaving the scan page
   stopBuildPoll(); // pages restart their own progress polling if needed
   const setMatch = hash.match(/^\/set\/(.+)$/);

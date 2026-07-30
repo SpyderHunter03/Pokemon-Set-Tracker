@@ -13,6 +13,12 @@ const { chromium } = require('playwright');
 
   let failCount = 0;
   const check = (name, cond) => { console.log((cond ? 'PASS' : 'FAIL') + ' — ' + name); if (!cond) failCount++; };
+  /** say yes to the app's own are-you-sure panel */
+  const confirmYes = async () => {
+    await page.waitForSelector('.confirm-panel');
+    await page.click('.confirm-panel .btn.danger');
+    await page.waitForSelector('.confirm-panel', { state: 'detached' });
+  };
 
   // no database yet → welcome panel with the download button
   await page.goto('http://localhost:3111/');
@@ -109,8 +115,10 @@ const { chromium } = require('playwright');
   // ---- removing a printing from the modal, and bringing it back ----
   await page.click('.tcg-card[data-variant="cracked-ice-holo"] .info-btn');
   await page.waitForSelector('#card-modal[open] button:has-text("Remove Cracked Ice Holo")');
-  page.once('dialog', (d) => d.accept());
   await page.click('#card-modal button:has-text("Remove Cracked Ice Holo")');
+  check('editor: removing a printing spells out what survives it',
+    (await page.textContent('.confirm-panel')).includes('keeps its other printings'));
+  await confirmYes();
   await page.waitForFunction((n) => document.querySelectorAll('.tcg-card').length === n, tilesBefore);
   check('editor: removed printing drops its tile from the set', true);
   // re-adding a printing with the same name restores it, scan and all
@@ -170,8 +178,11 @@ const { chromium } = require('playwright');
   await page.waitForSelector('#card-modal[open] button:has-text("Edit card")');
   await page.click('#card-modal button:has-text("Edit card")');
   await page.waitForSelector('.ce-panel button:has-text("Hide card")');
-  page.once('dialog', (d) => d.accept());
   await page.click('.ce-panel button:has-text("Hide card")');
+  check('editor: hiding a card asks first, by name',
+    (await page.textContent('.confirm-panel')).includes('"Renamed Test Card"') ||
+    /Hide "[^"]+" from the database/.test(await page.textContent('.confirm-panel')));
+  await confirmYes();
   await page.waitForSelector('h3:has-text("Hidden cards (1)")');
   check('editor: hidden card leaves the grid and lists under Hidden cards',
     (await page.locator('.tcg-card[data-card-id="test-promos-1"]').count()) === 0);

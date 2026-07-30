@@ -25,6 +25,20 @@ const { chromium } = require('playwright');
   let failCount = 0;
   const check = (name, cond) => { console.log((cond ? 'PASS' : 'FAIL') + ' — ' + name); if (!cond) failCount++; };
   const coll = () => page.evaluate(() => JSON.parse(localStorage.getItem('ptcg.collection.v2')));
+  /** the binder-create fill picker: open it, type, take the named hit */
+  const pickFill = async (pg, query, label) => {
+    await pg.click('.binder-create [data-fill]');
+    await pg.waitForSelector('.picker-panel h3:has-text("Fill the binder with")');
+    await pg.fill('.picker-overlay input[type=text]', query);
+    await pg.click(`.picker-overlay .picker-row:has-text("${label}") >> nth=0`);
+    await pg.waitForSelector('.picker-overlay', { state: 'detached' });
+  };
+  /** say yes to the app's own are-you-sure panel */
+  const confirmYes = async (pg) => {
+    await pg.waitForSelector('.confirm-panel');
+    await pg.click('.confirm-panel .btn.danger');
+    await pg.waitForSelector('.confirm-panel', { state: 'detached' });
+  };
 
   // ---- logged out: browse-only (tracking requires an account) ----
   await page.goto('http://localhost:3111/');
@@ -209,7 +223,11 @@ const { chromium } = require('playwright');
   await page.waitForSelector('.binder-create');
   await page.fill('.binder-create input[type=text]', 'My Binder');
   await page.selectOption('.binder-create select >> nth=0', '2');       // 2×2 pockets
-  await page.selectOption('.binder-create select >> nth=1', 'base1');   // fill from Base Set
+  check('binder: the fill picker starts on "Start empty"',
+    (await page.textContent('.binder-create [data-fill]')) === 'Start empty');
+  await pickFill(page, 'base set', 'Base Set');                        // fill from Base Set
+  check('binder: the picker reports what it will fill from',
+    (await page.textContent('.binder-create [data-fill]')) === 'Fill from: Base Set');
   await page.click('.binder-create .swatch.b-green');
   await page.click('button:has-text("Create binder")');
   await page.waitForSelector('.binder-cover-page');                     // the binder opens on its COVER
@@ -581,9 +599,39 @@ const { chromium } = require('playwright');
   await page.click('button:has-text("›")');                             // pages 2–3
   await page.waitForFunction(() => (document.querySelector('#view').textContent || '').includes('Pages 2–3 of 3'));
   await page.waitForFunction(() => !document.querySelector('.flip-sheet'));   // let the turn finish
-  check('binder: every visible page gets its own ⊟', (await page.locator('.page-remove').count()) === 2);
-  page.once('dialog', (d) => d.accept());                               // page 3 holds a picture → confirm
+
+  // ---- jumping to either end of the binder ----
+  check('binder: nav carries first/prev/next/last around the label',
+    (await page.locator('.binder-nav button').count()) === 4 &&
+    (await page.getAttribute('.binder-nav button >> nth=0', 'aria-label')) === 'First page' &&
+    (await page.getAttribute('.binder-nav button >> nth=3', 'aria-label')) === 'Last page');
+  check('binder: on the last spread, the forward jumps are greyed out',
+    (await page.locator('.binder-nav button[disabled] >> nth=0').getAttribute('aria-label')) === 'Next page' &&
+    (await page.locator('.binder-nav button[disabled]').count()) === 2);
+  await page.click('.binder-nav button[aria-label="First page"]');
+  await page.waitForFunction(() => (document.querySelector('#view').textContent || '').includes('Cover'));
+  check('binder: « goes straight to the cover from anywhere', true);
+  check('binder: at the cover it is the backward jumps that are greyed out',
+    (await page.locator('.binder-nav button[disabled]').count()) === 2 &&
+    (await page.locator('.binder-nav button[disabled] >> nth=0').getAttribute('aria-label')) === 'First page');
+  await page.click('.binder-nav button[aria-label="Last page"]');
+  await page.waitForFunction(() => (document.querySelector('#view').textContent || '').includes('Pages 2–3 of 3'));
+  await page.waitForFunction(() => !document.querySelector('.flip-sheet'));
+  check('binder: » goes straight to the far end', true);
+
+  check('binder: every visible page gets its own remove button, named in words',
+    (await page.locator('.page-remove').count()) === 2 &&
+    (await page.textContent('.page-remove[data-page="2"]')).includes('Remove page 3'));
   await page.click('.page-remove[data-page="2"]');
+  check('binder: removing a page says what is on it before it goes',
+    (await page.textContent('.confirm-panel')).includes('Pull page 3 out') &&
+    /1 picture/.test(await page.textContent('.confirm-panel')));
+  await page.click('.confirm-panel .btn.ghost');                        // …and backing out changes nothing
+  await page.waitForSelector('.confirm-panel', { state: 'detached' });
+  check('binder: cancelling the confirmation keeps the page',
+    (await page.textContent('#view')).includes('of 3'));
+  await page.click('.page-remove[data-page="2"]');
+  await confirmYes(page);
   await page.waitForFunction(() => (document.querySelector('#view').textContent || '').includes('of 2'));
   check('binder: removing a page takes its contents out with it',
     (await page.locator('.binder-grid .pocket.art').count()) === 0 &&
@@ -591,8 +639,8 @@ const { chromium } = require('playwright');
 
   await page.click('button:has-text("‹")');
   await page.waitForFunction(() => (document.querySelector('#view').textContent || '').includes('Page 1 of 2'));
-  page.once('dialog', (d) => d.accept());
   await page.click('.page-remove[data-page="0"]');
+  await confirmYes(page);
   await page.waitForFunction(() => (document.querySelector('#view').textContent || '').includes('of 1'));
   check('binder: later pages slide forward onto the removed sheet',
     (await page.locator('.binder-grid .pocket.filled').count()) === 3 &&
@@ -605,6 +653,72 @@ const { chromium } = require('playwright');
   await page.waitForTimeout(250);
   check('binder: a binder always keeps at least one page',
     (await page.textContent('#view')).includes('of 1') && (await page.locator('.binder-grid').count()) === 1);
+
+  // ---- a binder filled from one Pokémon, then deleted on purpose ----
+  await page.goto('http://localhost:3111/#/binders');
+  await page.waitForSelector('.binder-create');
+  await page.fill('.binder-create input[type=text]', 'Charizards');
+  await page.selectOption('.binder-create select >> nth=0', '2');
+  await page.click('.binder-create [data-fill]');
+  await page.waitForSelector('.picker-panel h3:has-text("Fill the binder with")');
+  const allFillRows = await page.locator('.picker-overlay .picker-row').count();
+  await page.fill('.picker-overlay input[type=text]', 'chariz');
+  await page.waitForFunction(() => document.querySelectorAll('.picker-overlay .picker-row').length < 6);
+  check('binder: the fill box filters the long list down to what you typed',
+    allFillRows > 3 && (await page.locator('.picker-overlay .picker-row').count()) < allFillRows &&
+    (await page.textContent('.picker-overlay .picker-row >> nth=0')).includes('Charizard'));
+  check('binder: species entries say they are Pokémon, and how many cards',
+    /Pok[ée]mon #006/.test(await page.textContent('.picker-overlay .picker-row:has-text("Charizard") >> nth=0')));
+  await page.click('.picker-overlay .picker-row:has-text("Charizard") >> nth=0');
+  await page.waitForSelector('.picker-overlay', { state: 'detached' });
+  await page.click('button:has-text("Create binder")');
+  await page.waitForSelector('.binder-cover-page');
+  await page.click('.binder-cover-page');
+  await page.waitForSelector('.binder-grid .pocket.filled');
+  check('binder: filling from a Pokémon gathers its printings across sets',
+    (await page.locator('.binder-grid .pocket.filled').count()) === 2 &&
+    new Set(await page.locator('.pocket.filled .pocket-cap .cap-set').allTextContents()).size === 2);
+
+  await page.click('button:has-text("Edit binder")');
+  await page.waitForSelector('.page-remove');
+  await page.click('button:has-text("Delete")');
+  await page.waitForSelector('.confirm-panel');
+  check('binder: deleting one names it and says the collection is safe',
+    (await page.textContent('.confirm-panel')).includes('"Charizards"') &&
+    (await page.textContent('.confirm-panel')).includes('collection counts are not touched'));
+  await page.keyboard.press('Escape');
+  await page.waitForSelector('.confirm-panel', { state: 'detached' });
+  check('binder: Escape means no — the binder is still open', (await page.locator('.binder-book').count()) === 1);
+  await page.click('button:has-text("Delete")');
+  await confirmYes(page);
+  await page.waitForSelector('.binder-create');
+  check('binder: confirming really does delete it',
+    !(await page.textContent('#view')).includes('Charizards'));
+
+  // ---- emptying a pocket asks first ----
+  await page.goto('http://localhost:3111/#/binders');
+  await page.click('.binder-cover');
+  await page.waitForSelector('.binder-cover-page');
+  await page.click('.binder-cover-page');
+  await page.waitForSelector('.binder-grid .pocket.filled');
+  await page.click('button:has-text("Edit binder")');
+  await page.waitForSelector('.pocket.filled .pocket-edit');
+  const beforeEmpty = await page.locator('.binder-grid .pocket.filled').count();
+  await page.click('.pocket.filled .pocket-edit >> nth=0');
+  await page.click('.pocket-actions button:has-text("Remove")');
+  await page.waitForSelector('.confirm-panel');
+  check('binder: emptying a pocket says which card and that counts are safe',
+    (await page.textContent('.confirm-panel')).includes('Empty pocket') &&
+    (await page.textContent('.confirm-panel')).includes('How many you own does not change'));
+  await page.click('.confirm-panel .btn.ghost');
+  await page.waitForSelector('.confirm-panel', { state: 'detached' });
+  check('binder: backing out leaves the pocket alone',
+    (await page.locator('.binder-grid .pocket.filled').count()) === beforeEmpty);
+  await page.click('.pocket-actions button:has-text("Remove")');
+  await confirmYes(page);
+  await page.waitForFunction((n) => document.querySelectorAll('.binder-grid .pocket.filled').length === n - 1, beforeEmpty);
+  check('binder: confirming empties it', true);
+  await page.click('button:has-text("Done")');
 
   // ---- language switching ----
   await page.click('#account-btn');
@@ -799,7 +913,7 @@ const { chromium } = require('playwright');
     await ep.waitForSelector('.binder-create');
     await ep.fill('.binder-create input[type=text]', 'Admin Binder');
     await ep.selectOption('.binder-create select >> nth=0', '2');       // 2×2 → base1's 5 cards need 2 pages
-    await ep.selectOption('.binder-create select >> nth=1', 'base1');
+    await pickFill(ep, 'base set', 'Base Set');
     await ep.click('button:has-text("Create binder")');
     await ep.waitForSelector('.binder-cover-page');
     await ep.click('.binder-cover-page');

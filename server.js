@@ -1059,6 +1059,12 @@ const _setsIndex = db.prepare('SELECT id, name, release_date, logo, official_cou
 const _setCount = db.prepare('SELECT COUNT(*) AS n FROM cards WHERE lang = ? AND set_id = ? AND hidden = 0');
 const _oneSet = db.prepare('SELECT id, name, release_date, official_count FROM sets WHERE lang = ? AND id = ? AND hidden = 0');
 const _cardsOfSet = db.prepare('SELECT * FROM cards WHERE lang = ? AND set_id = ? AND hidden = 0 ORDER BY position, local_id');
+// every printing of one species, oldest set first — dex_csv is "6" or "6,7",
+// so match the whole field or the number as a comma-delimited word inside it
+const _cardsOfDex = db.prepare(`SELECT c.* FROM cards c JOIN sets s ON s.lang = c.lang AND s.id = c.set_id
+  WHERE c.lang = ? AND c.hidden = 0 AND s.hidden = 0
+    AND (',' || c.dex_csv || ',') LIKE ('%,' || ? || ',%')
+  ORDER BY s.position, c.position, c.local_id`);
 const _cardsOfLang = db.prepare('SELECT id, set_id, local_id, name, rarity, category, dex_csv, types_csv, variants_csv, img_low, img_high FROM cards WHERE lang = ? AND hidden = 0 ORDER BY position');
 const _printsOfCard = db.prepare('SELECT variant, label, img_low, img_high, hidden FROM printings WHERE lang = ? AND card_id = ?');
 const _printsOfLang = db.prepare('SELECT card_id, variant, label, img_low, img_high, hidden FROM printings WHERE lang = ?');
@@ -1784,15 +1790,20 @@ async function handleApi(req, res, pathname, ip, url) {
     if (_bindersOf.all(user.id).length >= 100) return sendJSON(res, 400, { error: 'Binder limit reached (100)' });
     const perPage = size * size;
     let slots = {}, pages = 1;
-    if (body.fillFromSet && SET_ID_RE.test(body.fillFromSet)) {
-      const flang = LANG_RE.test(body.lang || '') ? body.lang : 'en';
-      const cards = _cardsOfSet.all(flang, body.fillFromSet);
-      if (!cards.length) return sendJSON(res, 400, { error: 'That set has no cards to fill from' });
-      cards.forEach((c, i) => {
+    // fill from a whole set, or from every printing of one Pokémon — a species
+    // binder is the other way collectors organise, and it spans sets by nature
+    const flang = LANG_RE.test(body.lang || '') ? body.lang : 'en';
+    const dex = parseInt(body.fillFromPokemon, 10);
+    const fill = body.fillFromSet && SET_ID_RE.test(body.fillFromSet)
+      ? { cards: _cardsOfSet.all(flang, body.fillFromSet), what: 'That set' }
+      : (dex > 0 && dex < 100000 ? { cards: _cardsOfDex.all(flang, String(dex)), what: 'That Pokémon' } : null);
+    if (fill) {
+      if (!fill.cards.length) return sendJSON(res, 400, { error: `${fill.what} has no cards to fill from` });
+      fill.cards.forEach((c, i) => {
         const primary = (c.variants_csv ? c.variants_csv.split(',') : ['normal'])[0] || 'normal';
         slots[i] = { card: c.id, variant: primary, have: 0 };
       });
-      pages = Math.max(1, Math.ceil(cards.length / perPage));
+      pages = Math.max(1, Math.ceil(fill.cards.length / perPage));
     }
     const binder = {
       id: crypto.randomUUID(), name, size, color, pages,
