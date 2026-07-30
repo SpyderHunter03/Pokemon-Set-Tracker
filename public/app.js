@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.40.0';
+const APP_VERSION = '3.41.0';
 
 /* ============================================================
  * Storage helpers
@@ -2471,6 +2471,11 @@ async function renderBinderPage(id) {
   // the binder opens in VIEW mode (flip pages, tap pockets you've gotten);
   // layout work — moving cards, resizing, covers — lives behind ✎ Edit
   let editMode = false;
+  // "select to print": pick individual pockets, carry the choice across page
+  // turns, then print just those so one card never wastes a whole sheet.
+  // Keys are pocket indexes; a placed picture is keyed by its anchor pocket.
+  let pickMode = false;
+  const picked = new Set();
 
   // ---- art entries: your own picture across an arbitrary set of pockets ----
   const GAP_MM = 4, CARD_W = 63, CARD_H = 88;   // physical card + pocket spacing
@@ -2535,6 +2540,7 @@ async function renderBinderPage(id) {
   const haveCount = () => Object.values(binder.slots).filter((e) => e.card && e.have).length;
 
   const head = h('div', {});
+  const pickBar = h('div', {});
   const nav = h('div', { class: 'row', style: 'justify-content:center; align-items:center; gap:12px; margin:10px 0' });
   const book = h('div', { class: 'binder-book' });
   const actions = h('div', {});
@@ -2653,9 +2659,41 @@ async function renderBinderPage(id) {
   const setEditMode = (on) => {
     editMode = on;
     moveFrom = null;
+    // layout editing and print-picking are different jobs — never both at once
+    pickMode = false; picked.clear();
     actions.replaceChildren();
-    renderHead(); renderBook();
+    renderHead(); renderPickBar(); renderBook();
   };
+
+  const setPickMode = (on) => {
+    pickMode = on;
+    if (!on) picked.clear();
+    actions.replaceChildren();
+    renderHead(); renderPickBar(); renderBook();
+  };
+
+  /** flip one pocket in or out of the print selection */
+  function togglePick(key) {
+    if (picked.has(key)) picked.delete(key); else picked.add(key);
+    renderPickBar(); renderBook();
+  }
+
+  function renderPickBar() {
+    if (!pickMode) { pickBar.replaceChildren(); return; }
+    const n = picked.size;
+    pickBar.replaceChildren(h('div', { class: 'pick-bar' },
+      h('strong', {}, n ? `${n} selected` : 'Nothing selected yet'),
+      h('button', {
+        class: 'btn small' + (n ? '' : ' ghost'), 'data-pick-print': '',
+        onclick: () => {
+          if (!picked.size) { toast('Tap the pockets you want to print first'); return; }
+          openProxyPrintDialog(new Set(picked));   // snapshot: printing clears the live set
+        },
+      }, '🖨 Print selected'),
+      n ? h('button', { class: 'btn ghost small', onclick: () => { picked.clear(); renderPickBar(); renderBook(); } }, 'Clear') : null,
+      h('button', { class: 'btn ghost small', onclick: () => setPickMode(false) }, '✓ Done'),
+    ));
+  }
 
   function renderHead() {
     const total = filledCount(), got = haveCount();
@@ -2677,15 +2715,20 @@ async function renderBinderPage(id) {
         binder.pages += 1; await save(); renderNav(); renderBook();
       } }, '\uff0b Add page'),
       h('button', { class: 'btn ghost small', onclick: openCoverPicker }, '\ud83d\uddbc Cover'),
-      h('button', { class: 'btn ghost small', onclick: openProxyPrintDialog }, '\ud83d\udda8 Print proxies'),
+      // wrapped, not passed bare: the handler's Event must not land in `only`
+      h('button', { class: 'btn ghost small', onclick: () => openProxyPrintDialog() }, '\ud83d\udda8 Print proxies'),
       h('button', { class: 'btn ghost small', onclick: async () => {
         if (!confirm(`Delete "${binder.name}"? This cannot be undone.`)) return;
         try { await apiCall('binders/' + id, { method: 'DELETE' }); location.hash = '#/binders'; }
         catch (e) { toast(e.message); }
       } }, '\ud83d\uddd1 Delete'),
       h('button', { class: 'btn small', onclick: () => setEditMode(false) }, '\u2713 Done'),
+    ] : pickMode ? [
+      // one print button at a time: while picking, the bar below owns printing
+      h('button', { class: 'btn small', onclick: () => setPickMode(false) }, '\u2713 Done selecting'),
     ] : [
-      h('button', { class: 'btn ghost small', onclick: openProxyPrintDialog }, '\ud83d\udda8 Print proxies'),
+      h('button', { class: 'btn ghost small', onclick: () => openProxyPrintDialog() }, '\ud83d\udda8 Print proxies'),
+      h('button', { class: 'btn ghost small', onclick: () => setPickMode(true) }, '\u2611 Select to print'),
       h('button', { class: 'btn small', onclick: () => setEditMode(true) }, '\u270e Edit binder'),
     ];
     head.replaceChildren(...[
@@ -2700,6 +2743,9 @@ async function renderBinderPage(id) {
       editMode ? h('p', { class: 'muted small', style: 'margin:6px 0 0' },
         'Editing \u2014 tap an empty pocket to add a card, drag or \u2194 Move to rearrange, \u22ef for pocket options, ' +
         '\u229f in a page\u2019s corner to pull that whole sheet out.') : null,
+      pickMode ? h('p', { class: 'muted small', style: 'margin:6px 0 0' },
+        'Selecting \u2014 tap the pockets you want as proxies, then turn the page and keep going; they all print on the ' +
+        'same sheets. Tapping will not change what\u2019s in hand while you\u2019re picking.') : null,
     ].filter(Boolean));
   }
 
@@ -2897,9 +2943,13 @@ async function renderBinderPage(id) {
       if (anchor !== undefined) {
         // one slice of a placed picture \u2014 adjustable only while editing
         const entry = binder.slots[anchor];
-        pocket = h('div', { class: 'pocket art', 'data-pocket': String(i) },
-          editMode ? h('button', { class: 'pocket-edit', onclick: (e) => { e.stopPropagation(); pocketActions(anchor); } }, '\u22ef') : null);
+        // a picture is picked as a whole \u2014 every slice shows the mark
+        const artPicked = pickMode && picked.has(anchor);
+        pocket = h('div', { class: 'pocket art' + (artPicked ? ' picked' : ''), 'data-pocket': String(i) },
+          editMode ? h('button', { class: 'pocket-edit', onclick: (e) => { e.stopPropagation(); pocketActions(anchor); } }, '\u22ef') : null,
+          artPicked ? h('div', { class: 'pick-badge' }, '\ud83d\udda8') : null);
         pocket.addEventListener('click', () => {
+          if (pickMode) { togglePick(anchor); return; }
           if (!editMode) return;
           if (moveFrom !== null) { moveFrom = null; actions.replaceChildren(); renderBook(); return; }
           pocketActions(anchor);
@@ -2911,13 +2961,16 @@ async function renderBinderPage(id) {
       if (s) {
         const card = cardsById.get(s.card);
         const img = card && cardImg(card, 'low', s.variant);
-        pocket = h('div', { class: 'pocket filled' + (s.have ? ' have' : '') + (moveFrom === i ? ' moving' : ''), 'data-pocket': String(i) },
+        pocket = h('div', { class: 'pocket filled' + (s.have ? ' have' : '') + (moveFrom === i ? ' moving' : '') +
+          (pickMode && picked.has(i) ? ' picked' : ''), 'data-pocket': String(i) },
           img ? h('img', { src: img, loading: 'lazy', alt: (card && card.name) || s.card })
               : h('div', { class: 'pocket-name' }, (card && card.name) || s.card),
           card ? variantFxEl(card, s.variant) : null,   // same diagonal banner as the collection tiles
           s.have ? h('div', { class: 'pocket-badge' }, '\u2713') : null,
           s.have && (s.n || 1) > 1 ? h('div', { class: 'pocket-qty' }, '\u00d7' + s.n) : null,
-          h('button', { class: 'pocket-edit', onclick: (e) => { e.stopPropagation(); pocketActions(i); } }, '\u22ef'),
+          pickMode && picked.has(i) ? h('div', { class: 'pick-badge' }, '\ud83d\udda8') : null,
+          // while picking, the whole pocket is one big checkbox \u2014 no side doors
+          pickMode ? null : h('button', { class: 'pocket-edit', onclick: (e) => { e.stopPropagation(); pocketActions(i); } }, '\u22ef'),
         );
         if (editMode) {
           // drag & drop between pockets (desktop; mobile keeps \u2194 Move)
@@ -2948,6 +3001,8 @@ async function renderBinderPage(id) {
         });
       }
       pocket.addEventListener('click', async () => {
+        // picking beats everything: an empty pocket has nothing to print
+        if (pickMode) { if (s) togglePick(i); return; }
         if (editMode) {
           if (moveFrom !== null) {
             await moveEntry(moveFrom, i);
@@ -3331,7 +3386,9 @@ async function renderBinderPage(id) {
     showSets();
   }
 
-  function openProxyPrintDialog() {
+  /** @param only Set of pocket keys chosen in "select to print" — when present it
+   * replaces every scope filter, because an explicit pick outranks a rule. */
+  function openProxyPrintDialog(only) {
     let which = 'missing', paper = 'letter';
     // what goes on the page: the cards, the pictures you placed, or both.
     // "Missing only" filters the CARDS — it never hides your pictures.
@@ -3371,14 +3428,18 @@ async function renderBinderPage(id) {
         [...e.target.parentElement.querySelectorAll('.chip')].forEach((c) => c.classList.toggle('active', c === e.target));
       } }, txt)));
     const cardsRow = optRow('Cards', [['missing', 'Missing only'], ['all', 'All pockets']], () => which, (v) => which = v);
-    const syncCardsRow = () => { cardsRow.style.display = include === 'art' ? 'none' : ''; };
+    const syncCardsRow = () => { cardsRow.style.display = (only || include === 'art') ? 'none' : ''; };
+    const n = only ? only.size : 0;
     const overlay = h('div', { class: 'picker-overlay' },
       h('div', { class: 'picker-panel' },
-        h('h3', {}, 'Print proxies'),
-        h('p', { class: 'muted small' }, 'Prints cards at pocket size with cut guides \u2014 stand-ins for your physical binder\u2019s pockets until the real card arrives.'),
-        optRow('Print', [['both', 'Cards + pictures'], ['cards', 'Cards only'], ['art', 'Pictures only']],
+        h('h3', {}, only ? 'Print selected proxies' : 'Print proxies'),
+        h('p', { class: 'muted small' }, only
+          ? `Prints the ${n} pocket${n === 1 ? '' : 's'} you picked \u2014 packed onto as few sheets as they fit, with cut guides.`
+          : 'Prints cards at pocket size with cut guides \u2014 stand-ins for your physical binder\u2019s pockets until the real card arrives.'),
+        // an explicit selection already says what to print, so the scope rows go away
+        only ? null : optRow('Print', [['both', 'Cards + pictures'], ['cards', 'Cards only'], ['art', 'Pictures only']],
           () => include, (v) => { include = v; syncCardsRow(); }),
-        cardsRow,
+        only ? null : cardsRow,
         optRow('Size', [['std', 'Standard 63\u00d788'], ['small', 'Small 59\u00d786'], ['jumbo', 'Jumbo 89\u00d7127'], ['custom', 'Custom\u2026']],
           () => sizeKey, (v) => { sizeKey = v; syncCustomRow(); }),
         customRow,
@@ -3389,10 +3450,15 @@ async function renderBinderPage(id) {
             const clamp = (el, dflt) => Math.min(150, Math.max(20, parseFloat(el.value) || dflt));
             const size = sizeKey === 'custom' ? { w: clamp(wIn, 63), h: clamp(hIn, 88) } : SIZES[sizeKey];
             lsSet('ptcg.proxy.size', sizeKey);
-            lsSet('ptcg.proxy.include', include);
+            if (!only) lsSet('ptcg.proxy.include', include);
             if (sizeKey === 'custom') { lsSet('ptcg.proxy.customW', String(size.w)); lsSet('ptcg.proxy.customH', String(size.h)); }
             overlay.remove();
-            printProxies(which, paper, size, include);
+            printProxies(which, paper, size, include, only);
+            // the picks have done their job \u2014 start the next batch clean
+            if (only && picked.size) {
+              picked.clear(); renderPickBar(); renderBook();
+              toast(`Sent ${n} to print \u2014 selection cleared`);
+            }
           } }, '\ud83d\udda8 Print'),
         ),
       ));
@@ -3400,7 +3466,7 @@ async function renderBinderPage(id) {
     syncCustomRow(); syncCardsRow();
   }
 
-  function printProxies(which, paper, size, include) {
+  function printProxies(which, paper, size, include, only) {
     const pw = (size && size.w) || 63, ph = (size && size.h) || 88;
     const inc = include || 'both';
     const entries = Object.entries(binder.slots)
@@ -3408,13 +3474,15 @@ async function renderBinderPage(id) {
       .sort((a, b) => a[0] - b[0])
       // your pictures ride along with whatever the card filter says \u2014 "Missing
       // only" narrows the CARDS, it never drops the art you placed
-      .filter(([, v]) => {
+      .filter(([k, v]) => {
+        if (only) return only.has(k);        // hand-picked pockets, whatever they hold
         if (v.img) return inc !== 'cards';
         if (!v.card || inc === 'art') return false;
         return which === 'all' ? true : !v.have;
       });
     if (!entries.length) {
-      toast(inc === 'art' ? 'Nothing to print \u2014 this binder has no pictures placed'
+      toast(only ? 'Nothing to print \u2014 nothing is selected'
+        : inc === 'art' ? 'Nothing to print \u2014 this binder has no pictures placed'
         : which === 'missing' ? 'Nothing to print \u2014 every pocket is already in hand'
         : 'Nothing to print \u2014 this binder is empty');
       return;
@@ -3463,8 +3531,8 @@ async function renderBinderPage(id) {
       .then(() => setTimeout(() => window.print(), 120));
   }
 
-  renderHead(); renderNav(); renderBook();
-  view.replaceChildren(head, nav, book, actions);
+  renderHead(); renderNav(); renderBook(); renderPickBar();
+  view.replaceChildren(head, pickBar, nav, book, actions);
 }
 
 function route() {

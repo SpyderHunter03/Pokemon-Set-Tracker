@@ -445,6 +445,52 @@ const { chromium } = require('playwright');
   check('binder: the ×2 copy count survived the resize',
     (await page.textContent('.pocket[data-pocket="0"] .pocket-qty')) === '×2');
 
+  // ---- select to print: hand-pick pockets across pages, print just those ----
+  await page.click('button:has-text("Done")');                           // leave edit mode
+  await page.waitForSelector('button:has-text("Select to print")');
+  await page.click('button:has-text("Select to print")');
+  await page.waitForSelector('.pick-bar');
+  check('binder: picking starts empty and takes over the pockets',
+    (await page.textContent('.pick-bar')).includes('Nothing selected') &&
+    (await page.locator('.binder-grid .pocket-edit').count()) === 0);
+  // pocket 0 is the ×2 in-hand card — "Missing only" would never print it
+  await page.click('.pocket[data-pocket="0"]');
+  await page.waitForSelector('.pocket[data-pocket="0"].picked');
+  check('binder: tapping a pocket picks it and leaves what’s in hand alone',
+    (await page.locator('.pick-badge').count()) === 1 &&
+    (await page.textContent('#view')).includes('1 / 7 in hand'));
+  await page.click('button:has-text("›")');                             // pages 2–3
+  await page.waitForFunction(() => (document.querySelector('#view').textContent || '').includes('Pages 2–3 of 3'));
+  await page.waitForFunction(() => !document.querySelector('.flip-sheet'));
+  check('binder: the selection survives a page turn',
+    (await page.textContent('.pick-bar')).includes('1 selected'));
+  await page.click('.pocket[data-pocket="10"]');                        // a card on page 2
+  await page.waitForSelector('.pocket[data-pocket="10"].picked');
+  await page.click('.pocket[data-pocket="18"]');                        // a slice of the picture on page 3
+  await page.waitForFunction(() => document.querySelectorAll('.pocket.art.picked').length === 2);
+  check('binder: picking any slice takes the whole picture, across pages',
+    (await page.textContent('.pick-bar')).includes('3 selected'));
+  await page.evaluate(() => { delete document.body.dataset.printed; });
+  await page.click('.pick-bar button:has-text("Print selected")');
+  await page.waitForSelector('.picker-panel h3:has-text("Print selected proxies")');
+  check('proxies: an explicit selection drops the scope choices',
+    (await page.locator('.picker-panel .chip:has-text("Missing only")').count()) === 0 &&
+    (await page.locator('.picker-panel .chip:has-text("Cards only")').count()) === 0);
+  await page.click('.picker-panel .btn:has-text("Print")');
+  await page.waitForFunction(() => document.body.dataset.printed === '1');
+  check('proxies: selected pockets print together — an in-hand card included (2 cards + 2 art)',
+    (await page.locator('#print-area .print-cell').count()) === 4 &&
+    (await page.locator('#print-area .print-cell.print-art').count()) === 2);
+  await page.evaluate(() => window.dispatchEvent(new Event('afterprint')));
+  check('proxies: printing clears the selection for the next batch',
+    (await page.textContent('.pick-bar')).includes('Nothing selected') &&
+    (await page.locator('.pocket.picked').count()) === 0);
+  await page.click('.pick-bar button:has-text("Done")');
+  await page.waitForFunction(() => !document.querySelector('.pick-bar'));
+  check('binder: leaving pick mode gives the pockets back',
+    (await page.locator('.binder-grid .pocket-edit').count()) > 0 &&
+    (await page.locator('button:has-text("Select to print")').count()) === 1);
+
   await page.goto('http://localhost:3111/#/binders');
   await page.waitForSelector('.binder-cover');
   check('binder: cover shows live progress (art not counted)', (await page.textContent('.binder-cover')).includes('1 / 7 in hand'));

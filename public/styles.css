@@ -731,6 +731,19 @@ body { padding-bottom: calc(64px + env(safe-area-inset-bottom)); }
   border: 0; border-radius: 6px; padding: 2px 7px; font-size: 13px; cursor: pointer;
 }
 .pocket-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; justify-content: center; margin: 12px 0; }
+/* "select to print": pockets act as checkboxes, the bar keeps the running count */
+.pick-bar {
+  display: flex; gap: 8px; flex-wrap: wrap; align-items: center; justify-content: center;
+  border: 1px solid var(--accent-soft, #ff5c39); border-radius: 10px;
+  background: rgba(227, 53, 13, .12); padding: 8px 10px; margin: 10px 0 0;
+}
+.pocket.picked { outline: 3px solid var(--accent, #e3350d); outline-offset: -1px; border-color: var(--accent, #e3350d); }
+.pocket.picked.filled:not(.have) img { filter: grayscale(.4) brightness(.8); }
+.pick-badge {
+  position: absolute; bottom: 4px; left: 4px; background: var(--accent, #e3350d); color: #fff;
+  border-radius: 50%; width: 20px; height: 20px; font-size: 11px;
+  display: flex; align-items: center; justify-content: center; pointer-events: none;
+}
 .picker-overlay {
   position: fixed; inset: 0; background: rgba(0,0,0,.65); z-index: 60;
   display: flex; align-items: flex-start; justify-content: center; padding: 30px 12px;
