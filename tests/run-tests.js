@@ -366,9 +366,38 @@ function fail(msg) {
   const buAuth = { 'Content-Type': 'application/json', Authorization: 'Bearer ' + buReg.token };
   const bCreate = await jfetch('http://localhost:3115/api/binders', { method: 'POST', headers: buAuth, body: JSON.stringify({ name: 'Base Set Binder', size: 2, color: 'blue', fillFromSet: 'base1', lang: 'en' }) });
   const bd = bCreate.binder || {};
+  const nFill = Object.keys(bd.slots).length;
   check('binder: create + fill-from-set places every card of the set',
     bCreate.ok === true && bd.size === 2 && bd.color === 'blue' &&
-    Object.keys(bd.slots).length === 5 && bd.pages === 2 && bd.slots['0'] && CARD_OK(bd.slots['0'].card));
+    bd.slots['0'] && CARD_OK(bd.slots['0'].card));
+  // A pocket per PRINTING, not per card — derived from the set the fill read, so
+  // this keeps holding as the fixture's variants change. Printings stay adjacent
+  // and the set's own order still runs front to back.
+  const bSet = await jfetch('http://localhost:3115/api/catalog/set?lang=en&id=base1');
+  const VORD = ['normal', 'holo', 'reverse', 'firstEdition', 'wPromo'];
+  const printsOf = (c) => {
+    const base = Object.keys(c.variants || {}).filter((k) => c.variants[k]);
+    const out = VORD.filter((v) => base.includes(v));
+    for (const v of base) if (!out.includes(v)) out.push(v);
+    for (const v of Object.keys(c.printings || {})) if (!out.includes(v)) out.push(v);
+    return out.length ? out : ['normal'];
+  };
+  const wantPockets = [];
+  for (const c of bSet.cards) for (const v of printsOf(c)) wantPockets.push(c.id + ':' + v);
+  const gotPockets = Object.keys(bd.slots).map(Number).sort((a, b) => a - b).map((k) => bd.slots[k].card + ':' + bd.slots[k].variant);
+  check('binder: the fill makes a pocket for every printing, printings together, set order kept',
+    wantPockets.length > bSet.cards.length && nFill === wantPockets.length &&
+    gotPockets.join('|') === wantPockets.join('|'));
+  check('binder: pages grow to hold the printings, not just the cards',
+    bd.pages === Math.ceil(wantPockets.length / 4) && bd.pages >= 2 &&
+    bCreate.filled === wantPockets.length && bCreate.skipped === 0);
+  // the same card can hold several printings and they land side by side
+  const multi = bSet.cards.find((c) => printsOf(c).length > 1);
+  const multiAt = gotPockets.findIndex((p) => p.startsWith(multi.id + ':'));
+  check('binder: a card with several printings gets consecutive pockets',
+    multiAt >= 0 && gotPockets.slice(multiAt, multiAt + printsOf(multi).length)
+      .every((p) => p.startsWith(multi.id + ':')) &&
+    new Set(gotPockets.slice(multiAt, multiAt + printsOf(multi).length)).size === printsOf(multi).length);
   // 'none' is a real color the API has to accept; a bogus one still falls back
   const bNone = await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { method: 'PUT', headers: buAuth, body: JSON.stringify({ color: 'none' }) });
   const bNoneGet = await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { headers: buAuth });
@@ -386,7 +415,7 @@ function fail(msg) {
     bPut.ok === true && bGet.binder.slots['4'].have === 1 && bGet.binder.slots['0'].have === 0 &&
     bGet.binder.slots['4'].card === bd.slots['0'].card);
   const bList = await jfetch('http://localhost:3115/api/binders', { headers: buAuth });
-  check('binder: list reports progress', bList.binders.length === 1 && bList.binders[0].filled === 5 && bList.binders[0].have === 1);
+  check('binder: list reports progress', bList.binders.length === 1 && bList.binders[0].filled === nFill && bList.binders[0].have === 1);
   const bAnon = (await fetch('http://localhost:3115/api/binders')).status;
   const bOther = (await fetch(`http://localhost:3115/api/binders/${bd.id}`, { headers: { Authorization: 'Bearer ' + cpChange.token } })).status;
   check('binder: auth required and binders are private per account', bAnon === 401 && bOther === 404);
@@ -394,34 +423,41 @@ function fail(msg) {
   const pngBuf = fs.readFileSync(path.join(__dirname, 'fixtures', 'base1-4.png'));
   const upRes = await fetch('http://localhost:3115/api/binder-image', { method: 'POST', headers: { Authorization: 'Bearer ' + buReg.token, 'Content-Type': 'image/png' }, body: pngBuf });
   const up = await upRes.json();
-  const artSlots = { ...bGet.binder.slots, '6': { img: up.url, w: 2, h: 1 } };
-  await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { method: 'PUT', headers: buAuth, body: JSON.stringify({ slots: artSlots }) });
+  // art goes on a blank page added for it, since the fill now claims a pocket per
+  // printing and pocket 6 is no longer reliably empty
+  // the geometry checks below need pockets that are certainly empty, and the
+  // fill's size now depends on how many printings the fixture cards carry — so
+  // the binder grows by a known sheet and the art goes on that blank page
+  const artPages = bd.pages + 1;
+  const A = bd.pages * 4, B = A + 1;                      // first two pockets of the new page
+  const artSlots = { ...bGet.binder.slots, [A]: { img: up.url, w: 2, h: 1 } };
+  await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { method: 'PUT', headers: buAuth, body: JSON.stringify({ pages: artPages, slots: artSlots }) });
   const bArt = await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { headers: buAuth });
   const bList2 = await jfetch('http://localhost:3115/api/binders', { headers: buAuth });
   const upAnon = (await fetch('http://localhost:3115/api/binder-image', { method: 'POST', body: pngBuf })).status;
   check('binder: image upload + art span persists, art excluded from progress',
     upRes.status === 200 && /^\/bimg\/[a-f0-9-]+\.webp$/.test(up.url || '') &&
-    bArt.binder.slots['6'] && bArt.binder.slots['6'].img === up.url && bArt.binder.slots['6'].w === 2 &&
-    bList2.binders[0].filled === 5 && upAnon === 401);
+    bArt.binder.slots[A] && bArt.binder.slots[A].img === up.url && bArt.binder.slots[A].w === 2 &&
+    bList2.binders[0].filled === nFill && upAnon === 401);
   const imgServe = await fetch('http://localhost:3115' + up.url);
   check('binder: uploaded art is served immutably', imgServe.status === 200 && /immutable/.test(imgServe.headers.get('cache-control') || ''));
   // cells-based art: arbitrary pockets + pan/zoom view + cut mode
-  const artSlots2 = { ...bArt.binder.slots, '6': { img: up.url, cells: [6, 7], view: { x: -10.5, y: 4, s: 200 }, gaps: 'without' } };
+  const artSlots2 = { ...bArt.binder.slots, [A]: { img: up.url, cells: [A, B], view: { x: -10.5, y: 4, s: 200 }, gaps: 'without' } };
   await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { method: 'PUT', headers: buAuth, body: JSON.stringify({ slots: artSlots2 }) });
   const bArt2 = await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { headers: buAuth });
-  const e6 = bArt2.binder.slots['6'] || {};
+  const e6 = bArt2.binder.slots[A] || {};
   check('binder: cells-based art (arbitrary pockets + view + cut mode) persists',
-    Array.isArray(e6.cells) && e6.cells.join(',') === '6,7' && e6.gaps === 'without' &&
+    Array.isArray(e6.cells) && e6.cells.join(',') === `${A},${B}` && e6.gaps === 'without' &&
     e6.view && Math.round(e6.view.s) === 200 && Math.round(e6.view.x * 2) === -21);
   // mirroring persists on art pieces and covers alike (invalid values dropped)
-  const flSlots = { ...bArt2.binder.slots, '6': { ...e6, flip: 'xy' } };
+  const flSlots = { ...bArt2.binder.slots, [A]: { ...e6, flip: 'xy' } };
   await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { method: 'PUT', headers: buAuth, body: JSON.stringify({ slots: flSlots }) });
   await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { method: 'PUT', headers: buAuth, body: JSON.stringify({ cover: { type: 'art', img: up.url, view: { x: 0, y: 0, s: 150 }, flip: 'diagonal' } }) });
   const flGet = await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { headers: buAuth });
   await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { method: 'PUT', headers: buAuth, body: JSON.stringify({ cover: { type: 'art', img: up.url, view: { x: 0, y: 0, s: 150 }, flip: 'y' } }) });
   const flGet2 = await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { headers: buAuth });
   check('binder: mirror flags persist on art and covers (junk values dropped)',
-    flGet.binder.slots['6'].flip === 'xy' && flGet.binder.cover.flip === undefined && flGet2.binder.cover.flip === 'y');
+    flGet.binder.slots[A].flip === 'xy' && flGet.binder.cover.flip === undefined && flGet2.binder.cover.flip === 'y');
   // an art cover can carry its placement (drag/resize view, cover-units)
   const cvPut = await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { method: 'PUT', headers: buAuth, body: JSON.stringify({ cover: { type: 'art', img: up.url, view: { x: -20.5, y: 5, s: 180 } } }) });
   const cvGet = await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { headers: buAuth });
@@ -446,12 +482,13 @@ function fail(msg) {
     const cells = v.cells ? v.cells.map(remap).sort((a, b) => a - b) : null;
     rmSlots[cells ? cells[0] : remap(parseInt(k, 10))] = cells ? { ...v, cells } : v;
   }
-  await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { method: 'PUT', headers: buAuth, body: JSON.stringify({ size: 3, pages: 2, slots: rmSlots }) });
+  await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { method: 'PUT', headers: buAuth, body: JSON.stringify({ size: 3, pages: artPages, slots: rmSlots }) });
   const bRe = await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { headers: buAuth });
+  const rA = remap(A), rB = remap(B);                     // where the art lands at the bigger size
   check('binder: size change persists — cards keep page + position, art cells remap',
     sizeBare === 400 && bRe.binder.size === 3 &&
     bRe.binder.slots['9'] && bRe.binder.slots['9'].n === 3 && bRe.binder.slots['9'].have === 1 &&
-    bRe.binder.slots['12'] && (bRe.binder.slots['12'].cells || []).join(',') === '12,13' &&
+    bRe.binder.slots[rA] && (bRe.binder.slots[rA].cells || []).join(',') === `${rA},${rB}` &&
     bRe.binder.slots['4'] && typeof bRe.binder.slots['4'].card === 'string');
 
   // ⊟ remove page: a bare shrink must not orphan page-2 pockets, but a shrink
@@ -465,14 +502,23 @@ function fail(msg) {
     if (v.cells) { const cells = v.cells.map((c) => c - 9).sort((a, b) => a - b); shifted[cells[0]] = { ...v, cells }; }
     else shifted[i - 9] = v;
   }
-  await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { method: 'PUT', headers: buAuth, body: JSON.stringify({ pages: 1, slots: shifted }) });
+  await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { method: 'PUT', headers: buAuth, body: JSON.stringify({ pages: artPages - 1, slots: shifted }) });
   const bRm = await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { headers: buAuth });
+  // every surviving pocket moved forward by exactly one sheet, and nothing that
+  // was on the removed page came with it
+  const shiftOK = Object.entries(shifted).every(([k, v]) => {
+    const got = bRm.binder.slots[k];
+    if (!got) return false;
+    return v.cells ? (got.cells || []).join(',') === v.cells.join(',')
+      : got.card === v.card && got.variant === v.variant;
+  });
   check('binder: page removal persists — later pockets shift forward, orphaning refused',
-    bKeep.binder.pages === 2 &&
-    bRm.binder.pages === 1 && Object.keys(bRm.binder.slots).length === 2 &&
+    bKeep.binder.pages === artPages &&
+    bRm.binder.pages === artPages - 1 &&
+    Object.keys(bRm.binder.slots).length === Object.keys(shifted).length && shiftOK &&
     bRm.binder.slots['0'] && bRm.binder.slots['0'].n === 3 && bRm.binder.slots['0'].have === 1 &&
-    bRm.binder.slots['3'] && (bRm.binder.slots['3'].cells || []).join(',') === '3,4' &&
-    !bRm.binder.slots['4'] && !bRm.binder.slots['9'] && !bRm.binder.slots['12']);
+    bRm.binder.slots[rA - 9] && (bRm.binder.slots[rA - 9].cells || []).join(',') === `${rA - 9},${rB - 9}` &&
+    !bRm.binder.slots[rA]);
 
   const bDel = await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { method: 'DELETE', headers: buAuth });
   const bGone = (await fetch(`http://localhost:3115/api/binders/${bd.id}`, { headers: buAuth })).status;

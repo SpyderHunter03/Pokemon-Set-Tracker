@@ -225,6 +225,18 @@ const { chromium } = require('playwright');
   await page.selectOption('.binder-create select >> nth=0', '2');       // 2×2 pockets
   check('binder: the fill picker starts on "Start empty"',
     (await page.textContent('.binder-create [data-fill]')) === 'Start empty');
+  // the pocket count stopped matching the card count once printings got pockets
+  // of their own, so the panel has to say so before you commit to a binder
+  await page.click('.binder-create [data-fill]');
+  await page.waitForSelector('.picker-panel h3:has-text("Fill the binder with")');
+  check('binder: the fill picker says every printing gets its own pocket',
+    /every printing gets its own pocket/i.test(await page.textContent('.picker-panel')));
+  await page.fill('.picker-overlay input[type=text]', 'charizard');
+  await page.waitForSelector('.picker-overlay .picker-row:has-text("Charizard")');
+  check('binder: a species row counts printings, not just cards',
+    /\d+ printings/.test(await page.textContent('.picker-overlay .picker-row:has-text("Charizard") >> nth=0')));
+  await page.click('.picker-panel button:has-text("Cancel")');
+  await page.waitForSelector('.picker-overlay', { state: 'detached' });
   await pickFill(page, 'base set', 'Base Set');                        // fill from Base Set
   check('binder: the picker reports what it will fill from',
     (await page.textContent('.binder-create [data-fill]')) === 'Fill from: Base Set');
@@ -246,11 +258,13 @@ const { chromium } = require('playwright');
     (await page.locator('.binder-grid .pocket.filled .pocket-cap').count()) === 4 &&
     (await page.textContent('.binder-grid .pocket.filled .pocket-cap >> nth=0')).includes('Base Set') &&
     /#\d+/.test(await page.textContent('.binder-grid .pocket.filled .pocket-cap .cap-no >> nth=0')));
-  check('binder: 5 cards → 2 pages', (await page.textContent('#view')).includes('Page 1 of 2'));
-  check('binder: starts with none in hand', (await page.textContent('#view')).includes('0 / 5 in hand'));
+  // five cards, but eight printings between them — the fill makes a pocket for
+  // each one, so the binder is bigger than the card count would suggest
+  check('binder: 5 cards fill 8 printing pockets across 2 pages', (await page.textContent('#view')).includes('Page 1 of 2'));
+  check('binder: starts with none in hand', (await page.textContent('#view')).includes('0 / 8 in hand'));
   await page.click('.binder-grid .pocket >> nth=0');                    // tap = "I have this one"
   await page.waitForSelector('.binder-grid .pocket.have');
-  check('binder: tap marks a pocket as in hand', (await page.textContent('#view')).includes('1 / 5 in hand'));
+  check('binder: tap marks a pocket as in hand', (await page.textContent('#view')).includes('1 / 8 in hand'));
 
   // view mode tracks copy counts: ⋯ on the in-hand pocket → ＋ → small ×2
   await page.click('.binder-grid .pocket.have .pocket-edit');
@@ -261,8 +275,38 @@ const { chromium } = require('playwright');
     (await page.textContent('.binder-grid .pocket.have .pocket-qty')) === '×2');
   await page.click('.pocket-actions button:has-text("Close")');
 
-  await page.click('button:has-text("›")');                             // page 2: 1 filled, 3 empty
-  await page.waitForFunction(() => document.querySelectorAll('.binder-grid .pocket.filled').length === 1);
+  await page.click('button:has-text("›")');                             // page 2: the rest of the printings
+  await page.waitForFunction(() => document.querySelectorAll('.binder-grid .pocket.filled').length === 4);
+
+  await page.click('button:has-text("Edit binder")');
+  await page.waitForSelector('button:has-text("✓ Done")');
+  check('binder: edit mode unlocks the layout tools',
+    (await page.locator('button:has-text("Size")').count()) === 1);
+  // a pocket per printing fills this set to the brim, so every empty pocket the
+  // rest of the walk needs comes from a sheet added by hand. adding it turns
+  // this spread into [page 2 | page 3] — both sides of the sheet visible
+  await page.click('button:has-text("Add page")');
+  await page.waitForSelector('.pocket[data-pocket="8"]');
+  check('binder: desktop spread shows both sides of the sheet', (await page.textContent('#view')).includes('Pages 2–3 of 3'));
+
+  // drag & drop a card between pockets (idx4 -> empty idx8, a sheet over) —
+  // dispatch the HTML5 drag events directly (headless mouse-drag doesn't
+  // start native DnD)
+  await page.evaluate(() => {
+    const src = document.querySelector('.pocket[data-pocket="4"]');
+    const dst = document.querySelector('.pocket[data-pocket="8"]');
+    const dt = new DataTransfer();
+    src.dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: dt }));
+    dst.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: dt }));
+    dst.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt }));
+    src.dispatchEvent(new DragEvent('dragend', { bubbles: true, dataTransfer: dt }));
+  });
+  await page.waitForSelector('.pocket[data-pocket="8"].filled');
+  check('binder: drag & drop moves a card to an empty pocket',
+    (await page.locator('.pocket[data-pocket="8"].filled').count()) === 1 &&
+    (await page.locator('.pocket[data-pocket="4"].filled').count()) === 0);
+  await page.click('button:has-text("Done")');
+  await page.waitForSelector('button:has-text("Edit binder")');
 
   // view mode is for tracking only — empty pockets are inert until you Edit
   await page.click('.binder-grid .pocket:not(.filled):not(.art) >> nth=0');
@@ -271,8 +315,6 @@ const { chromium } = require('playwright');
     (await page.locator('.picker-overlay').count()) === 0);
   await page.click('button:has-text("Edit binder")');
   await page.waitForSelector('button:has-text("✓ Done")');
-  check('binder: edit mode unlocks the layout tools',
-    (await page.locator('button:has-text("Size")').count()) === 1);
 
   await page.click('.binder-grid .pocket:not(.filled) >> nth=0');       // empty pocket → picker
   await page.waitForSelector('.picker-overlay input');
@@ -281,8 +323,8 @@ const { chromium } = require('playwright');
   check('binder picker shows the set NAME and card number, not the set code',
     (await page.textContent('.picker-row >> nth=0')).includes('Base Set · #58'));
   await page.click('.picker-row .chip >> nth=0');
-  await page.waitForFunction(() => document.querySelectorAll('.binder-grid .pocket.filled').length === 2);
-  check('binder: picker places a card into the chosen pocket', (await page.textContent('#view')).includes('1 / 6 in hand'));
+  await page.waitForFunction(() => document.querySelectorAll('.binder-grid .pocket.filled').length === 5);
+  check('binder: picker places a card into the chosen pocket', (await page.textContent('#view')).includes('1 / 9 in hand'));
   // proxy printing: missing-only sheet at real card size
   await page.evaluate(() => { window.print = () => { document.body.dataset.printed = '1'; }; });
   await page.click('button:has-text("Print proxies")');
@@ -290,13 +332,13 @@ const { chromium } = require('playwright');
   check('proxies: the framing option is gone', (await page.locator('.picker-panel .chip:has-text("Pokéball")').count()) === 0);
   await page.click('.picker-panel .btn:has-text("Print")');
   await page.waitForFunction(() => document.body.dataset.printed === '1');
-  check('proxies: prints only the missing pockets (6 filled, 1 in hand → 5)',
-    (await page.locator('#print-area .print-cell').count()) === 5);
+  check('proxies: prints only the missing pockets (9 filled, 1 in hand → 8)',
+    (await page.locator('#print-area .print-cell').count()) === 8);
   check('proxies: card images + text fallbacks for imageless cards',
-    (await page.locator('#print-area .print-cell img').count()) === 3 &&
+    (await page.locator('#print-area .print-cell img').count()) === 6 &&
     (await page.locator('#print-area .print-fallback').count()) === 2);
   check('proxies: printed cards carry the same set + number caption',
-    (await page.locator('#print-area .print-cap').count()) === 3 &&      // the text fallbacks already say it in their body
+    (await page.locator('#print-area .print-cap').count()) === 6 &&      // the text fallbacks already say it in their body
     (await page.textContent('#print-area .print-cap >> nth=0')).includes('Base Set') &&
     /#\d+/.test(await page.textContent('#print-area .print-cap .cap-no >> nth=0')));
   // butted by default: neighbours share one cut line, so you cut once per seam
@@ -306,19 +348,19 @@ const { chromium } = require('playwright');
   check('proxies: sheet cleans up after printing', (await page.locator('#print-area').count()) === 0);
 
   // a NON-primary printing gets the collection-style name banner on its proxy
-  await page.click('.binder-grid .pocket:not(.filled) >> nth=0');       // empty pocket idx6
+  await page.click('.binder-grid .pocket:not(.filled) >> nth=0');       // empty pocket idx9
   await page.waitForSelector('.picker-overlay input[type=text]');
   await page.fill('.picker-overlay input[type=text]', 'Charizard');
   await page.waitForSelector('.picker-row .chip');
   await page.click('.picker-row .chip >> nth=1');                       // 1st Edition (no dedicated scan)
-  await page.waitForFunction(() => document.querySelectorAll('.binder-grid .pocket.filled').length === 3);
+  await page.waitForFunction(() => document.querySelectorAll('.binder-grid .pocket.filled').length === 6);
   await page.evaluate(() => { delete document.body.dataset.printed; });
   await page.click('button:has-text("Print proxies")');
   await page.waitForSelector('.picker-panel h3:has-text("Print proxies")');
   await page.click('.picker-panel .btn:has-text("Print")');
   await page.waitForFunction(() => document.body.dataset.printed === '1');
   check('proxies: every card proxy carries its collection-style printing banner',
-    (await page.locator('#print-area .print-fx').count()) === 6 &&
+    (await page.locator('#print-area .print-fx').count()) === 9 &&
     (await page.locator('#print-area .print-fx').allTextContents()).some((t) => t.includes('1st Edition')));
   await page.evaluate(() => window.dispatchEvent(new Event('afterprint')));
 
@@ -408,34 +450,14 @@ const { chromium } = require('playwright');
     (await page.locator('#print-area .print-cell img').count()));
   await page.evaluate(() => window.dispatchEvent(new Event('afterprint')));
 
-  // drag & drop a card between pockets (idx4 -> empty idx7) — dispatch the
-  // HTML5 drag events directly (headless mouse-drag doesn't start native DnD)
-  await page.evaluate(() => {
-    const src = document.querySelector('.pocket[data-pocket="4"]');
-    const dst = document.querySelector('.pocket[data-pocket="7"]');
-    const dt = new DataTransfer();
-    src.dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: dt }));
-    dst.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: dt }));
-    dst.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt }));
-    src.dispatchEvent(new DragEvent('dragend', { bubbles: true, dataTransfer: dt }));
-  });
-  await page.waitForSelector('.pocket[data-pocket="7"].filled');
-  check('binder: drag & drop moves a card to an empty pocket',
-    (await page.locator('.pocket[data-pocket="7"].filled').count()) === 1 &&
-    (await page.locator('.pocket[data-pocket="4"].filled').count()) === 0);
-
-  // upload an image and place it across chosen pockets via the editor.
-  // adding a page turns this spread into [page 2 | page 3] — both sides visible
-  await page.click('button:has-text("Add page")');
-  await page.waitForSelector('.pocket[data-pocket="8"]');
-  check('binder: desktop spread shows both sides of the sheet', (await page.textContent('#view')).includes('Pages 2\u20133 of 3'));
-  await page.click('.pocket[data-pocket="8"]');
+  // upload an image and place it across the two pockets still free on page 3
+  await page.click('.pocket[data-pocket="10"]');
   await page.waitForSelector('.picker-overlay input[type=file]', { state: 'attached' });
   await page.setInputFiles('.picker-overlay input[type=file]', require('path').join(__dirname, 'fixtures', 'base1-4.png'));
   await page.waitForSelector('.art-editor .art-board img');
   check('binder: placement editor shows the page grid overlay', (await page.locator('.art-editor .art-cell').count()) === 4);
   check('binder: the tapped pocket starts selected', (await page.locator('.art-cell.sel').count()) === 1);
-  await page.click('.art-cell[data-cell="9"]');                         // include a second pocket
+  await page.click('.art-cell[data-cell="11"]');                        // include a second pocket
   await page.waitForFunction(() => document.querySelectorAll('.art-cell.sel').length === 2);
   // exact numbers: type a position and the picture lands precisely there
   await page.fill('.art-editor input.num-x', '0');
@@ -463,8 +485,8 @@ const { chromium } = require('playwright');
   await page.waitForSelector('.picker-panel h3:has-text("Print proxies")');
   await page.click('.picker-panel .btn:has-text("Print")');
   await page.waitForFunction(() => document.body.dataset.printed === '1');
-  check('proxies: missing-only still prints the pictures you placed (6 cards + 2 art)',
-    (await page.locator('#print-area .print-cell').count()) === 8 &&
+  check('proxies: missing-only still prints the pictures you placed (9 cards + 2 art)',
+    (await page.locator('#print-area .print-cell').count()) === 11 &&
     (await page.locator('#print-area .print-cell.print-art').count()) === 2);
   await page.evaluate(() => window.dispatchEvent(new Event('afterprint')));
 
@@ -489,7 +511,7 @@ const { chromium } = require('playwright');
   await page.click('.picker-panel .btn:has-text("Print")');
   await page.waitForFunction(() => document.body.dataset.printed === '1');
   check('proxies: Cards only leaves the pictures out',
-    (await page.locator('#print-area .print-cell').count()) === 6 &&
+    (await page.locator('#print-area .print-cell').count()) === 9 &&
     (await page.locator('#print-area .print-cell.print-art').count()) === 0);
   await page.evaluate(() => window.dispatchEvent(new Event('afterprint')));
   await page.evaluate(() => localStorage.setItem('ptcg.proxy.include', 'both'));
@@ -569,7 +591,7 @@ const { chromium } = require('playwright');
   await page.waitForSelector('.picker-panel h3:has-text("Binder size")');
   await page.click('.picker-panel .chip:has-text("3×3")');
   await page.waitForFunction(() => (document.querySelector('#view').textContent || '').includes('3×3'));
-  check('binder: resize keeps the in-hand tally', (await page.textContent('#view')).includes('1 / 7 in hand'));
+  check('binder: resize keeps the in-hand tally', (await page.textContent('#view')).includes('1 / 10 in hand'));
   await page.click('.binder-cover-page');                               // open page 1 in the new size
   await page.waitForSelector('.binder-grid .pocket');
   check('binder: resized page shows 9 pockets', (await page.locator('.binder-grid .pocket').count()) === 9);
@@ -594,7 +616,7 @@ const { chromium } = require('playwright');
   await page.waitForSelector('.pocket[data-pocket="0"].picked');
   check('binder: tapping a pocket picks it and leaves what’s in hand alone',
     (await page.locator('.pick-badge').count()) === 1 &&
-    (await page.textContent('#view')).includes('1 / 7 in hand'));
+    (await page.textContent('#view')).includes('1 / 10 in hand'));
   await page.click('button:has-text("›")');                             // pages 2–3
   await page.waitForFunction(() => (document.querySelector('#view').textContent || '').includes('Pages 2–3 of 3'));
   await page.waitForFunction(() => !document.querySelector('.flip-sheet'));
@@ -602,7 +624,7 @@ const { chromium } = require('playwright');
     (await page.textContent('.pick-bar')).includes('1 selected'));
   await page.click('.pocket[data-pocket="10"]');                        // a card on page 2
   await page.waitForSelector('.pocket[data-pocket="10"].picked');
-  await page.click('.pocket[data-pocket="18"]');                        // a slice of the picture on page 3
+  await page.click('.pocket[data-pocket="21"]');                        // a slice of the picture on page 3
   await page.waitForFunction(() => document.querySelectorAll('.pocket.art.picked').length === 2);
   check('binder: picking any slice takes the whole picture, across pages',
     (await page.textContent('.pick-bar')).includes('3 selected'));
@@ -629,7 +651,7 @@ const { chromium } = require('playwright');
 
   await page.goto('http://localhost:3111/#/binders');
   await page.waitForSelector('.binder-cover');
-  check('binder: cover shows live progress (art not counted)', (await page.textContent('.binder-cover')).includes('1 / 7 in hand'));
+  check('binder: cover shows live progress (art not counted)', (await page.textContent('.binder-cover')).includes('1 / 10 in hand'));
   check('binder: list cover carries the chosen image', (await page.locator('.binder-cover .binder-cover-img').count()) === 1);
 
   // ---- removing pages: ⊟ pulls a whole sheet, later pages slide forward ----
@@ -679,7 +701,7 @@ const { chromium } = require('playwright');
   await page.waitForFunction(() => (document.querySelector('#view').textContent || '').includes('of 2'));
   check('binder: removing a page takes its contents out with it',
     (await page.locator('.binder-grid .pocket.art').count()) === 0 &&
-    (await page.textContent('#view')).includes('1 / 7 in hand'));
+    (await page.textContent('#view')).includes('1 / 8 in hand'));
 
   await page.click('button:has-text("‹")');
   await page.waitForFunction(() => (document.querySelector('#view').textContent || '').includes('Page 1 of 2'));
@@ -687,12 +709,13 @@ const { chromium } = require('playwright');
   await confirmYes(page);
   await page.waitForFunction(() => (document.querySelector('#view').textContent || '').includes('of 1'));
   check('binder: later pages slide forward onto the removed sheet',
-    (await page.locator('.binder-grid .pocket.filled').count()) === 3 &&
+    (await page.locator('.binder-grid .pocket.filled').count()) === 4 &&
+    (await page.locator('.pocket[data-pocket="0"].filled').count()) === 1 &&
     (await page.locator('.pocket[data-pocket="1"].filled').count()) === 1 &&
     (await page.locator('.pocket[data-pocket="4"].filled').count()) === 1 &&
-    (await page.locator('.pocket[data-pocket="0"].filled').count()) === 0);
-  check('binder: the removed sheet’s cards left the binder (7 → 3)',
-    (await page.textContent('#view')).includes('0 / 3 in hand'));
+    (await page.locator('.pocket[data-pocket="2"].filled').count()) === 0);
+  check('binder: the removed sheet’s cards left the binder (8 → 4)',
+    (await page.textContent('#view')).includes('0 / 4 in hand'));
   await page.click('.page-remove[data-page="0"]');                      // the last sheet is refused
   await page.waitForTimeout(250);
   check('binder: a binder always keeps at least one page',
@@ -720,7 +743,7 @@ const { chromium } = require('playwright');
   await page.click('.binder-cover-page');
   await page.waitForSelector('.binder-grid .pocket.filled');
   check('binder: filling from a Pokémon gathers its printings across sets',
-    (await page.locator('.binder-grid .pocket.filled').count()) === 2 &&
+    (await page.locator('.binder-grid .pocket.filled').count()) === 4 &&
     new Set(await page.locator('.pocket.filled .pocket-cap .cap-set').allTextContents()).size === 2);
 
   await page.click('button:has-text("Edit binder")');
@@ -956,7 +979,7 @@ const { chromium } = require('playwright');
     await ep.goto('http://localhost:3111/#/binders');
     await ep.waitForSelector('.binder-create');
     await ep.fill('.binder-create input[type=text]', 'Admin Binder');
-    await ep.selectOption('.binder-create select >> nth=0', '2');       // 2×2 → base1's 5 cards need 2 pages
+    await ep.selectOption('.binder-create select >> nth=0', '2');       // 2×2 → base1's 8 printings need 2 pages
     await pickFill(ep, 'base set', 'Base Set');
     await ep.click('button:has-text("Create binder")');
     await ep.waitForSelector('.binder-cover-page');

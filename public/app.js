@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.46.0';
+const APP_VERSION = '3.47.0';
 
 /* ============================================================
  * Storage helpers
@@ -2519,6 +2519,7 @@ function importCollection(file) {
 // the front of a binder holds ONE thing: a color, or a picture. 'none' is the
 // color you pick when you want neither, or when a picture should stand alone.
 const BINDER_COLORS = ['red', 'blue', 'green', 'purple', 'black', 'none'];
+const MAX_BINDER_PAGES = 60;   // matches the server's cap; only used to say so out loud
 const COLOR_LABELS = { red: 'Red', blue: 'Blue', green: 'Green', purple: 'Purple', black: 'Black', none: 'No color' };
 const BINDER_SIZES = [2, 3, 4, 5];
 
@@ -2596,8 +2597,14 @@ async function renderBindersPage() {
     try {
       const [idx, sx] = await Promise.all([getIndex(), getSearchIndex()]);
       sets = [...idx.sets].reverse().map((s) => ({ kind: 'set', id: s.id, label: s.name, sub: 'Set' }));
-      species = sx.species.map((sp) => ({ kind: 'dex', id: String(sp.dex), label: sp.name,
-        sub: `Pok\u00e9mon #${String(sp.dex).padStart(3, '0')} \u00b7 ${sp.cards.length} card${sp.cards.length === 1 ? '' : 's'}` }));
+      // a pocket is made for every printing, so the printing count is the number
+      // that actually predicts the size of the binder \u2014 say it where they differ
+      species = sx.species.map((sp) => {
+        const prints = sp.cards.reduce((n, c) => n + realVariants(c).length, 0);
+        return { kind: 'dex', id: String(sp.dex), label: sp.name,
+          sub: `Pok\u00e9mon #${String(sp.dex).padStart(3, '0')} \u00b7 ${sp.cards.length} card${sp.cards.length === 1 ? '' : 's'}`
+            + (prints === sp.cards.length ? '' : ` \u00b7 ${prints} printings`) };
+      });
     } catch { toast('Could not load the card list'); return; }
     const all = [{ kind: null, id: '', label: 'Start empty', sub: 'Add cards yourself' }, ...sets, ...species];
     const input = h('input', { type: 'text', placeholder: 'Search sets and Pok\u00e9mon\u2026' });
@@ -2620,6 +2627,10 @@ async function renderBindersPage() {
     const ov = h('div', { class: 'picker-overlay' },
       h('div', { class: 'picker-panel' },
         h('h3', {}, 'Fill the binder with'),
+        // the pocket count stopped matching the card count the moment printings
+        // got their own pockets, so the panel says so before you commit to one
+        h('p', { class: 'muted small', style: 'margin:0 0 8px' },
+          'Every printing gets its own pocket — a card with a holo and a reverse takes three.'),
         input, results,
         h('div', { class: 'row', style: 'justify-content:flex-end; margin-top:6px' },
           h('button', { class: 'btn ghost small', onclick: () => ov.remove() }, 'Cancel'))));
@@ -2637,6 +2648,10 @@ async function renderBindersPage() {
         fillFromSet: fill && fill.kind === 'set' ? fill.id : undefined,
         fillFromPokemon: fill && fill.kind === 'dex' ? fill.id : undefined,
       }) });
+      // what it made, in pockets — and if the binder ran out of sheets before the
+      // cards ran out, that gets said plainly rather than left to be discovered
+      if (r.skipped) toast(`Filled ${r.filled} pockets — ${r.skipped} more printing${r.skipped === 1 ? '' : 's'} did not fit in ${MAX_BINDER_PAGES} pages`);
+      else if (r.filled) toast(`Filled ${r.filled} pocket${r.filled === 1 ? '' : 's'}`);
       location.hash = '#/binder/' + r.binder.id;
     } catch (e) { createBtn.disabled = false; toast(e.message); }
   } }, '\uff0b Create binder');

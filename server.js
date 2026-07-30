@@ -220,6 +220,7 @@ const BINDER_IMG_DIR = path.join(DATA_DIR, 'binder-images');   // user-uploaded 
 // one thing at a time, and a picture wants a plain shell behind it rather than
 // a color it has to fight.
 const BINDER_COLORS = ['red', 'blue', 'green', 'purple', 'black', 'none'];
+const MAX_BINDER_PAGES = 60;                     // the most sheets one binder holds
 const _bindersOf = db.prepare('SELECT id, name, size, color, pages, slots, cover FROM binders WHERE user_id = ? ORDER BY created');
 const _binderGet = db.prepare('SELECT * FROM binders WHERE user_id = ? AND id = ?');
 const _binderPut = db.prepare(`INSERT INTO binders (user_id, id, name, size, color, pages, slots, cover, created, updated)
@@ -1084,6 +1085,27 @@ function printingMaps(rows) {
   }
   return { printings, variantImages, removed };
 }
+// The order collectors read a card's printings in, and the same order the card
+// page shows them in — a filled binder should run the way the card page does.
+const VARIANT_ORDER = ['normal', 'holo', 'reverse', 'firstEdition', 'wPromo'];
+
+/** Every printing of a card that actually exists right now: its base variants
+ * minus anything soft-removed, plus the admin-defined custom ones. This mirrors
+ * realVariants() in the client and the two have to agree — a pocket made for a
+ * printing the card page says doesn't exist could never be ticked off. */
+function printingsOf(lang, card) {
+  const rows = _printsOfCard.all(lang, card.id);
+  const tombs = new Set(rows.filter((r) => r.hidden).map((r) => r.variant));
+  const base = (card.variants_csv == null ? ['normal'] : card.variants_csv.split(','))
+    .filter(Boolean).filter((v) => !tombs.has(v));
+  const out = VARIANT_ORDER.filter((v) => base.includes(v));
+  for (const v of base) if (!out.includes(v)) out.push(v);           // an unrecognised one still counts
+  for (const r of rows) if (!r.hidden && !out.includes(r.variant)) out.push(r.variant);
+  // a card whose normal printing was removed but which keeps a custom one must
+  // not have "normal" resurrected — only a card with nothing at all falls back
+  return out.length ? out : ['normal'];
+}
+
 function cardObj(c, maps, lean) {
   const variants = {};
   (c.variants_csv == null ? ['normal'] : c.variants_csv.split(',')).forEach((v) => { if (v) variants[v] = true; });
@@ -1792,7 +1814,7 @@ async function handleApi(req, res, pathname, ip, url) {
     if (!name || !size) return sendJSON(res, 400, { error: 'A name and a pocket size (2–5) are required' });
     if (_bindersOf.all(user.id).length >= 100) return sendJSON(res, 400, { error: 'Binder limit reached (100)' });
     const perPage = size * size;
-    let slots = {}, pages = 1;
+    let slots = {}, pages = 1, skipped = 0;
     // fill from a whole set, or from every printing of one Pokémon — a species
     // binder is the other way collectors organise, and it spans sets by nature
     const flang = LANG_RE.test(body.lang || '') ? body.lang : 'en';
@@ -1802,11 +1824,19 @@ async function handleApi(req, res, pathname, ip, url) {
       : (dex > 0 && dex < 100000 ? { cards: _cardsOfDex.all(flang, String(dex)), what: 'That Pokémon' } : null);
     if (fill) {
       if (!fill.cards.length) return sendJSON(res, 400, { error: `${fill.what} has no cards to fill from` });
-      fill.cards.forEach((c, i) => {
-        const primary = (c.variants_csv ? c.variants_csv.split(',') : ['normal'])[0] || 'normal';
-        slots[i] = { card: c.id, variant: primary, have: 0 };
-      });
-      pages = Math.max(1, Math.ceil(fill.cards.length / perPage));
+      // ONE POCKET PER PRINTING, not per card. A holo and its normal are two
+      // different pieces of cardboard, and a binder that gives them one pocket
+      // between them can never actually be finished. Each card's printings sit
+      // together, so the set's own numbering still runs front to back.
+      const wanted = [];
+      for (const c of fill.cards) for (const variant of printingsOf(flang, c)) wanted.push({ card: c.id, variant, have: 0 });
+      // a binder is a physical object with a limit; when the fill is bigger than
+      // one, it fills what fits and says how much it left rather than silently
+      // stopping short or making a binder the app can't page through
+      const room = MAX_BINDER_PAGES * perPage;
+      wanted.slice(0, room).forEach((s, i) => { slots[i] = s; });
+      skipped = Math.max(0, wanted.length - room);
+      pages = Math.min(MAX_BINDER_PAGES, Math.max(1, Math.ceil(Math.min(wanted.length, room) / perPage)));
     }
     const binder = {
       id: crypto.randomUUID(), name, size, color, pages,
@@ -1814,7 +1844,9 @@ async function handleApi(req, res, pathname, ip, url) {
     };
     _binderPut.run(user.id, binder.id, binder.name, binder.size, binder.color, binder.pages,
       JSON.stringify(binder.slots), null, binder.created, binder.updated);
-    return sendJSON(res, 200, { ok: true, binder });
+    // filled/skipped are what the client tells the user it made — the pocket
+    // count is no longer the card count, so it should not have to be guessed at
+    return sendJSON(res, 200, { ok: true, binder, filled: Object.keys(slots).length, skipped });
   }
 
   // upload an image to place in binder pockets (any signed-in user's own art)
@@ -1854,7 +1886,7 @@ async function handleApi(req, res, pathname, ip, url) {
       if (size !== row.size && body.slots === undefined) {
         return sendJSON(res, 400, { error: 'A size change must include the remapped slots' });
       }
-      let pages = Number.isInteger(body.pages) ? Math.min(Math.max(body.pages, 1), 60) : row.pages;
+      let pages = Number.isInteger(body.pages) ? Math.min(Math.max(body.pages, 1), MAX_BINDER_PAGES) : row.pages;
       let slots = JSON.parse(row.slots);
       if (body.slots !== undefined) {
         if (typeof body.slots !== 'object' || body.slots === null || Array.isArray(body.slots)) {
