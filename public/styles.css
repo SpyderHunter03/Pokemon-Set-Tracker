@@ -735,6 +735,9 @@ body { padding-bottom: calc(64px + env(safe-area-inset-bottom)); }
 .pocket.moving { outline: 3px solid var(--accent-soft); }
 .pocket-plus { font-size: 26px; color: var(--line, #3a4157); }
 .pocket-name { font-size: 11px; padding: 4px; text-align: center; }
+/* a picture that never came down after several tries: tap to ask again */
+.stalled { cursor: pointer; }
+.stalled::after { content: '\21bb'; display: block; opacity: .6; font-size: 15px; }
 .pocket-badge {
   position: absolute; top: 4px; left: 4px; background: var(--owned); color: #fff;
   border-radius: 50%; width: 20px; height: 20px; font-size: 12px;
@@ -745,17 +748,23 @@ body { padding-bottom: calc(64px + env(safe-area-inset-bottom)); }
   border-radius: 8px; padding: 1px 6px; font-size: 11px; font-weight: 700; pointer-events: none;
 }
 /* set name + card number along the bottom edge, in every binder mode */
-.pocket-cap {
+.pocket-cap, .card-cap {
   position: absolute; left: 0; right: 0; bottom: 0; pointer-events: none;
   display: flex; align-items: baseline; gap: 4px; justify-content: space-between;
   background: rgba(0, 0, 0, .72); color: #fff; padding: 1px 4px;
   font-size: 9px; line-height: 1.35; letter-spacing: .01em;
 }
-.pocket-cap .cap-set { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-.pocket-cap .cap-no { flex: 0 0 auto; font-weight: 700; }
+.pocket-cap .cap-set, .card-cap .cap-set { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.pocket-cap .cap-no, .card-cap .cap-no { flex: 0 0 auto; font-weight: 700; }
 /* badges step up so the caption never sits on top of them */
 .pocket.capped .pocket-qty, .pocket.capped .pick-badge { bottom: 19px; }
-@media (min-width: 700px) { .pocket-cap { font-size: 10px; padding: 2px 5px; } }
+/* the tile's ⓘ button clears the strip too, and the strip clears the rounded corner */
+.tcg-card.capped .info-btn { bottom: 22px; }
+.tcg-card .card-cap { border-radius: 0 0 9px 9px; }
+@media (min-width: 700px) {
+  .pocket-cap, .card-cap { font-size: 10px; padding: 2px 5px; }
+  .tcg-card.capped .info-btn { bottom: 24px; }
+}
 /* view mode: empty pockets are just empty — not an "add here" affordance */
 .pocket.plain { cursor: default; }
 .pocket.plain:hover { border-color: var(--line, #3a4157); }

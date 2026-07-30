@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.43.0';
+const APP_VERSION = '3.44.0';
 
 /* ============================================================
  * Storage helpers
@@ -238,6 +238,108 @@ function cardImg(card, quality = 'low', variant = null) {
   if (vi) return vi[quality] || vi.low || vi.high || null;
   if (!card.img) return null;
   return card.img[quality] || card.img.low || card.img.high || null;
+}
+
+/** Readable set name from whatever is already in memory — the set page's own
+ * detail record first, then the index. Falls back to the raw set id, which
+ * ensureSetNames() below comes back and fixes. */
+let _setNameMap = null, _setNameFrom = null;
+function setNameById(sid) {
+  const detail = _setDetailCache.get(sid);
+  if (detail && detail.name) return detail.name;
+  // `!_setNameMap` matters: before anything loads, _setNameFrom and _indexCache
+  // are both null, so the freshness test alone would never build the map
+  if (!_setNameMap || _setNameFrom !== _indexCache) {
+    _setNameFrom = _indexCache;
+    _setNameMap = new Map((((_indexCache && _indexCache.sets) || [])).map((s) => [s.id, s.name]));
+  }
+  return _setNameMap.get(sid) || sid;
+}
+function setNameOf(cardId) { return setNameById(setIdOf(cardId)); }
+
+/** Some pages that show cards never need the set index for anything else — a
+ * Pokémon's printings, search results — so their captions would sit on the raw
+ * "base1" forever. Fetch it once and repaint the captions already on screen. */
+let _setNamesPending = false;
+function ensureSetNames() {
+  if (_indexCache || _setNamesPending) return;
+  _setNamesPending = true;
+  getIndex()
+    .then(() => { for (const el of document.querySelectorAll('.cap-set[data-set]')) el.textContent = setNameById(el.dataset.set); })
+    .catch(() => { /* offline — the set id still identifies the card */ })
+    .finally(() => { _setNamesPending = false; });
+}
+
+/** The "Base Set · #58" strip along the bottom of a card. A collection mixes
+ * sets and reprints freely, so the picture alone often can't tell two
+ * printings apart — every card that shows a picture says which one it is.
+ * @param cls swap in 'print-cap' so the printed version can size itself in mm */
+function cardCaption(cid, card, cls = 'pocket-cap') {
+  const sid = setIdOf(cid);
+  ensureSetNames();
+  return h('div', { class: cls },
+    h('span', { class: 'cap-set', 'data-set': sid }, setNameById(sid)),
+    h('span', { class: 'cap-no' }, '#' + ((card && card.localId) || localIdOf(cid) || '?')),
+  );
+}
+
+/* ---- card pictures that survive a flaky phone link ----
+   A page of results asks for dozens of pictures at once, and over a phone
+   connection some of those requests simply never land. The old code replaced
+   the tile with a grey placeholder on the FIRST error and never tried again —
+   so a moment's bad signal left a wall of grey that only cleared when some
+   other page happened to warm the cache. Now a picture gets a few retries with
+   backoff, falls back to the other quality, re-tries when the tab or the
+   network comes back, and the placeholder can be tapped to try once more. */
+const IMG_RETRIES = 3;
+const _stalledImages = new Set();
+
+function retryStalledImages() {
+  for (const again of [..._stalledImages]) { _stalledImages.delete(again); again(); }
+}
+window.addEventListener('online', retryStalledImages);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) retryStalledImages(); });
+
+/**
+ * @param host element that wears the .img-loading spinner while a fetch is in flight
+ * @param fallback () => Element shown once the retries are spent (tap to re-arm)
+ * @returns the <img>, or null when this printing has no picture at all
+ */
+function cardImageEl(card, variant, { alt, host, quality = 'low', fallback, lazy = true } = {}) {
+  const first = cardImg(card, quality, variant);
+  if (!first) return null;
+  const second = cardImg(card, quality === 'low' ? 'high' : 'low', variant);
+  const urls = second && second !== first ? [first, second] : [first];
+  const img = h('img', Object.assign({ src: urls[0], alt: alt || card.name || '', decoding: 'async' },
+    lazy ? { loading: 'lazy' } : {}));
+  let tries = 0;
+  const spin = (on) => { if (host) host.classList.toggle('img-loading', on); };
+  const load = () => { spin(true); img.src = urls[tries % urls.length]; };
+  img.addEventListener('load', () => { tries = 0; spin(false); });
+  img.addEventListener('error', () => {
+    spin(false);
+    if (++tries <= IMG_RETRIES) {
+      setTimeout(() => { if (img.isConnected) load(); }, 250 * tries * tries);
+      return;
+    }
+    if (!fallback) return;                    // nothing better to show than a broken picture
+    const ph = fallback();
+    ph.classList.add('stalled');
+    ph.title = 'Tap to load the picture again';
+    const again = (e) => {
+      if (e) e.stopPropagation();
+      _stalledImages.delete(again);
+      tries = 0;
+      ph.replaceWith(img);                    // a no-op if the page moved on
+      if (img.isConnected) load();
+    };
+    ph.addEventListener('click', again);
+    _stalledImages.add(again);
+    img.replaceWith(ph);
+  });
+  // no loader flash for a picture the browser already has in hand
+  requestAnimationFrame(() => { if (!img.complete) spin(true); });
+  return img;
 }
 
 /** Printing look when no dedicated scan exists: the closest image — the
@@ -572,16 +674,6 @@ function toast(msg) {
 
 function spinner() { return h('div', { class: 'spinner' }); }
 
-/* Spinning-pokeball loader: shown on `host` (via CSS ::after) until the
- * image finishes loading — or fails, in which case other handlers take over. */
-function trackImageLoad(imgEl, host) {
-  if (imgEl.complete) return; // already in the browser cache — no flash
-  host.classList.add('img-loading');
-  const done = () => host.classList.remove('img-loading');
-  imgEl.addEventListener('load', done, { once: true });
-  imgEl.addEventListener('error', done, { once: true });
-}
-
 /* ============================================================
  * Card grid rendering (shared by set, search, pokémon, scan pages)
  * ============================================================ */
@@ -606,16 +698,13 @@ function cardTile(card, variant, { onOwnershipChange } = {}) {
   });
   tile.dataset.cardId = card.id;
   tile.dataset.variant = variant;
-  const variantSrc = cardImg(card, 'low', variant);
-  if (variantSrc) {
-    const imgEl = h('img', { src: variantSrc, alt: card.name, loading: 'lazy' });
-    imgEl.addEventListener('error', () => imgEl.replaceWith(placeholderContent(card)));
-    tile.append(imgEl);
-    trackImageLoad(imgEl, tile);
-  } else {
-    tile.append(placeholderContent(card));
-  }
+  const imgEl = cardImageEl(card, variant, { host: tile, fallback: () => placeholderContent(card) });
+  tile.append(imgEl || placeholderContent(card));
   tile.append(variantFxEl(card, variant));   // every tile banners its printing
+  // which printing this actually is — same strip the binder shows, now on
+  // every card everywhere, because a picture alone doesn't say which set
+  tile.classList.add('capped');
+  tile.append(cardCaption(card.id, card, 'card-cap'));
   tile.append(h('button', {
     class: 'info-btn', title: 'Card details', 'aria-label': 'Card details',
     onclick: (e) => { e.stopPropagation(); openCardModal(card, { variant, onOwnershipChange }); },
@@ -692,11 +781,12 @@ async function openCardModal(brief, { variant, onOwnershipChange, onCardChanged 
 
   function renderModalImage() {
     imgWrap.replaceChildren();
-    const src = cardImg(card, 'high', active) || cardImg(card, 'low', active);
-    if (!src) return;
-    const modalImg = h('img', { class: 'card-img', src, alt: card.name });
+    // the big picture retries too, and drops to the low-res scan if the
+    // full-size one won't come down
+    const modalImg = cardImageEl(card, active, { host: imgWrap, quality: 'high', lazy: false });
+    if (!modalImg) return;
+    modalImg.classList.add('card-img');
     imgWrap.append(modalImg);
-    trackImageLoad(modalImg, imgWrap);
     const fx = variantFxEl(card, active);
     if (fx) imgWrap.append(fx);
   }
@@ -2554,12 +2644,6 @@ async function renderBinderPage(id) {
     renderHead(); renderBook();
   }
   const cardModalOpts = (s) => ({ variant: s.variant, onCardChanged: () => reloadCards() });
-  /** the little "Base Set · #58" strip along the bottom of a card.
-   * @param cls extra class so the printed version can size itself in mm */
-  const cardCaption = (cid, card, cls = 'pocket-cap') => h('div', { class: cls },
-    h('span', { class: 'cap-set' }, setNameOf(cid)),
-    h('span', { class: 'cap-no' }, '#' + ((card && card.localId) || '?')),
-  );
   const filledCount = () => Object.values(binder.slots).filter((e) => e.card).length;
   const haveCount = () => Object.values(binder.slots).filter((e) => e.card && e.have).length;
 
@@ -2984,11 +3068,13 @@ async function renderBinderPage(id) {
       }
       if (s) {
         const card = cardsById.get(s.card);
-        const img = card && cardImg(card, 'low', s.variant);
+        const label = (card && card.name) || s.card;
         pocket = h('div', { class: 'pocket filled capped' + (s.have ? ' have' : '') + (moveFrom === i ? ' moving' : '') +
-          (pickMode && picked.has(i) ? ' picked' : ''), 'data-pocket': String(i) },
-          img ? h('img', { src: img, loading: 'lazy', alt: (card && card.name) || s.card })
-              : h('div', { class: 'pocket-name' }, (card && card.name) || s.card),
+          (pickMode && picked.has(i) ? ' picked' : ''), 'data-pocket': String(i) });
+        // the picture retries a stalled download instead of giving up for good
+        pocket.append((card && cardImageEl(card, s.variant, { alt: label, host: pocket,
+          fallback: () => h('div', { class: 'pocket-name' }, label) })) || h('div', { class: 'pocket-name' }, label));
+        pocket.append(...[
           card ? variantFxEl(card, s.variant) : null,   // same diagonal banner as the collection tiles
           // which card this actually is, in every mode: a binder mixes sets, so
           // the picture alone often isn't enough to tell two printings apart
@@ -2998,7 +3084,7 @@ async function renderBinderPage(id) {
           pickMode && picked.has(i) ? h('div', { class: 'pick-badge' }, '\ud83d\udda8') : null,
           // while picking, the whole pocket is one big checkbox \u2014 no side doors
           pickMode ? null : h('button', { class: 'pocket-edit', onclick: (e) => { e.stopPropagation(); pocketActions(i); } }, '\u22ef'),
-        );
+        ].filter(Boolean));
         if (editMode) {
           // drag & drop between pockets (desktop; mobile keeps \u2194 Move)
           pocket.setAttribute('draggable', 'true');
@@ -3458,6 +3544,11 @@ async function renderBinderPage(id) {
       h('span', { class: 'muted small', style: 'min-width:64px' }, 'Custom'),
       gapIn, h('span', { class: 'muted small' }, 'mm between cards'));
     const syncGapRow = () => { gapRow.style.display = gapKey === 'custom' ? '' : 'none'; };
+    // the set + number strip along the bottom of each printed card. On by
+    // default — a proxy that doesn't say which printing it stands in for is
+    // just a picture — but it eats ink and a sleeved proxy hides it anyway.
+    let capKey = lsGet('ptcg.proxy.caption');
+    if (!['1', '0'].includes(capKey)) capKey = '1';
     const optRow = (label, opts, get, set) => h('div', { class: 'row', style: 'gap:6px; flex-wrap:wrap; align-items:center' },
       h('span', { class: 'muted small', style: 'min-width:64px' }, label),
       ...opts.map(([v, txt]) => h('button', { class: 'chip' + (v === get() ? ' active' : ''), onclick: (e) => {
@@ -3483,6 +3574,7 @@ async function renderBinderPage(id) {
         optRow('Spacing', [['0', 'None'], ['1', '1 mm'], ['2', '2 mm'], ['4', '4 mm'], ['custom', 'Custom\u2026']],
           () => gapKey, (v) => { gapKey = v; syncGapRow(); }),
         gapRow,
+        optRow('Caption', [['1', 'Set + number'], ['0', 'None']], () => capKey, (v) => capKey = v),
         optRow('Paper', [['letter', 'Letter'], ['a4', 'A4']], () => paper, (v) => paper = v),
         h('div', { class: 'row', style: 'justify-content:flex-end; gap:8px; margin-top:6px' },
           h('button', { class: 'btn ghost small', onclick: () => overlay.remove() }, 'Cancel'),
@@ -3494,11 +3586,12 @@ async function renderBinderPage(id) {
               : parseFloat(gapKey);
             lsSet('ptcg.proxy.size', sizeKey);
             lsSet('ptcg.proxy.gap', gapKey);
+            lsSet('ptcg.proxy.caption', capKey);
             if (gapKey === 'custom') lsSet('ptcg.proxy.customGap', String(gap));
             if (!only) lsSet('ptcg.proxy.include', include);
             if (sizeKey === 'custom') { lsSet('ptcg.proxy.customW', String(size.w)); lsSet('ptcg.proxy.customH', String(size.h)); }
             overlay.remove();
-            printProxies(which, paper, size, include, only, gap);
+            printProxies(which, paper, size, include, only, gap, capKey === '1');
             // the picks have done their job \u2014 start the next batch clean
             if (only && picked.size) {
               picked.clear(); renderPickBar(); renderBook();
@@ -3512,8 +3605,9 @@ async function renderBinderPage(id) {
   }
 
   /** @param gap millimetres of white space between printed cards; 0 butts them
-   * edge to edge so neighbours share one cut line. */
-  function printProxies(which, paper, size, include, only, gap) {
+   * edge to edge so neighbours share one cut line.
+   * @param caption print the set + number strip along the bottom of each card */
+  function printProxies(which, paper, size, include, only, gap, caption = true) {
     const pw = (size && size.w) || 63, ph = (size && size.h) || 88;
     const g = Number.isFinite(gap) ? Math.min(20, Math.max(0, gap)) : 0;
     const inc = include || 'both';
@@ -3558,8 +3652,9 @@ async function renderBinderPage(id) {
                   (card ? ' \u00b7 ' + variantLabel(card, v.variant) : '')),
               ),
         card ? h('div', { class: 'print-fx' }, variantLabel(card, v.variant)) : null,
-        // the fallback tile already spells out set and number in its own body
-        img ? cardCaption(v.card, card, 'print-cap') : null,
+        // the fallback tile already spells out set and number in its own body,
+        // so it keeps saying so even when the caption strip is switched off
+        img && caption ? cardCaption(v.card, card, 'print-cap') : null,
       ));
     }
     const pageStyle = h('style', {}, `@page { size: ${paper === 'a4' ? 'A4' : 'letter'}; margin: 8mm; }`);

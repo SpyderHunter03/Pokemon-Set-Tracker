@@ -98,6 +98,11 @@ const { chromium } = require('playwright');
   check('every tile banners its printing (no unlabeled cards)',
     (await page.locator('.tcg-card').count()) === (await page.locator('.tcg-card .fx-label').count()));
   check('high-only card got an image', (await page.locator('.tcg-card[data-card-id="base1-97"] img').count()) === 1);
+  // the binder's set + number strip, now on every card everywhere
+  check('set page tiles carry the set + number caption',
+    (await page.locator('.tcg-card .card-cap').count()) === 8 &&
+    (await page.textContent('.tcg-card .card-cap .cap-set >> nth=0')) === 'Base Set' &&
+    /#\d+/.test(await page.textContent('.tcg-card .card-cap .cap-no >> nth=0')));
 
   // tap the Holo printing of Charizard
   await page.click('.tcg-card >> nth=0');
@@ -190,6 +195,10 @@ const { chromium } = require('playwright');
     (await page.locator('.tcg-card').count()) === 4 &&
     (await page.locator('.tcg-card >> nth=0').getAttribute('data-card-id')) === 'swsh3-20');
   check('pokemon page progress', (await page.textContent('.page-head .muted')).trim() === '1 / 2 owned');
+  // a Pokémon page mixes sets, so the caption is the only thing telling them apart
+  check('pokemon page tiles name their set, and the sets differ',
+    (await page.locator('.tcg-card .card-cap').count()) === 4 &&
+    new Set(await page.locator('.tcg-card .card-cap .cap-set').allTextContents()).size === 2);
   check('pokemon page shows a printings bar too', (await page.textContent('.page-head .prog-row >> nth=1')).includes('printings'));
   await page.selectOption('.chips select', 'oldest');
   check('pokemon page sorts oldest-set first', (await page.locator('.tcg-card >> nth=0').getAttribute('data-card-id')) === 'base1-4');
@@ -349,6 +358,34 @@ const { chromium } = require('playwright');
   await page.evaluate(() => window.dispatchEvent(new Event('afterprint')));
   // and back to butted, so nothing downstream inherits the spacing choice
   await page.evaluate(() => localStorage.setItem('ptcg.proxy.gap', '0'));
+
+  // caption: the set + number strip is optional on the printed sheet
+  await page.evaluate(() => { delete document.body.dataset.printed; });
+  await page.click('button:has-text("Print proxies")');
+  await page.waitForSelector('.picker-panel h3:has-text("Print proxies")');
+  await page.click('.picker-panel .chip:has-text("None") >> nth=1');   // nth=0 is Spacing's None
+  await page.click('.picker-panel .btn:has-text("Print")');
+  await page.waitForFunction(() => document.body.dataset.printed === '1');
+  check('proxies: turning the caption off strips it from every printed card',
+    (await page.locator('#print-area .print-cap').count()) === 0 &&
+    (await page.locator('#print-area .print-cell').count()) > 0);
+  // the imageless fallback still names its set — nothing else identifies it
+  check('proxies: imageless proxies still say what they are without the caption',
+    (await page.textContent('#print-area .pf-meta >> nth=0')).includes('Base Set'));
+  await page.evaluate(() => window.dispatchEvent(new Event('afterprint')));
+  await page.evaluate(() => { delete document.body.dataset.printed; });
+  await page.click('button:has-text("Print proxies")');
+  await page.waitForSelector('.picker-panel h3:has-text("Print proxies")');
+  check('proxies: the caption choice is remembered next time', await page.evaluate(() =>
+    [...document.querySelectorAll('.picker-panel .chip.active')].some((c) => c.textContent === 'None' &&
+      c.parentElement.textContent.startsWith('Caption'))));
+  await page.click('.picker-panel .chip:has-text("Set + number")');
+  await page.click('.picker-panel .btn:has-text("Print")');
+  await page.waitForFunction(() => document.body.dataset.printed === '1');
+  check('proxies: turning it back on captions every pictured card',
+    (await page.locator('#print-area .print-cap').count()) ===
+    (await page.locator('#print-area .print-cell img').count()));
+  await page.evaluate(() => window.dispatchEvent(new Event('afterprint')));
 
   // drag & drop a card between pockets (idx4 -> empty idx7) — dispatch the
   // HTML5 drag events directly (headless mouse-drag doesn't start native DnD)
@@ -660,6 +697,54 @@ const { chromium } = require('playwright');
     });
     check('pokeball spinner clears once the image arrives', true);
     await slowCtx.close();
+  }
+
+  // ---- a dropped image request is retried, not written off ----
+  // the phone bug: one failed fetch used to replace the tile with the grey
+  // placeholder for good, so a moment's bad signal left a wall of 🃏
+  {
+    const flakyCtx = await browser.newContext({ serviceWorkers: 'block' });
+    const flakyPage = await flakyCtx.newPage();
+    const failed = new Set();
+    await flakyPage.route('**/*.webp', async (route) => {
+      const url = route.request().url();
+      if (!failed.has(url)) { failed.add(url); await route.abort('failed'); return; }
+      await route.continue();   // second time's the charm, as a flaky link would be
+    });
+    await flakyPage.goto('http://localhost:3111/#/set/base1');
+    await flakyPage.waitForSelector('.tcg-card');
+    check('a dropped image request is actually seen as dropped', failed.size > 0);
+    await flakyPage.waitForFunction(() => {
+      const imgs = [...document.querySelectorAll('.tcg-card img')];
+      return imgs.length >= 6 && imgs.every((i) => i.complete && i.naturalWidth > 0);
+    }, null, { timeout: 15000 });
+    check('every picture comes back after a failed first attempt', true);
+    check('no tile got stuck on the grey placeholder',
+      (await flakyPage.locator('.tcg-card .noimg').count()) === 2);   // the two genuinely imageless cards
+    await flakyCtx.close();
+  }
+
+  // ---- a picture that never arrives leaves a placeholder you can tap ----
+  {
+    const deadCtx = await browser.newContext({ serviceWorkers: 'block' });
+    const deadPage = await deadCtx.newPage();
+    let allow = false;
+    await deadPage.route('**/*.webp', async (route) => {
+      if (allow) { await route.continue(); return; }
+      await route.abort('failed');
+    });
+    await deadPage.goto('http://localhost:3111/#/set/base1');
+    await deadPage.waitForSelector('.tcg-card .noimg.stalled', { timeout: 20000 });
+    check('a picture that never lands falls back to a tappable placeholder',
+      (await deadPage.locator('.tcg-card .noimg.stalled').count()) > 0);
+    allow = true;
+    await deadPage.click('.tcg-card .noimg.stalled >> nth=0');
+    await deadPage.waitForFunction(() => {
+      const i = document.querySelector('.tcg-card img');
+      return i && i.complete && i.naturalWidth > 0;
+    }, null, { timeout: 15000 });
+    check('tapping the placeholder loads the picture', true);
+    await deadCtx.close();
   }
 
   // ---- copied files with no server behind them → the app does nothing ----
