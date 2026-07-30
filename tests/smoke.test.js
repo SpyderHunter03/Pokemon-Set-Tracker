@@ -269,6 +269,9 @@ const { chromium } = require('playwright');
     (await page.locator('#print-area .print-cap').count()) === 3 &&      // the text fallbacks already say it in their body
     (await page.textContent('#print-area .print-cap >> nth=0')).includes('Base Set') &&
     /#\d+/.test(await page.textContent('#print-area .print-cap .cap-no >> nth=0')));
+  // butted by default: neighbours share one cut line, so you cut once per seam
+  check('proxies: no gap between cards unless you ask for one',
+    await page.evaluate(() => [...document.head.querySelectorAll('style')].some((st) => /#print-area \{ gap: 0mm; \}/.test(st.textContent))));
   await page.evaluate(() => window.dispatchEvent(new Event('afterprint')));
   check('proxies: sheet cleans up after printing', (await page.locator('#print-area').count()) === 0);
 
@@ -302,7 +305,7 @@ const { chromium } = require('playwright');
   await page.evaluate(() => { delete document.body.dataset.printed; });
   await page.click('button:has-text("Print proxies")');
   await page.waitForSelector('.picker-panel h3:has-text("Print proxies")');
-  await page.click('.picker-panel .chip:has-text("Custom")');
+  await page.click('.picker-panel .chip:has-text("Custom") >> nth=0');   // nth=0: Spacing has a Custom… too
   // ratio lock: with 🔒 3:4 on, editing width drives height (75 → 100)
   await page.click('.picker-panel button:has-text("3:4")');
   await page.fill('.picker-panel input[type=number] >> nth=0', '75');
@@ -320,6 +323,32 @@ const { chromium } = require('playwright');
     await page.evaluate(() => ![...document.head.querySelectorAll('style')].some((st) => st.textContent.includes('width: 70mm'))));
   // back to standard so nothing downstream inherits the custom choice
   await page.evaluate(() => localStorage.setItem('ptcg.proxy.size', 'std'));
+
+  // spacing: a preset and a custom millimetre entry both drive the page gap
+  await page.evaluate(() => { delete document.body.dataset.printed; });
+  await page.click('button:has-text("Print proxies")');
+  await page.waitForSelector('.picker-panel h3:has-text("Print proxies")');
+  await page.click('.picker-panel .chip:has-text("2 mm")');
+  await page.click('.picker-panel .btn:has-text("Print")');
+  await page.waitForFunction(() => document.body.dataset.printed === '1');
+  check('proxies: a chosen spacing preset lands on the sheet',
+    await page.evaluate(() => [...document.head.querySelectorAll('style')].some((st) => /#print-area \{ gap: 2mm; \}/.test(st.textContent))));
+  await page.evaluate(() => window.dispatchEvent(new Event('afterprint')));
+  await page.evaluate(() => { delete document.body.dataset.printed; });
+  await page.click('button:has-text("Print proxies")');
+  await page.waitForSelector('.picker-panel h3:has-text("Print proxies")');
+  // the Spacing row's Custom… is the second one in the panel (Size owns the first)
+  await page.click('.picker-panel .chip:has-text("Custom") >> nth=1');
+  check('proxies: choosing Custom spacing reveals the mm box',
+    await page.isVisible('.picker-panel input[type=number] >> nth=2'));
+  await page.fill('.picker-panel input[type=number] >> nth=2', '1.5');
+  await page.click('.picker-panel .btn:has-text("Print")');
+  await page.waitForFunction(() => document.body.dataset.printed === '1');
+  check('proxies: custom spacing prints exactly as entered',
+    await page.evaluate(() => [...document.head.querySelectorAll('style')].some((st) => /#print-area \{ gap: 1\.5mm; \}/.test(st.textContent))));
+  await page.evaluate(() => window.dispatchEvent(new Event('afterprint')));
+  // and back to butted, so nothing downstream inherits the spacing choice
+  await page.evaluate(() => localStorage.setItem('ptcg.proxy.gap', '0'));
 
   // drag & drop a card between pockets (idx4 -> empty idx7) — dispatch the
   // HTML5 drag events directly (headless mouse-drag doesn't start native DnD)

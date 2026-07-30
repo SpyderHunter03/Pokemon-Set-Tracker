@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.42.0';
+const APP_VERSION = '3.43.0';
 
 /* ============================================================
  * Storage helpers
@@ -3448,6 +3448,16 @@ async function renderBinderPage(id) {
       h('span', { class: 'muted small', style: 'min-width:64px' }, 'Custom'),
       wIn, lockBtn, hIn, h('span', { class: 'muted small' }, 'mm'));
     const syncCustomRow = () => { customRow.style.display = sizeKey === 'custom' ? '' : 'none'; };
+    // spacing between the cut squares. Default NONE: a gap wastes paper and
+    // makes you cut twice down every seam, where butted cells share one line.
+    let gapKey = lsGet('ptcg.proxy.gap');
+    if (!['0', '1', '2', '4', 'custom'].includes(gapKey)) gapKey = '0';
+    const gapIn = h('input', { type: 'number', min: '0', max: '20', step: '0.5',
+      value: lsGet('ptcg.proxy.customGap') || '2', style: 'flex:none; width:72px' });
+    const gapRow = h('div', { class: 'row', style: 'gap:6px; align-items:center' },
+      h('span', { class: 'muted small', style: 'min-width:64px' }, 'Custom'),
+      gapIn, h('span', { class: 'muted small' }, 'mm between cards'));
+    const syncGapRow = () => { gapRow.style.display = gapKey === 'custom' ? '' : 'none'; };
     const optRow = (label, opts, get, set) => h('div', { class: 'row', style: 'gap:6px; flex-wrap:wrap; align-items:center' },
       h('span', { class: 'muted small', style: 'min-width:64px' }, label),
       ...opts.map(([v, txt]) => h('button', { class: 'chip' + (v === get() ? ' active' : ''), onclick: (e) => {
@@ -3470,17 +3480,25 @@ async function renderBinderPage(id) {
         optRow('Size', [['std', 'Standard 63\u00d788'], ['small', 'Small 59\u00d786'], ['jumbo', 'Jumbo 89\u00d7127'], ['custom', 'Custom\u2026']],
           () => sizeKey, (v) => { sizeKey = v; syncCustomRow(); }),
         customRow,
+        optRow('Spacing', [['0', 'None'], ['1', '1 mm'], ['2', '2 mm'], ['4', '4 mm'], ['custom', 'Custom\u2026']],
+          () => gapKey, (v) => { gapKey = v; syncGapRow(); }),
+        gapRow,
         optRow('Paper', [['letter', 'Letter'], ['a4', 'A4']], () => paper, (v) => paper = v),
         h('div', { class: 'row', style: 'justify-content:flex-end; gap:8px; margin-top:6px' },
           h('button', { class: 'btn ghost small', onclick: () => overlay.remove() }, 'Cancel'),
           h('button', { class: 'btn small', onclick: () => {
             const clamp = (el, dflt) => Math.min(150, Math.max(20, parseFloat(el.value) || dflt));
             const size = sizeKey === 'custom' ? { w: clamp(wIn, 63), h: clamp(hIn, 88) } : SIZES[sizeKey];
+            const gap = gapKey === 'custom'
+              ? Math.min(20, Math.max(0, parseFloat(gapIn.value) || 0))
+              : parseFloat(gapKey);
             lsSet('ptcg.proxy.size', sizeKey);
+            lsSet('ptcg.proxy.gap', gapKey);
+            if (gapKey === 'custom') lsSet('ptcg.proxy.customGap', String(gap));
             if (!only) lsSet('ptcg.proxy.include', include);
             if (sizeKey === 'custom') { lsSet('ptcg.proxy.customW', String(size.w)); lsSet('ptcg.proxy.customH', String(size.h)); }
             overlay.remove();
-            printProxies(which, paper, size, include, only);
+            printProxies(which, paper, size, include, only, gap);
             // the picks have done their job \u2014 start the next batch clean
             if (only && picked.size) {
               picked.clear(); renderPickBar(); renderBook();
@@ -3490,11 +3508,14 @@ async function renderBinderPage(id) {
         ),
       ));
     view.append(overlay);
-    syncCustomRow(); syncCardsRow();
+    syncCustomRow(); syncCardsRow(); syncGapRow();
   }
 
-  function printProxies(which, paper, size, include, only) {
+  /** @param gap millimetres of white space between printed cards; 0 butts them
+   * edge to edge so neighbours share one cut line. */
+  function printProxies(which, paper, size, include, only, gap) {
     const pw = (size && size.w) || 63, ph = (size && size.h) || 88;
+    const g = Number.isFinite(gap) ? Math.min(20, Math.max(0, gap)) : 0;
     const inc = include || 'both';
     const entries = Object.entries(binder.slots)
       .map(([k, v]) => [parseInt(k, 10), v])
@@ -3543,6 +3564,7 @@ async function renderBinderPage(id) {
     }
     const pageStyle = h('style', {}, `@page { size: ${paper === 'a4' ? 'A4' : 'letter'}; margin: 8mm; }`);
     const sizeStyle = h('style', {}, `
+      body.printing-proxies #print-area { gap: ${g}mm; }
       body.printing-proxies #print-area .print-cell { width: ${pw}mm; height: ${ph}mm; }`);
     document.head.append(pageStyle, sizeStyle);
     document.body.append(area);

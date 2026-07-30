@@ -795,8 +795,11 @@ body { padding-bottom: calc(64px + env(safe-area-inset-bottom)); }
 /* ---------- proxy printing ---------- */
 #print-area { display: none; }
 body.printing-proxies #print-area {
-  display: flex; flex-wrap: wrap; gap: 4mm; align-content: flex-start;
-  background: #fff; padding: 4mm;
+  /* no gap by default — butted cards share one cut line, so you cut once per
+     seam instead of twice and fit more per sheet. printProxies overrides this
+     with whatever spacing was chosen in the dialog. */
+  display: flex; flex-wrap: wrap; gap: 0; align-content: flex-start;
+  background: #fff; padding: 0;
 }
 @media print {
   body.printing-proxies > :not(#print-area) { display: none !important; }
