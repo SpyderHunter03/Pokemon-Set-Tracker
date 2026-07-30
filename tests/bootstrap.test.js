@@ -44,6 +44,10 @@ const { chromium } = require('playwright');
   await page.fill('#account-forms input[type=text]', 'ptcgadmin');
   await page.fill('#account-forms input[type=password]', 'password123');
   await page.click('#account-forms .btn');
+  // signing in closes the modal it was opened for — reopen it for the admin panel
+  await page.waitForFunction(() => !document.getElementById('account-modal').open);
+  check('creating the first account closes the account modal', true);
+  await page.click('#account-btn');
   await page.waitForSelector('#account-status button:has-text("Sign out")');
   await page.waitForSelector('#admin-area button:has-text("Update cards from TCGdex")');
   check('first account sees the Administration section', true);

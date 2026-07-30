@@ -212,6 +212,10 @@ const { chromium } = require('playwright');
   check('binder: fill-from-set filled page 1', (await page.locator('.binder-grid .pocket.filled').count()) === 4);
   check('binder: pockets carry the collection-style printing labels',
     (await page.locator('.binder-grid .pocket.filled .fx-label').count()) === 4);
+  check('binder: every card pocket is captioned with its set name and number',
+    (await page.locator('.binder-grid .pocket.filled .pocket-cap').count()) === 4 &&
+    (await page.textContent('.binder-grid .pocket.filled .pocket-cap >> nth=0')).includes('Base Set') &&
+    /#\d+/.test(await page.textContent('.binder-grid .pocket.filled .pocket-cap .cap-no >> nth=0')));
   check('binder: 5 cards → 2 pages', (await page.textContent('#view')).includes('Page 1 of 2'));
   check('binder: starts with none in hand', (await page.textContent('#view')).includes('0 / 5 in hand'));
   await page.click('.binder-grid .pocket >> nth=0');                    // tap = "I have this one"
@@ -261,6 +265,10 @@ const { chromium } = require('playwright');
   check('proxies: card images + text fallbacks for imageless cards',
     (await page.locator('#print-area .print-cell img').count()) === 3 &&
     (await page.locator('#print-area .print-fallback').count()) === 2);
+  check('proxies: printed cards carry the same set + number caption',
+    (await page.locator('#print-area .print-cap').count()) === 3 &&      // the text fallbacks already say it in their body
+    (await page.textContent('#print-area .print-cap >> nth=0')).includes('Base Set') &&
+    /#\d+/.test(await page.textContent('#print-area .print-cap .cap-no >> nth=0')));
   await page.evaluate(() => window.dispatchEvent(new Event('afterprint')));
   check('proxies: sheet cleans up after printing', (await page.locator('#print-area').count()) === 0);
 
@@ -634,6 +642,151 @@ const { chromium } = require('playwright');
     await gp.waitForSelector('h2:has-text("Server required")');
     check('no-server copy is gated (server required)', (await gp.locator('.set-card').count()) === 0);
     await gctx.close();
+  }
+
+  // ---- signing in closes the modal it was asked for ----
+  {
+    const actx = await browser.newContext({ serviceWorkers: 'block' });
+    const ap = await actx.newPage();
+    await ap.goto('http://localhost:3111/');
+    await ap.waitForSelector('.set-card');
+    await ap.click('#account-btn');
+    await ap.waitForSelector('#account-modal[open]');
+    await ap.click('#account-modal .tabs button:has-text("Create account")');
+    await ap.fill('#ptcg-username', 'smokelogin' + Math.floor(Math.random() * 1e6));
+    await ap.fill('#ptcg-password', 'password123');
+    await ap.click('#account-modal form .btn');
+    await ap.waitForFunction(() => !document.getElementById('account-modal').open, null, { timeout: 8000 })
+      .catch(() => {});
+    check('sign-in closes the account modal', (await ap.locator('#account-modal[open]').count()) === 0);
+    // route() repaints after the sync round-trip, so give the banner a moment
+    await ap.waitForSelector('#stats-banner', { timeout: 8000 }).catch(() => {});
+    check('sign-in still switches the app into tracking mode', (await ap.locator('#stats-banner').count()) === 1);
+    await ap.click('#account-btn');
+    await ap.waitForSelector('#account-modal[open]');
+    check('reopening the modal shows the signed-in panel',
+      (await ap.textContent('#account-modal')).includes('Sign out'));
+    await actx.close();
+  }
+
+  // ---- editing a card from a binder leaves the binder exactly where it was ----
+  {
+    const ectx = await browser.newContext({ serviceWorkers: 'block' });
+    const ep = await ectx.newPage();
+    await ep.goto('http://localhost:3111/');
+    await ep.evaluate(async () => {
+      const r = await fetch('api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'ptcgadmin', password: 'password123' }) });
+      const d = await r.json();
+      localStorage.setItem('ptcg.auth', JSON.stringify({ token: d.token, username: d.username }));
+    });
+    await ep.reload();                                                  // the app reads the token at start-up
+    await ep.waitForSelector('.set-card');
+    await ep.goto('http://localhost:3111/#/binders');
+    await ep.waitForSelector('.binder-create');
+    await ep.fill('.binder-create input[type=text]', 'Admin Binder');
+    await ep.selectOption('.binder-create select >> nth=0', '2');       // 2×2 → base1's 5 cards need 2 pages
+    await ep.selectOption('.binder-create select >> nth=1', 'base1');
+    await ep.click('button:has-text("Create binder")');
+    await ep.waitForSelector('.binder-cover-page');
+    await ep.click('.binder-cover-page');
+    await ep.waitForSelector('.binder-grid .pocket');
+    await ep.click('button:has-text("Edit binder")');
+    await ep.waitForSelector('.page-remove');
+    await ep.click('button:has-text("›")');                            // move off page 1
+    await ep.waitForFunction(() => (document.querySelector('#view').textContent || '').includes('Page 2 of 2'));
+    await ep.waitForFunction(() => !document.querySelector('.flip-sheet'));
+    await ep.click('.binder-grid .pocket.filled .pocket-edit >> nth=0');
+    await ep.waitForSelector('.pocket-actions');
+    await ep.click('.pocket-actions button:has-text("Details")');
+    await ep.waitForSelector('#card-modal[open] button:has-text("Add printing")');
+    const printing = 'Smoke Keepstate';
+    ep.once('dialog', (d) => d.accept(printing));
+    await ep.click('#card-modal button:has-text("Add printing")');
+    await ep.waitForSelector(`#card-modal .chip:has-text("${printing}")`);
+    check('binder: adding a printing keeps edit mode on',
+      (await ep.locator('.page-remove').count()) > 0);
+    check('binder: adding a printing does not slam the book shut',
+      (await ep.textContent('#view')).includes('Page 2 of 2'));
+    await ep.evaluate(() => document.getElementById('card-modal').close());
+    check('binder: the pages are still there once the modal closes',
+      (await ep.locator('.binder-grid .pocket.filled').count()) > 0 &&
+      (await ep.locator('.page-remove').count()) > 0);
+    await ectx.close();
+  }
+
+  // ---- phone width: the app fits, so there is nothing to scroll sideways ----
+  // 320 is the narrowest phone still in circulation (SE-class), 390 a current
+  // iPhone. Anything that fits both fits everything in between.
+  for (const vw of [320, 390]) {
+    const pctx = await browser.newContext({ serviceWorkers: 'block', viewport: { width: vw, height: 780 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 });
+    const pp = await pctx.newPage();
+    await pp.goto('http://localhost:3111/');
+    await pp.evaluate(async () => {
+      const r = await fetch('api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'ptcgadmin', password: 'password123' }) });
+      const d = await r.json();
+      localStorage.setItem('ptcg.auth', JSON.stringify({ token: d.token, username: d.username }));
+    });
+    await pp.reload();
+    await pp.waitForSelector('.set-card');
+    /** @returns {{over:number, worst:string[]}} how far past the viewport the page runs */
+    const overflow = async (label, url, ready) => {
+      await pp.goto(url);
+      await pp.waitForSelector(ready);
+      await pp.waitForTimeout(250);
+      const r = await pp.evaluate(() => {
+        const doc = document.documentElement;
+        const w = doc.clientWidth, worst = [];
+        for (const el of document.querySelectorAll('body *')) {
+          const b = el.getBoundingClientRect();
+          if (b.width > 0 && b.height > 0 && (b.right > w + 1 || b.left < -1)) {
+            worst.push(`${el.tagName.toLowerCase()}.${(el.className || '').toString().split(' ').join('.')} [${Math.round(b.left)}→${Math.round(b.right)}]`);
+          }
+        }
+        return { over: Math.max(doc.scrollWidth - w, document.body.scrollWidth - w), worst: worst.slice(0, 6) };
+      });
+      if (r.over > 1) console.log(`  overflow on ${label}: +${r.over}px — ${r.worst.join(' | ')}`);
+      return r;
+    };
+    const pages = [
+      ['home', 'http://localhost:3111/#/', '.set-card'],
+      ['set page', 'http://localhost:3111/#/set/base1', '.tcg-card'],
+      ['pokémon list', 'http://localhost:3111/#/pokemon', '.set-grid .set-card'],
+      ['search results', 'http://localhost:3111/#/search/char', '#view'],
+      ['scan', 'http://localhost:3111/#/scan', '#view'],
+      ['binder list', 'http://localhost:3111/#/binders', '.binder-create'],
+    ];
+    for (const [label, url, ready] of pages) {
+      const r = await overflow(label, url, ready);
+      check(`phone (${vw}px): ${label} does not scroll sideways`, r.over <= 1);
+    }
+    // ...and inside a binder, where a whole page grid has to fit the screen
+    await pp.click('.binder-cover');
+    await pp.waitForSelector('.binder-cover-page');
+    const cOver = await pp.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+    check(`phone (${vw}px): a binder cover does not scroll sideways`, cOver <= 1);
+    await pp.click('.binder-cover-page');
+    await pp.waitForSelector('.binder-grid .pocket');
+    const bOver = await pp.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+    check(`phone (${vw}px): an open binder page does not scroll sideways`, bOver <= 1);
+    check(`phone (${vw}px): a phone shows one binder page at a time`,
+      (await pp.locator('.book-page').count()) <= 1);
+    // the page grid has to fit the screen too, not just the document
+    const gridFits = await pp.evaluate(() => {
+      const g = document.querySelector('.binder-grid');
+      return !g || g.getBoundingClientRect().right <= document.documentElement.clientWidth + 1;
+    });
+    check(`phone (${vw}px): the binder page grid fits inside the screen`, gridFits);
+    await pp.click('button:has-text("Edit binder")');
+    await pp.waitForSelector('.page-remove');
+    const eOver = await pp.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+    check(`phone (${vw}px): the edit toolbar wraps instead of widening the page`, eOver <= 1);
+    // a page turn rotates a sheet in 3D — that must not leave the page wider either
+    await pp.click('button:has-text("›")').catch(() => {});
+    await pp.waitForTimeout(120);                                       // mid-flip, sheet rotated
+    const fOver = await pp.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+    check(`phone (${vw}px): a page turn does not widen the page mid-flip`, fOver <= 1);
+    await pp.waitForFunction(() => !document.querySelector('.flip-sheet')).catch(() => {});
+    await pctx.close();
   }
 
   console.log(errors.length ? 'JS ERRORS:\n' + errors.join('\n') : 'No JS errors, zero external requests.');

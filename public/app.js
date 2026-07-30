@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.41.0';
+const APP_VERSION = '3.42.0';
 
 /* ============================================================
  * Storage helpers
@@ -653,7 +653,13 @@ function rerenderCards() {
  * ============================================================ */
 const cardModal = document.getElementById('card-modal');
 
-async function openCardModal(brief, { variant, onOwnershipChange } = {}) {
+/** @param onCardChanged how the page behind should repaint when an admin edit
+ * changes the card itself (new printing, removed printing, new image, edited
+ * card). Default is a full route() re-render; callers that hold their own state
+ * — the binder holds edit mode and which pages are open — pass a narrower
+ * refresh so opening a card never throws that state away. */
+async function openCardModal(brief, { variant, onOwnershipChange, onCardChanged } = {}) {
+  const refreshBehind = onCardChanged || route;
   const body = document.getElementById('card-modal-body');
   body.replaceChildren(spinner());
   cardModal.showModal();
@@ -755,7 +761,7 @@ async function openCardModal(brief, { variant, onOwnershipChange } = {}) {
         clearDataCaches(); // pick up the new image from the database
         card = await getCard(card.id);
         renderVariantUI();
-        route(); // rebuild the grid behind the modal with the new image
+        refreshBehind(); // the page behind picks up the new image
       } catch (err) {
         toast(err.message);
       }
@@ -773,7 +779,7 @@ async function openCardModal(brief, { variant, onOwnershipChange } = {}) {
             active = res.key;
             toast(`Added printing: ${res.label}`);
             renderVariantUI();
-            route(); // the new printing becomes its own tile in the grid behind
+            refreshBehind(); // the new printing shows up on the page behind
           } catch (err) {
             toast(err.message);
           }
@@ -792,17 +798,17 @@ async function openCardModal(brief, { variant, onOwnershipChange } = {}) {
                 active = avail()[0];
                 toast('Printing removed');
                 renderVariantUI();
-                route(); // its tile disappears from the grid behind
+                refreshBehind(); // it disappears from the page behind
               } catch (err) { toast(err.message); }
             } }, `✕ Remove ${variantLabel(card, active)}`)
           : null,
         h('button', { type: 'button', class: 'btn ghost small', onclick: () => {
           cardModal.close();   // dialogs sit in the browser's top layer — the editor overlay must replace it
-          openCardEditor({ card, onSaved: () => { clearDataCaches(); route(); } });
+          openCardEditor({ card, onSaved: () => { clearDataCaches(); refreshBehind(); } });
         } }, '✎ Edit card'),
         h('button', { type: 'button', class: 'btn ghost small', onclick: () => {
           cardModal.close();
-          openCardEditor({ duplicateOf: card, onSaved: () => { clearDataCaches(); route(); } });
+          openCardEditor({ duplicateOf: card, onSaved: () => { clearDataCaches(); refreshBehind(); } });
         } }, '⧉ Duplicate'),
         fileInput,
       ),
@@ -2296,7 +2302,9 @@ function renderAccountModal() {
       try {
         await doAuth(mode, userIn.value.trim(), passIn.value);
         toast(mode === 'login' ? 'Signed in — collection synced' : 'Account created — collection synced');
-        renderAccountModal();
+        // signing in was the whole reason this modal was open — get out of the way
+        accountModal.close();
+        renderAccountModal(); // so it shows the signed-in panel next time it opens
         route(); // tracking UI (toggles, stats, filters) appears now that we're signed in
       } catch (ex) {
         err.textContent = ex.message;
@@ -2536,6 +2544,22 @@ async function renderBinderPage(id) {
     try { await apiCall('binders/' + id, { method: 'PUT', body: JSON.stringify({ slots: binder.slots, pages: binder.pages, ...extra }) }); }
     catch (e) { toast('Save failed: ' + e.message); }
   };
+  /** an admin edit changed a card under us — reload the index and repaint the
+   * pages in place. Deliberately NOT route(): every bit of binder state (edit
+   * mode, the print selection, which pages are open) lives in this closure, so
+   * a re-render from the router would slam the book shut on the cover. */
+  async function reloadCards() {
+    try { const idx = await getSearchIndex(); cardsById = new Map(idx.cards.map((c) => [c.id, c])); }
+    catch { /* offline — keep the index we already have */ }
+    renderHead(); renderBook();
+  }
+  const cardModalOpts = (s) => ({ variant: s.variant, onCardChanged: () => reloadCards() });
+  /** the little "Base Set · #58" strip along the bottom of a card.
+   * @param cls extra class so the printed version can size itself in mm */
+  const cardCaption = (cid, card, cls = 'pocket-cap') => h('div', { class: cls },
+    h('span', { class: 'cap-set' }, setNameOf(cid)),
+    h('span', { class: 'cap-no' }, '#' + ((card && card.localId) || '?')),
+  );
   const filledCount = () => Object.values(binder.slots).filter((e) => e.card).length;
   const haveCount = () => Object.values(binder.slots).filter((e) => e.card && e.have).length;
 
@@ -2881,7 +2905,7 @@ async function renderBinderPage(id) {
         ) : h('button', { class: 'btn small', onclick: async () => {
           s.have = 1; await save(); rerender();
         } }, 'Mark in hand'),
-        card ? h('button', { class: 'btn small', onclick: () => openCardModal(card, { variant: s.variant }) }, 'ⓘ Details') : null,
+        card ? h('button', { class: 'btn small', onclick: () => openCardModal(card, cardModalOpts(s)) }, 'ⓘ Details') : null,
         h('button', { class: 'btn ghost small', onclick: () => actions.replaceChildren() }, 'Close'),
       ));
     };
@@ -2910,7 +2934,7 @@ async function renderBinderPage(id) {
         actions.replaceChildren(h('p', { class: 'muted small' }, 'Tap the destination pocket (any page). Tap the same pocket to cancel.'));
         renderBook();
       } }, '\u2194 Move'),
-      card ? h('button', { class: 'btn small', onclick: () => openCardModal(card, { variant: s.variant }) }, '\u24d8 Details') : null,
+      card ? h('button', { class: 'btn small', onclick: () => openCardModal(card, cardModalOpts(s)) }, '\u24d8 Details') : null,
       h('button', { class: 'btn small', onclick: async () => {
         delete binder.slots[i]; await save(); actions.replaceChildren(); renderHead(); renderBook();
       } }, '\u2715 Remove'),
@@ -2961,11 +2985,14 @@ async function renderBinderPage(id) {
       if (s) {
         const card = cardsById.get(s.card);
         const img = card && cardImg(card, 'low', s.variant);
-        pocket = h('div', { class: 'pocket filled' + (s.have ? ' have' : '') + (moveFrom === i ? ' moving' : '') +
+        pocket = h('div', { class: 'pocket filled capped' + (s.have ? ' have' : '') + (moveFrom === i ? ' moving' : '') +
           (pickMode && picked.has(i) ? ' picked' : ''), 'data-pocket': String(i) },
           img ? h('img', { src: img, loading: 'lazy', alt: (card && card.name) || s.card })
               : h('div', { class: 'pocket-name' }, (card && card.name) || s.card),
           card ? variantFxEl(card, s.variant) : null,   // same diagonal banner as the collection tiles
+          // which card this actually is, in every mode: a binder mixes sets, so
+          // the picture alone often isn't enough to tell two printings apart
+          cardCaption(s.card, card),
           s.have ? h('div', { class: 'pocket-badge' }, '\u2713') : null,
           s.have && (s.n || 1) > 1 ? h('div', { class: 'pocket-qty' }, '\u00d7' + s.n) : null,
           pickMode && picked.has(i) ? h('div', { class: 'pick-badge' }, '\ud83d\udda8') : null,
@@ -3510,6 +3537,8 @@ async function renderBinderPage(id) {
                   (card ? ' \u00b7 ' + variantLabel(card, v.variant) : '')),
               ),
         card ? h('div', { class: 'print-fx' }, variantLabel(card, v.variant)) : null,
+        // the fallback tile already spells out set and number in its own body
+        img ? cardCaption(v.card, card, 'print-cap') : null,
       ));
     }
     const pageStyle = h('style', {}, `@page { size: ${paper === 'a4' ? 'A4' : 'letter'}; margin: 8mm; }`);
