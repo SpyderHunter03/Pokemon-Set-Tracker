@@ -369,6 +369,13 @@ function fail(msg) {
   check('binder: create + fill-from-set places every card of the set',
     bCreate.ok === true && bd.size === 2 && bd.color === 'blue' &&
     Object.keys(bd.slots).length === 5 && bd.pages === 2 && bd.slots['0'] && CARD_OK(bd.slots['0'].card));
+  // 'none' is a real color the API has to accept; a bogus one still falls back
+  const bNone = await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { method: 'PUT', headers: buAuth, body: JSON.stringify({ color: 'none' }) });
+  const bNoneGet = await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { headers: buAuth });
+  await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { method: 'PUT', headers: buAuth, body: JSON.stringify({ color: 'chartreuse' }) });
+  const bBogus = await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { headers: buAuth });
+  check('binder: "none" is an accepted color and a bogus one is ignored',
+    bNone.ok === true && bNoneGet.binder.color === 'none' && bBogus.binder.color === 'none');
   // toggle have on pocket 0 + swap pockets 0 and 4 (across pages)
   const slots2 = { ...bd.slots };
   slots2['0'] = { ...slots2['0'], have: 1 };

@@ -722,8 +722,30 @@ body { padding-bottom: calc(64px + env(safe-area-inset-bottom)); }
 .b-purple { background: linear-gradient(145deg, #6d3fb3, #45266f); }
 .b-black  { background: linear-gradient(145deg, #3a3f47, #17191d); }
 .binder-dot { display: inline-block; width: 14px; height: 14px; border-radius: 4px; vertical-align: baseline; }
-.swatch { width: 30px; height: 30px; border-radius: 8px; border: 2px solid transparent; cursor: pointer; }
-.swatch.active { border-color: #fff; outline: 2px solid var(--accent-soft); }
+.swatch { display: inline-block; width: 30px; height: 30px; border-radius: 8px; border: 2px solid transparent; cursor: pointer; }
+/* "no color" is a choice, not an absence, so it has to look deliberate: an
+   empty shell with a line through it rather than a swatch that failed to load. */
+.b-none { background: var(--card, #1c2333); }
+.binder-cover.b-none:not(.has-art), .binder-cover-page.b-none:not(.has-art) { border: 1px dashed rgba(255,255,255,.3); }
+.b-none::before { opacity: .4; }
+.swatch.b-none, .binder-dot.b-none {
+  border: 2px solid rgba(255,255,255,.35);
+  background-image: linear-gradient(45deg, transparent 43%, #e05a5a 43%, #e05a5a 57%, transparent 57%);
+}
+.swatch.active, .swatch.b-none.active { border-color: #fff; outline: 2px solid var(--accent-soft); }
+/* the color choices inside the cover picker: swatch above its own name, since
+   a bare square is a guess and this row now includes one that means "none" */
+.swatch-pick { display: flex; flex-direction: column; align-items: center; gap: 5px;
+  background: none; border: 0; padding: 2px; cursor: pointer; font: inherit; }
+.swatch-pick:hover .swatch { filter: brightness(1.15); }
+/* nothing behind a picture any more, so it shows at full strength — and gets a
+   scrim at the foot instead, which is what the name actually needs to stay legible */
+.binder-cover.b-none .binder-cover-img { opacity: 1; }
+.binder-cover-page.b-none img.cover-photo { opacity: 1; }
+.binder-cover.has-art::after {
+  content: ''; position: absolute; inset: 0; border-radius: inherit; pointer-events: none;
+  background: linear-gradient(transparent 40%, rgba(0,0,0,.8));
+}
 .binder-create { border: 1px solid var(--line, #333); border-radius: 12px; padding: 14px; max-width: 560px; }
 .binder-create input[type=text], .binder-create select {
   background: var(--card, #1c2333); color: inherit; border: 1px solid var(--line, #333);

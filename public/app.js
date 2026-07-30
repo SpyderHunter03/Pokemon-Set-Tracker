@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.45.0';
+const APP_VERSION = '3.46.0';
 
 /* ============================================================
  * Storage helpers
@@ -2516,7 +2516,10 @@ function importCollection(file) {
 /* ============================================================
  * Pages — Binders (physical binders, tracked pocket by pocket)
  * ============================================================ */
-const BINDER_COLORS = ['red', 'blue', 'green', 'purple', 'black'];
+// the front of a binder holds ONE thing: a color, or a picture. 'none' is the
+// color you pick when you want neither, or when a picture should stand alone.
+const BINDER_COLORS = ['red', 'blue', 'green', 'purple', 'black', 'none'];
+const COLOR_LABELS = { red: 'Red', blue: 'Blue', green: 'Green', purple: 'Purple', black: 'Black', none: 'No color' };
 const BINDER_SIZES = [2, 3, 4, 5];
 
 function binderGate() {
@@ -2557,7 +2560,7 @@ async function renderBindersPage() {
   for (const b of list) {
     const src = coverSrcOf(b);
     const artV = b.cover && b.cover.type === 'art' && b.cover.view && b.cover.view.s ? b.cover.view : null;
-    const tile = h('a', { class: `binder-cover b-${b.color}`, href: '#/binder/' + b.id },
+    const tile = h('a', { class: `binder-cover b-${b.color}${src ? ' has-art' : ''}`, href: '#/binder/' + b.id },
       src && !artV ? h('img', { class: 'binder-cover-img' + (b.cover.type === 'set' ? ' logo' : ''), src, loading: 'lazy', alt: '' }) : null,
       h('div', { class: 'binder-name' }, b.name),
       h('div', { class: 'binder-meta' }, `${b.size}\u00d7${b.size} \u00b7 ${b.pages} page${b.pages === 1 ? '' : 's'}`),
@@ -2575,11 +2578,12 @@ async function renderBindersPage() {
   const nameIn = h('input', { type: 'text', placeholder: 'Binder name', maxlength: '40' });
   const sizeSel = h('select', {}, ...BINDER_SIZES.map((s) => h('option', { value: String(s) }, `${s}\u00d7${s} pockets`)));
   sizeSel.value = '3';
-  const swatches = h('div', { class: 'row', style: 'gap:8px; margin:10px 0' }, ...BINDER_COLORS.map((c) =>
-    h('button', { class: 'swatch b-' + c + (c === color ? ' active' : ''), title: c, onclick: (e) => {
-      color = c;
-      swatches.querySelectorAll('.swatch').forEach((el) => el.classList.toggle('active', el === e.target));
-    } })));
+  const swatches = h('div', { class: 'row', style: 'gap:8px; margin:10px 0; align-items:center' }, ...BINDER_COLORS.map((c) =>
+    h('button', { type: 'button', class: 'swatch b-' + c + (c === color ? ' active' : ''),
+      title: COLOR_LABELS[c], 'aria-label': COLOR_LABELS[c], onclick: (e) => {
+        color = c;
+        swatches.querySelectorAll('.swatch').forEach((el) => el.classList.toggle('active', el === e.target));
+      } })));
   /* ---- what goes in it: nothing, a whole set, or every card of one Pok\u00e9mon ----
      There were 150-odd sets in one dropdown already and a species list is far
      longer still, so this is a searchable picker rather than a scroll. */
@@ -2645,6 +2649,10 @@ async function renderBindersPage() {
       h('h3', {}, 'New binder'),
       h('div', { class: 'row', style: 'flex-wrap:wrap; gap:8px' }, nameIn, sizeSel, fillBtn),
       swatches,
+      // the last swatch is \u201cno color at all\u201d, which is easy to miss as a
+      // gap in a row of colors \u2014 so say out loud that it is a choice
+      h('p', { class: 'muted small', style: 'margin:0 0 10px' },
+        'Pick a color for the front, or the last swatch for none. A picture can go there instead \u2014 \u270e Edit \u2192 Cover.'),
       createBtn,
     ),
   );
@@ -2782,7 +2790,7 @@ async function renderBinderPage(id) {
   function coverFace() {
     const src = coverImgSrc();
     const av = binder.cover && binder.cover.type === 'art' && binder.cover.view && binder.cover.view.s ? binder.cover.view : null;
-    const el = h('div', { class: 'binder-cover-page b-' + binder.color },
+    const el = h('div', { class: 'binder-cover-page b-' + binder.color + (src ? ' has-art' : '') },
       src && !av ? h('img', { src, alt: '', class: binder.cover.type === 'set' ? 'cover-logo' : 'cover-photo' }) : null,
       h('div', { class: 'cover-name' }, binder.name),
       h('div', { class: 'cover-hint muted small' }, 'Open \u2192'),
@@ -2958,11 +2966,6 @@ async function renderBinderPage(id) {
         try { await apiCall('binders/' + id, { method: 'PUT', body: JSON.stringify({ name: binder.name }) }); } catch (e) { toast(e.message); }
         renderHead();
       } }, '\u270e Rename'),
-      h('button', { class: 'btn ghost small', onclick: async () => {
-        binder.color = BINDER_COLORS[(BINDER_COLORS.indexOf(binder.color) + 1) % BINDER_COLORS.length];
-        try { await apiCall('binders/' + id, { method: 'PUT', body: JSON.stringify({ color: binder.color }) }); } catch (e) { toast(e.message); }
-        renderHead();
-      } }, '\ud83c\udfa8 Color'),
       h('button', { class: 'btn ghost small', onclick: openSizePicker }, '\u229e Size'),
       h('button', { class: 'btn ghost small', onclick: async () => {
         binder.pages += 1; await save(); renderNav(); renderBook();
@@ -3507,19 +3510,46 @@ async function renderBinderPage(id) {
     layout();
   }
 
-  /** choose the binder's cover: a set logo, a card's picture, or your own art */
+  /** Choose what goes on the front: a color, a set logo, a card's picture, or
+   * your own art. One thing at a time \u2014 a color and a picture competing for the
+   * same face is what made this confusing, and it meant the color had no off
+   * switch, since something always had to be showing. */
   function openCoverPicker() {
     const content = h('div', { class: 'picker-results' });
-    const setCover = async (cover) => {
+    /** Both halves of the front move together, in one PUT, so it can never be
+     * caught half-changed \u2014 a picture with a stale color still behind it. */
+    const setFront = async ({ cover = null, color = 'none' }) => {
       binder.cover = cover;
-      try { await apiCall('binders/' + id, { method: 'PUT', body: JSON.stringify({ cover }) }); } catch (e) { toast(e.message); }
+      binder.color = color;
+      try { await apiCall('binders/' + id, { method: 'PUT', body: JSON.stringify({ cover, color }) }); } catch (e) { toast(e.message); }
       overlay.remove();
       viewIdx = 0;
-      renderNav(); renderBook();
-      toast(cover ? 'Cover updated' : 'Cover cleared');
+      renderNav(); renderHead(); renderBook();
+      toast(cover ? 'Cover updated' : (color === 'none' ? 'Cover cleared' : COLOR_LABELS[color] + ' cover'));
     };
+    // every picture path goes through here, and a picture takes the whole front
+    const setCover = (cover) => setFront({ cover, color: 'none' });
     const modes = h('div', { class: 'row', style: 'gap:6px; flex-wrap:wrap' });
     const mode = (label, fn) => h('button', { class: 'chip', onclick: fn }, label);
+    const showColors = () => {
+      const pick = async (c) => {
+        // swapping in a color throws the picture away, and an uploaded one is
+        // gone for good \u2014 so it asks first, like everything else that discards
+        if (binder.cover && !await confirmDestructive({
+          title: c === 'none' ? 'Take the picture off the front?' : `Put ${COLOR_LABELS[c].toLowerCase()} on the front instead?`,
+          body: 'The front holds one thing at a time, so the picture on it now comes off. ' +
+            'A set logo or a card you can put back any time; your own image you would have to upload again.',
+          confirmLabel: c === 'none' ? 'Remove picture' : 'Replace the picture',
+        })) return;
+        await setFront({ cover: null, color: c });
+      };
+      content.replaceChildren(
+        h('p', { class: 'muted small' }, 'A plain colored binder \u2014 or \u201cNo color\u201d for a bare one with nothing on the front.'),
+        h('div', { class: 'row swatch-row', style: 'gap:12px; flex-wrap:wrap' }, ...BINDER_COLORS.map((c) =>
+          h('button', { type: 'button', class: 'swatch-pick', 'data-color': c, title: COLOR_LABELS[c], onclick: () => pick(c) },
+            h('span', { class: 'swatch b-' + c + (!binder.cover && binder.color === c ? ' active' : '') }),
+            h('span', { class: 'muted small' }, COLOR_LABELS[c])))));
+    };
     const showSets = () => {
       content.replaceChildren(...[...setsById.values()].reverse().map((st) =>
         h('div', { class: 'picker-row', onclick: () => setCover({ type: 'set', set: st.id, lang }) },
@@ -3647,10 +3677,10 @@ async function renderBinderPage(id) {
         h('button', { class: 'btn small', onclick: () => fileIn.click() }, '\u2b06 Upload image'), fileIn);
     };
     modes.append(
+      mode('Color', showColors),
       mode('Set logo', showSets),
       mode('Pok\u00e9mon card', showCards),
       mode('My image', showUpload),
-      mode('Color only', () => setCover(null)),
     );
     if (binder.cover && binder.cover.type === 'art') {
       modes.append(mode('\u270e Adjust picture', () => openCoverAdjust(binder.cover.img, binder.cover.view || null, binder.cover.flip)));
@@ -3660,11 +3690,14 @@ async function renderBinderPage(id) {
         h('div', { class: 'row', style: 'justify-content:space-between; align-items:center' },
           h('h3', { style: 'margin:0' }, 'Binder cover'),
           h('button', { class: 'btn ghost small', onclick: () => overlay.remove() }, 'Close')),
+        h('p', { class: 'muted small', style: 'margin:0' }, 'What goes on the front \u2014 one thing at a time.'),
         modes,
         content,
       ));
     view.append(overlay);
-    showSets();
+    // open on whatever the binder is wearing now, so the current choice is the
+    // first thing you see rather than something you have to go find
+    if (binder.cover) showSets(); else showColors();
   }
 
   /** @param only Set of pocket keys chosen in "select to print" — when present it

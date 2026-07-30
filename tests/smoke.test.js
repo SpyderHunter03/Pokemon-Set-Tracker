@@ -228,6 +228,9 @@ const { chromium } = require('playwright');
   await pickFill(page, 'base set', 'Base Set');                        // fill from Base Set
   check('binder: the picker reports what it will fill from',
     (await page.textContent('.binder-create [data-fill]')) === 'Fill from: Base Set');
+  check('binder: the New binder form offers no-color as a swatch of its own',
+    (await page.locator('.binder-create .swatch.b-none').count()) === 1 &&
+    (await page.locator('.binder-create .swatch').count()) === 6);
   await page.click('.binder-create .swatch.b-green');
   await page.click('button:has-text("Create binder")');
   await page.waitForSelector('.binder-cover-page');                     // the binder opens on its COVER
@@ -513,8 +516,49 @@ const { chromium } = require('playwright');
   check('binder: mirrored cover renders flipped',
     (await page.locator('.binder-cover-page .art-bg').getAttribute('style')).includes('scale(1, -1)'));
 
+  // ---- the front holds ONE thing: color is a cover choice, and it can be off ----
+  const headBtnText = async () => (await page.locator('#view .row .btn').allTextContents()).join(' | ');
+  check('binder: the standalone color button is gone from the toolbar',
+    !(await headBtnText()).includes('Color'));
+  await page.click('button:has-text("Cover")');
+  await page.waitForSelector('.picker-panel h3:has-text("Binder cover")');
+  check('binder: the cover panel opens on what the binder is already wearing',
+    (await page.locator('.picker-panel .picker-row:has-text("Base Set")').count()) > 0);
+  await page.click('.picker-panel .chip:has-text("Color")');
+  await page.waitForSelector('.swatch-pick');
+  check('binder: color is one of the cover choices, no-color among them',
+    (await page.locator('.swatch-pick').count()) === 6 &&
+    (await page.locator('.swatch-pick[data-color=none]').count()) === 1 &&
+    (await page.textContent('.swatch-pick[data-color=none]')).includes('No color'));
+  // a color takes the whole front, so the picture on it has to go — and is asked about
+  await page.click('.swatch-pick[data-color=green]');
+  await page.waitForSelector('.confirm-panel');
+  check('binder: swapping a picture for a color warns that the picture comes off',
+    /picture on it now comes off/i.test(await page.textContent('.confirm-panel')));
+  await page.click('.confirm-panel .btn.ghost');
+  await page.waitForSelector('.confirm-panel', { state: 'detached' });
+  check('binder: cancelling keeps the picture on the front',
+    (await page.locator('.binder-cover-page .art-bg').count()) === 1);
+  await page.click('.swatch-pick[data-color=green]');
+  await confirmYes(page);
+  await page.waitForSelector('.binder-cover-page.b-green');
+  check('binder: a color on the front replaces the picture',
+    (await page.locator('.binder-cover-page .art-bg').count()) === 0 &&
+    (await page.locator('.binder-cover-page img').count()) === 0);
+  check('binder: the header dot follows the color', (await page.locator('.page-head .binder-dot.b-green').count()) === 1);
+  await page.click('button:has-text("Cover")');
+  await page.waitForSelector('.swatch-pick');
+  check('binder: with no picture the panel opens on Color, showing the current one',
+    (await page.locator('.swatch-pick .swatch.b-green.active').count()) === 1);
+  await page.click('.swatch-pick[data-color=none]');                    // nothing to discard: no confirm
+  await page.waitForSelector('.binder-cover-page.b-none');
+  check('binder: the color can be turned off altogether',
+    (await page.locator('.page-head .binder-dot.b-none').count()) === 1 &&
+    (await page.locator('.binder-cover-page img').count()) === 0);
+
   // pick a set logo as the binder cover
   await page.click('button:has-text("Cover")');
+  await page.click('.picker-panel .chip:has-text("Set logo")');
   await page.waitForSelector('.picker-row:has-text("Base Set")');
   await page.click('.picker-row:has-text("Base Set")');
   await page.waitForSelector('.binder-cover-page img.cover-logo');

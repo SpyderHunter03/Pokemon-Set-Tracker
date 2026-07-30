@@ -216,7 +216,10 @@ function putCollectionOf(userId, collection, updatedAt) {
 // ---------- binders ----------
 const BINDER_SIZES = [2, 3, 4, 5];               // pockets per side
 const BINDER_IMG_DIR = path.join(DATA_DIR, 'binder-images');   // user-uploaded slot art
-const BINDER_COLORS = ['red', 'blue', 'green', 'purple', 'black'];
+// 'none' is a real choice, not a missing value: the front of the binder holds
+// one thing at a time, and a picture wants a plain shell behind it rather than
+// a color it has to fight.
+const BINDER_COLORS = ['red', 'blue', 'green', 'purple', 'black', 'none'];
 const _bindersOf = db.prepare('SELECT id, name, size, color, pages, slots, cover FROM binders WHERE user_id = ? ORDER BY created');
 const _binderGet = db.prepare('SELECT * FROM binders WHERE user_id = ? AND id = ?');
 const _binderPut = db.prepare(`INSERT INTO binders (user_id, id, name, size, color, pages, slots, cover, created, updated)
