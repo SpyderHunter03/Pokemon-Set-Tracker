@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.47.0';
+const APP_VERSION = '3.48.0';
 
 /* ============================================================
  * Storage helpers
@@ -2688,6 +2688,7 @@ async function renderBinderPage(id) {
   const setNameOf = (cid) => { const st = setsById.get(setIdOf(cid)); return (st && st.name) || setIdOf(cid); };
   let per = binder.size * binder.size;
   let moveFrom = null;
+  let movePageFrom = null;   // a whole sheet picked up, waiting for somewhere to land
   // the binder opens in VIEW mode (flip pages, tap pockets you've gotten);
   // layout work — moving cards, resizing, covers — lives behind ✎ Edit
   let editMode = false;
@@ -2819,17 +2820,74 @@ async function renderBinderPage(id) {
     if (pIdx === null) return blankPanel(insideBlank);
     const grid = renderPageGrid(pIdx);
     if (!editMode) return grid;
-    // A bare ⊟ in the corner used to sit here, and nobody should have to guess
-    // what a glyph does before finding out by pressing it. It says what it is,
-    // in words, under the page it belongs to — and it says which page, which
-    // matters most in a two-page spread where the corners are ambiguous.
-    return h('div', { class: 'page-wrap' }, grid,
+    // The sheet's own handle. Dragging the page itself would fight the pockets
+    // for the same gesture, so the grab lives on a bar of its own — and because
+    // a drag can't turn a page mid-flight, tapping the bar starts the same move
+    // in a way a thumb can finish: pick up here, flip, tap where it should go.
+    const carrying = movePageFrom !== null && movePageFrom !== pIdx;
+    const handle = h('button', {
+      class: 'page-move' + (movePageFrom === pIdx ? ' carrying' : '') + (carrying ? ' target' : ''),
+      'data-page-move': String(pIdx), draggable: 'true',
+      title: `Move page ${pIdx + 1} somewhere else in this binder`,
+      onclick: (e) => {
+        e.stopPropagation();
+        if (movePageFrom === pIdx) { movePageFrom = null; actions.replaceChildren(); renderBook(); return; }
+        if (movePageFrom !== null) { const from = movePageFrom; movePageFrom = null; actions.replaceChildren(); movePage(from, pIdx); return; }
+        movePageFrom = pIdx;
+        actions.replaceChildren(h('p', { class: 'muted small' },
+          `Carrying page ${pIdx + 1} \u2014 turn to where you want it, then tap that page\u2019s bar. ` +
+          'Tap this one again to put it back.'));
+        renderBook();
+      },
+      ondragstart: (e) => {
+        e.dataTransfer.setData('application/x-binder-page', String(pIdx));
+        e.dataTransfer.setData('text/plain', 'page:' + pIdx);
+        e.dataTransfer.effectAllowed = 'move';
+        movePageFrom = pIdx;
+      },
+      ondragend: () => { movePageFrom = null; renderBook(); },
+    }, h('span', { class: 'page-move-icon', 'aria-hidden': 'true' }, '\u2b0d'),
+       h('span', {}, carrying ? `Put it here \u2014 becomes page ${pIdx + 1}`
+         : movePageFrom === pIdx ? `Carrying page ${pIdx + 1} \u2014 tap to put back`
+         : `Move page ${pIdx + 1}`));
+
+    const wrap = h('div', { class: 'page-wrap' + (movePageFrom === pIdx ? ' carrying' : '') }, handle, grid,
+      // opening a gap discards nothing, so it does not ask — it just says what it did
+      h('button', {
+        class: 'page-insert', 'data-page-insert': String(pIdx),
+        title: `Put a blank sheet in front of page ${pIdx + 1}`,
+        onclick: (e) => { e.stopPropagation(); insertPage(pIdx); },
+      }, h('span', { class: 'page-insert-icon', 'aria-hidden': 'true' }, '\uff0b'),
+         h('span', {}, 'Insert blank sheet here')),
+      // A bare ⊟ in the corner used to sit here, and nobody should have to guess
+      // what a glyph does before finding out by pressing it. It says what it is,
+      // in words, under the page it belongs to — and it says which page, which
+      // matters most in a two-page spread where the corners are ambiguous.
       h('button', {
         class: 'page-remove', 'data-page': String(pIdx),
         title: `Take page ${pIdx + 1} out of this binder`,
         onclick: (e) => { e.stopPropagation(); removePage(pIdx); },
       }, h('span', { class: 'page-remove-icon', 'aria-hidden': 'true' }, '\ud83d\uddd1'),
          h('span', {}, `Remove page ${pIdx + 1}`)));
+
+    // the whole sheet is the drop target, not just its bar — you aim at the page
+    wrap.addEventListener('dragover', (e) => {
+      if (!e.dataTransfer.types.includes('application/x-binder-page')) return;   // a dragged card is not a sheet
+      if (movePageFrom === pIdx) return;                                        // its own spot is not a destination
+      e.preventDefault(); e.dataTransfer.dropEffect = 'move';
+      wrap.classList.add('drop-target');
+    });
+    wrap.addEventListener('dragleave', (e) => { if (!wrap.contains(e.relatedTarget)) wrap.classList.remove('drop-target'); });
+    wrap.addEventListener('drop', (e) => {
+      const raw = e.dataTransfer.getData('application/x-binder-page');
+      if (raw === '') return;
+      e.preventDefault(); e.stopPropagation();
+      wrap.classList.remove('drop-target');
+      const from = parseInt(raw, 10);
+      movePageFrom = null;
+      if (Number.isInteger(from)) movePage(from, pIdx);
+    });
+    return wrap;
   }
   function renderBook() {
     book.classList.toggle('spread', isSpread() && viewIdx !== 0);
@@ -2934,7 +2992,7 @@ async function renderBinderPage(id) {
 
   const setEditMode = (on) => {
     editMode = on;
-    moveFrom = null;
+    moveFrom = null; movePageFrom = null;
     // layout editing and print-picking are different jobs — never both at once
     pickMode = false; picked.clear();
     actions.replaceChildren();
@@ -3017,8 +3075,9 @@ async function renderBinderPage(id) {
         h('div', { style: `width:${Math.round((got / total) * 100)}%` })) : null,
       h('div', { class: 'row', style: 'gap:8px; flex-wrap:wrap' }, ...buttons),
       editMode ? h('p', { class: 'muted small', style: 'margin:6px 0 0' },
-        'Editing \u2014 tap an empty pocket to add a card, drag or \u2194 Move to rearrange, \u22ef for pocket options, ' +
-        'and \u201cRemove page\u201d under a page to pull that whole sheet out.') : null,
+        'Editing \u2014 tap an empty pocket to add a card, drag or \u2194 Move to rearrange, \u22ef for pocket options. ' +
+        'Each sheet has its own bar: drag \u201cMove page\u201d to reorder it (or tap it, turn the page, and tap where it ' +
+        'should go), \u201cInsert blank sheet here\u201d to open a gap, \u201cRemove page\u201d to pull the sheet out.') : null,
       pickMode ? h('p', { class: 'muted small', style: 'margin:6px 0 0' },
         'Selecting \u2014 tap the pockets you want as proxies, then turn the page and keep going; they all print on the ' +
         'same sheets. Tapping will not change what\u2019s in hand while you\u2019re picking.') : null,
@@ -3219,6 +3278,62 @@ async function renderBinderPage(id) {
     if (b) binder.slots[from] = b; else delete binder.slots[from];
     binder.slots[to] = a;
     await save();
+  }
+
+  /** Re-key every slot for a page shuffle. `newPageOf` maps an old page index
+   * to its new one; a pocket keeps its position within its own sheet, so a page
+   * that lands somewhere else arrives with its layout untouched. A placed
+   * picture moves whole — every cell shifts by the same page delta, which is
+   * what keeps it on one page and anchored at its lowest cell, the two things
+   * the server insists on. */
+  function remapPages(newPageOf) {
+    const slots = {};
+    for (const [k, e] of Object.entries(binder.slots)) {
+      const key = parseInt(k, 10);
+      if (e.img && e.cells) {
+        const cells = e.cells.map((c) => newPageOf(Math.floor(c / per)) * per + (c % per)).sort((a, b) => a - b);
+        slots[cells[0]] = { ...e, cells };
+      } else if (e.card) {
+        slots[newPageOf(Math.floor(key / per)) * per + (key % per)] = e;
+      }
+    }
+    return slots;
+  }
+
+  /** Pull a sheet out and slide it back in somewhere else. Everything between
+   * the two spots shuffles along by one, which is what your hands do to a real
+   * binder — the sheets keep their order, they just close the gap behind and
+   * open one ahead. Nothing leaves the binder, so there is nothing to confirm. */
+  async function movePage(from, to) {
+    if (!Number.isInteger(from) || !Number.isInteger(to)) return;
+    if (from === to || from < 0 || to < 0 || from >= binder.pages || to >= binder.pages) { renderBook(); return; }
+    const slots = remapPages((p) => {
+      if (p === from) return to;
+      if (from < to) return (p > from && p <= to) ? p - 1 : p;
+      return (p >= to && p < from) ? p + 1 : p;
+    });
+    try {
+      await apiCall('binders/' + id, { method: 'PUT', body: JSON.stringify({ pages: binder.pages, slots }) });
+      binder.slots = slots;
+      renderHead(); renderNav(); renderBook();
+      toast(`Page ${from + 1} is now page ${to + 1}`);
+    } catch (e) { toast(e.message); renderBook(); }
+  }
+
+  /** Open a gap in the middle: a blank sheet takes this page's number, and this
+   * page along with everything after it slides back one. Adding never throws
+   * anything away, so this one does not ask first — it just says what it did. */
+  async function insertPage(at) {
+    if (binder.pages >= MAX_BINDER_PAGES) { toast(`A binder holds at most ${MAX_BINDER_PAGES} pages`); return; }
+    const slots = remapPages((p) => (p >= at ? p + 1 : p));
+    const pages = binder.pages + 1;
+    try {
+      await apiCall('binders/' + id, { method: 'PUT', body: JSON.stringify({ pages, slots }) });
+      binder.pages = pages; binder.slots = slots;
+      viewIdx = Math.min(viewIdx, maxView());
+      renderHead(); renderNav(); renderBook();
+      toast(`Blank sheet added as page ${at + 1} — the binder now has ${pages} pages`);
+    } catch (e) { toast(e.message); }
   }
 
   function renderPageGrid(pIdx) {

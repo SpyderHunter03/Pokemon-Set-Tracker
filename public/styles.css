@@ -921,6 +921,38 @@ body.printing-proxies #print-area {
 .page-remove:hover { background: rgba(224, 90, 90, .2); border-color: #e05a5a; }
 .page-remove:active { transform: translateY(1px); }
 
+/* the sheet's own handle. dragging the page itself would fight the pockets for
+   the same gesture, so the grab gets a bar of its own above the page — and the
+   bar doubles as the phone path, where HTML5 drag does not exist at all. */
+.page-move {
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  width: 100%; margin: 0 0 8px; padding: 7px 10px;
+  border: 1px solid var(--border); border-radius: 9px;
+  background: rgba(255, 255, 255, .04); color: var(--muted);
+  font: inherit; font-size: 12px; line-height: 1.2; cursor: grab;
+  -webkit-user-select: none; user-select: none;
+}
+.page-move-icon { font-size: 13px; }
+.page-move:hover { background: rgba(255, 255, 255, .08); color: var(--text); }
+.page-move:active { cursor: grabbing; }
+/* the sheet in hand, and every sheet it could be put down on */
+.page-move.carrying { border-color: var(--accent); background: rgba(227, 53, 13, .16); color: var(--text); }
+.page-move.target { border-style: dashed; border-color: var(--accent); color: var(--text); }
+.page-wrap.carrying .binder-grid { opacity: .55; }
+.page-wrap.drop-target { outline: 2px dashed var(--accent); outline-offset: 4px; border-radius: 12px; }
+
+/* opening a gap is not destruction — it reads as an ordinary add, not a warning */
+.page-insert {
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  width: 100%; margin: 8px 0 0; padding: 7px 10px;
+  border: 1px solid var(--border); border-radius: 9px;
+  background: rgba(255, 255, 255, .04); color: var(--muted);
+  font: inherit; font-size: 12px; line-height: 1.2; cursor: pointer;
+}
+.page-insert-icon { font-size: 13px; }
+.page-insert:hover { background: rgba(255, 255, 255, .08); color: var(--text); }
+.page-insert:active { transform: translateY(1px); }
+
 /* the one dialog people should actually read before answering */
 .confirm-overlay { align-items: center; z-index: 90; }
 .confirm-panel { max-width: 420px; gap: 8px; }

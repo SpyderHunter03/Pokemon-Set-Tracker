@@ -1009,6 +1009,127 @@ const { chromium } = require('playwright');
     await ectx.close();
   }
 
+  // ---- moving whole sheets: reorder by drag, and open a gap in the middle ----
+  // Its own binder on purpose: the main walk above has a hand-derived pocket map
+  // that every later count leans on, and renumbering pages under it would move
+  // all of them at once.
+  {
+    const mctx = await browser.newContext({ serviceWorkers: 'block' });
+    const mp = await mctx.newPage();
+    await mp.goto('http://localhost:3111/');
+    await mp.evaluate(async () => {
+      const r = await fetch('api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'ptcgadmin', password: 'password123' }) });
+      const d = await r.json();
+      localStorage.setItem('ptcg.auth', JSON.stringify({ token: d.token, username: d.username }));
+    });
+    await mp.reload();
+    await mp.waitForSelector('.set-card');
+    await mp.goto('http://localhost:3111/#/binders');
+    await mp.waitForSelector('.binder-create');
+    await mp.fill('.binder-create input[type=text]', 'Shuffle Binder');
+    await mp.selectOption('.binder-create select >> nth=0', '2');         // 2×2 → base1's 8 printings need 2 pages
+    await pickFill(mp, 'base set', 'Base Set');
+    await mp.click('button:has-text("Create binder")');
+    await mp.waitForSelector('.binder-cover-page');
+    await mp.click('.binder-cover-page');
+    await mp.waitForSelector('.binder-grid .pocket');
+    await mp.click('button:has-text("Edit binder")');
+    await mp.waitForSelector('.page-move');
+    // How many sheets the fill actually needed is not ours to assume: earlier in
+    // this same walk a custom printing is added to Base Set, so the count moves.
+    // Read it off the nav and talk in terms of it.
+    const totalPages = async () => {
+      const m = (await mp.textContent('#view')).match(/Pages? \d+(?:\u2013\d+)? of (\d+)/);
+      return m ? parseInt(m[1], 10) : 0;
+    };
+    const pages0 = await totalPages();
+    const pagesNow = pages0 + 1;                                          // one blank sheet from now on
+    check('pages: the fill needed more than one sheet, so there is something to shuffle',
+      pages0 >= 2);
+    check('pages: every sheet gets a worded move bar and an insert button',
+      (await mp.locator('.page-move[data-page-move="0"]').count()) === 1 &&
+      (await mp.locator('.page-insert[data-page-insert="0"]').count()) === 1);
+
+    // what page 1 is holding right now, so we can watch it move
+    const wasOnPage1 = await mp.textContent('.pocket[data-pocket="0"]');
+
+    // --- open a gap at the very front: everything slides back one sheet ---
+    await mp.click('.page-insert[data-page-insert="0"]');
+    await mp.waitForFunction((want) => (document.querySelector('#view').textContent || '').includes(want), `Page 1 of ${pagesNow}`);
+    check('pages: inserting a blank sheet at the front adds a page',
+      (await mp.textContent('#view')).includes(`Page 1 of ${pagesNow}`));
+    check('pages: the new front sheet really is blank',
+      (await mp.locator('.binder-grid .pocket.filled').count()) === 0);
+
+    await mp.click('button:has-text("\u203a")');
+    await mp.waitForFunction(() => !document.querySelector('.flip-sheet'));
+    await mp.waitForSelector('.pocket[data-pocket="4"]');
+    check('pages: the cards slid back onto the following sheets, none lost',
+      (await mp.locator('.binder-grid .pocket.filled').count()) === 8 &&
+      (await mp.textContent('#view')).includes(`Pages 2\u20133 of ${pagesNow}`));
+    check('pages: what was on page 1 is now on page 2, laid out the same way',
+      (await mp.textContent('.pocket[data-pocket="4"]')) === wasOnPage1);
+
+    // --- drag one sheet onto another: they trade places, contents and all ---
+    const beforeP2 = await mp.textContent('.pocket[data-pocket="4"]');
+    const beforeP3 = await mp.textContent('.pocket[data-pocket="8"]');
+    await mp.evaluate(() => {
+      const bar = document.querySelector('.page-move[data-page-move="2"]');
+      const dst = document.querySelector('.page-wrap:has(.page-move[data-page-move="1"])');
+      const dt = new DataTransfer();
+      bar.dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: dt }));
+      dst.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: dt }));
+      dst.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt }));
+    });
+    await mp.waitForFunction((want) => {
+      const el = document.querySelector('.pocket[data-pocket="4"]');
+      return el && el.textContent === want;
+    }, beforeP3);
+    check('pages: dragging a sheet onto another moves it there',
+      (await mp.textContent('.pocket[data-pocket="4"]')) === beforeP3 &&
+      (await mp.textContent('.pocket[data-pocket="8"]')) === beforeP2);
+
+    // --- the phone path: pick a sheet up, turn the page, put it down ---
+    await mp.click('.page-move[data-page-move="1"]');
+    await mp.waitForSelector('.page-move.carrying');
+    check('pages: a picked-up sheet says it is being carried',
+      (await mp.textContent('.page-move.carrying')).includes('Carrying page 2'));
+    check('pages: every other sheet on screen offers itself as a destination',
+      (await mp.locator('.page-move.target').count()) === 1);
+    await mp.click('button:has-text("\u2039")');                          // carry it back to the front
+    await mp.waitForFunction(() => !document.querySelector('.flip-sheet'));
+    await mp.waitForSelector('.page-move[data-page-move="0"]');
+    check('pages: the sheet stays in hand across a page turn',
+      (await mp.locator('.page-move.target[data-page-move="0"]').count()) === 1);
+    await mp.click('.page-move[data-page-move="0"]');
+    await mp.waitForFunction(() => document.querySelectorAll('.binder-grid .pocket.filled').length === 4);
+    check('pages: tapping a destination puts the carried sheet there',
+      (await mp.textContent('.pocket[data-pocket="0"]')) === beforeP3);
+    check('pages: nothing is left in hand once it is put down',
+      (await mp.locator('.page-move.carrying').count()) === 0 &&
+      (await mp.locator('.page-move.target').count()) === 0);
+
+    // putting a sheet down on itself is a no-op, not a lost page
+    await mp.click('.page-move[data-page-move="0"]');
+    await mp.waitForSelector('.page-move.carrying');
+    await mp.click('.page-move[data-page-move="0"]');
+    await mp.waitForFunction(() => !document.querySelector('.page-move.carrying'));
+    check('pages: putting a sheet back where it came from changes nothing',
+      (await mp.textContent('#view')).includes(`of ${pagesNow}`) &&
+      (await mp.textContent('.pocket[data-pocket="0"]')) === beforeP3);
+
+    // the order survives a reload — the shuffle was saved, not just repainted
+    await mp.reload();
+    await mp.waitForSelector('.binder-cover-page');
+    await mp.click('.binder-cover-page');
+    await mp.waitForSelector('.binder-grid .pocket');
+    check('pages: the new page order is still there after a reload',
+      (await mp.textContent('.pocket[data-pocket="0"]')) === beforeP3 &&
+      (await mp.textContent('#view')).includes(`Page 1 of ${pagesNow}`));
+    await mctx.close();
+  }
+
+
   // ---- phone width: the app fits, so there is nothing to scroll sideways ----
   // 320 is the narrowest phone still in circulation (SE-class), 390 a current
   // iPhone. Anything that fits both fits everything in between.
