@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.48.0';
+const APP_VERSION = '3.49.0';
 
 /* ============================================================
  * Storage helpers
@@ -228,7 +228,10 @@ async function searchCards({ name, rarity, type, sort, page = 1, perPage = 100 }
     (!rarity || c.rarity === rarity) &&
     (!type || (c.types || []).includes(type)));
   if (sort) matches = sortCards(matches, sort, (c) => c.id, (c) => c.name);
-  return matches.slice((page - 1) * perPage, page * perPage);
+  // `more` is the honest answer to "is there another page?" — a Load more
+  // button that appears and then adds nothing is a button that lied
+  const start = (page - 1) * perPage;
+  return { cards: matches.slice(start, start + perPage), more: matches.length > start + perPage };
 }
 
 /** Image URL for a printing. Each card/printing carries explicit low/high
@@ -365,13 +368,19 @@ function numericLocalId(id) {
 
 function sortCards(rows, mode, getId, getName) {
   const order = setOrderMap();
+  // Two promos in the same set both parse to Infinity, and Infinity minus
+  // Infinity is NaN — a comparator that answers "neither comes first" scrambles
+  // the very order it was asked to fix. Every tie falls through to the printed
+  // number as text, which two different cards can never share.
+  const byNumber = (a, b) => (numericLocalId(getId(a)) - numericLocalId(getId(b)))
+    || String(localIdOf(getId(a))).localeCompare(String(localIdOf(getId(b))));
   const bySet = (a, b, dir) => {
     const d = ((order.get(setIdOf(getId(a))) ?? 0) - (order.get(setIdOf(getId(b))) ?? 0)) * dir;
-    return d !== 0 ? d : numericLocalId(getId(a)) - numericLocalId(getId(b));
+    return d !== 0 ? d : byNumber(a, b);
   };
   const cmp = {
-    name: (a, b) => getName(a).localeCompare(getName(b)) || numericLocalId(getId(a)) - numericLocalId(getId(b)),
-    number: (a, b) => numericLocalId(getId(a)) - numericLocalId(getId(b)) || String(localIdOf(getId(a))).localeCompare(String(localIdOf(getId(b)))),
+    name: (a, b) => getName(a).localeCompare(getName(b)) || byNumber(a, b),
+    number: byNumber,
     newest: (a, b) => bySet(a, b, -1),
     oldest: (a, b) => bySet(a, b, 1),
   }[mode];
@@ -1947,6 +1956,8 @@ async function renderSearchPage(rawQuery) {
   }
   let rarity = '', type = '', page = 1;
   let searchSort = lsGet('ptcg.sort.search') || 'newest';
+  const shown = new Set();   // card ids already on the page — a card belongs here once
+  let loadSeq = 0;           // only the newest request may touch the grid
   const results = h('div', { class: 'card-grid' });
   const status = h('div', { class: 'center' });
   const moreBtn = h('button', { class: 'btn ghost load-more', onclick: () => load(false) }, 'Load more');
@@ -1957,21 +1968,33 @@ async function renderSearchPage(rawQuery) {
     ...options.map((o) => h('option', { value: o }, o)));
 
   async function load(reset) {
-    if (reset) { page = 1; results.replaceChildren(); }
+    const seq = ++loadSeq;   // a filter changed mid-flight belongs to the newer request
+    if (reset) { page = 1; results.replaceChildren(); shown.clear(); }
     status.replaceChildren(spinner());
     moreBtn.hidden = true;
     try {
-      const cards = await searchCards({ name: query, rarity, type, sort: searchSort, page, perPage: 100 });
-      status.replaceChildren();
-      if (!cards.length && page === 1) {
-        status.textContent = 'No cards found.';
-      } else {
-        for (const c of cards) {
+      let added = 0, more = true;
+      // "Load more" has to actually add more. A page that turns out to hold
+      // nothing new keeps reading ahead rather than handing back a button
+      // press that changes nothing on screen.
+      while (added === 0 && more) {
+        const res = await searchCards({ name: query, rarity, type, sort: searchSort, page, perPage: 100 });
+        if (seq !== loadSeq) return;
+        more = res.more;
+        if (more) page++;
+        for (const c of res.cards) {
+          if (shown.has(c.id)) continue;   // never the same card twice
+          shown.add(c.id);
           for (const vk of realVariants(c)) results.append(cardTile(c, vk));
+          added++;
         }
-        if (cards.length === 100) { moreBtn.hidden = false; page++; }
       }
+      status.replaceChildren();
+      if (!shown.size) status.textContent = 'No cards found.';
+      moreBtn.hidden = !more;
     } catch (e) {
+      if (seq !== loadSeq) return;
+      status.replaceChildren();
       status.textContent = 'Search failed: ' + e.message;
     }
   }

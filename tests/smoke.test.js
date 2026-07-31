@@ -809,6 +809,10 @@ const { chromium } = require('playwright');
   await page.waitForSelector('.card-grid .tcg-card');
   check('global search shows all Charizard printings', (await page.locator('.card-grid .tcg-card').count()) === 4);
   check('rarity dropdown from real data', (await page.locator('select >> nth=0 >> option').allTextContents()).includes('Ultra Rare'));
+  // a handful of results is the whole answer — offering "Load more" here only
+  // ever fetched page one a second time and stacked the same cards up again
+  check('global search: results that fit on one page offer no Load more',
+    (await page.locator('.load-more').count()) === 0 || await page.locator('.load-more').isHidden());
 
   // ---- scanner ----
   await page.click('.bottomnav a[data-nav=scan]');
@@ -1203,6 +1207,54 @@ const { chromium } = require('playwright');
     check(`phone (${vw}px): a page turn does not widen the page mid-flip`, fOver <= 1);
     await pp.waitForFunction(() => !document.querySelector('.flip-sheet')).catch(() => {});
     await pctx.close();
+  }
+
+  // ---- global search: Load more brings NEW cards, and stops offering itself ----
+  // A catalog big enough to page through, made up for this tab alone so the
+  // real database (and every stage after this one) is left untouched. Exactly
+  // 200 cards: the old code sized the button off "did this page come back
+  // full", so a total that divides evenly by the page size left a button
+  // sitting there that added nothing when pressed.
+  {
+    const sctx = await browser.newContext({ serviceWorkers: 'block' });
+    const sp = await sctx.newPage();
+    await sp.route('**/api/catalog/search*', async (route) => {
+      const cards = [];
+      for (let i = 1; i <= 200; i++) {
+        // every third card is numbered like a promo — no number to parse, which
+        // is where the sort used to give up and answer "neither comes first"
+        const local = i % 3 === 0 ? 'SWSH' + i : String(i);
+        const setId = i <= 100 ? 'pagea' : 'pageb';
+        cards.push({
+          id: setId + '-' + local, localId: local, name: 'Pageflip Voltorb',
+          rarity: 'Common', category: 'Pokemon', dexId: [100], types: ['Lightning'],
+          variants: { normal: true }, img: null,
+        });
+      }
+      await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ cards }) });
+    });
+    await sp.goto('http://localhost:3111/#/search/Pageflip');
+    await sp.waitForSelector('.card-grid .tcg-card');
+    const ids = () => sp.$$eval('.card-grid .tcg-card', (els) => els.map((e) => e.dataset.cardId));
+    const first = await ids();
+    check('search: the first page fills up', first.length === 100);
+    check('search: a full first page offers more', !(await sp.locator('.load-more').isHidden()));
+    await sp.click('.load-more');
+    await sp.waitForFunction(() => document.querySelectorAll('.card-grid .tcg-card').length > 100);
+    const second = await ids();
+    check('search: Load more brings a second page', second.length === 200);
+    check('search: Load more never brings a card back', new Set(second).size === 200);
+    check('search: no card from the first page reappears',
+      second.slice(100).every((id) => !first.includes(id)));
+    check('search: with nothing left to fetch the button stops offering',
+      await sp.locator('.load-more').isHidden());
+    // and the order among promo-numbered cards is a real order, not a coin toss
+    const sorted = await sp.evaluate(() => sortCards(
+      [{ id: 'zzz-P5', name: 'A' }, { id: 'zzz-P3', name: 'A' }, { id: 'zzz-P4', name: 'A' }],
+      'newest', (c) => c.id, (c) => c.name).map((c) => c.id));
+    check('search: cards with no number to parse still sort in a settled order',
+      sorted.join(',') === 'zzz-P3,zzz-P4,zzz-P5');
+    await sctx.close();
   }
 
   console.log(errors.length ? 'JS ERRORS:\n' + errors.join('\n') : 'No JS errors, zero external requests.');

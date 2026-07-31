@@ -15,6 +15,12 @@
 
 * { box-sizing: border-box; }
 
+/* Hidden means hidden. Any rule here that sets `display` on an element the app
+   also hides outranks the browser's own [hidden] rule and leaves the thing on
+   screen — that is how "Load more" stayed put with nothing left to load, and
+   loaded the same cards over again every time it was pressed. */
+[hidden] { display: none !important; }
+
 html { -webkit-text-size-adjust: 100%; }
 
 body {
