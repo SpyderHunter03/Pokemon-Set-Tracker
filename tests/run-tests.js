@@ -115,8 +115,85 @@ function fail(msg) {
 
   const check = (name, cond) => { console.log((cond ? 'PASS' : 'FAIL') + ' — ' + name); if (!cond) stageFails++; };
   let stageFails = 0;
-  const jfetch = async (url, opts) => fetch(url, opts).then((r) => r.json());
+  // Two things a bare "TypeError: fetch failed" gets wrong. It names neither
+  // the URL nor the reason, which costs a whole run to work out. And after a
+  // long gap between requests to the same server — the browser suite takes
+  // minutes — the first call back can pick a pooled socket the server has
+  // already timed out, which surfaces as UND_ERR_SOCKET and is a transport
+  // flake, not a result. Retry that one exactly once, on a fresh connection.
+  const SOCKET_FLAKE = new Set(['UND_ERR_SOCKET', 'ECONNRESET', 'ECONNREFUSED']);
+  const jfetch = async (url, opts) => {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await fetch(url, opts).then((r) => r.json());
+      } catch (e) {
+        const code = e.cause && (e.cause.code || e.cause.message);
+        if (attempt === 0 && SOCKET_FLAKE.has(code)) { await new Promise((r) => setTimeout(r, 250)); continue; }
+        throw new Error(`${(opts && opts.method) || 'GET'} ${url} failed: ${e.message}${code ? ` (${code})` : ''}`);
+      }
+    }
+  };
   const CARD_OK = (id) => typeof id === 'string' && /^[a-zA-Z0-9.-]+$/.test(id);
+
+  // ---- a card added here is scannable, even though no bulk build knows it ----
+  // The bootstrap suite invented `test-promos-1` in the editor and uploaded a
+  // picture for it. build-hashes.js has since run (stage 5) and could not have
+  // seen it: it reads public/cdn/<lang>/sets/*.json, and a set created in the
+  // editor has no file there. The fingerprint taken at upload time is what
+  // puts the card in front of the scanner.
+  {
+    const si = await jfetch('http://localhost:3111/api/catalog/scan-index?lang=en');
+    const rows = si.cards || [];
+    const mine = rows.filter((r) => r[0] === 'test-promos-1');
+    check('scan index: a card added in the editor is fingerprinted', mine.length === 1 && /^[0-9a-f]{32}$/.test(mine[0][1]));
+    check('scan index: the bulk-built cards are still all there', rows.length > 5 && rows.some((r) => r[0] === 'base1-4'));
+    check('scan index: no card is listed twice', new Set(rows.map((r) => r[0])).size === rows.length);
+    check('scan index: reports which algorithm produced it', si.algo === 'boxdhash2-9x8');
+    const sameHash = await jfetch('http://localhost:3111/api/catalog/scan-index?lang=en');
+    check('scan index: merging is stable across requests',
+      JSON.stringify(sameHash.cards) === JSON.stringify(rows));
+    const noAuth = await fetch('http://localhost:3111/api/scan-index/rebuild', { method: 'POST', body: '{}' });
+    check('scan index: rebuilding needs the administrator', noAuth.status === 403);
+  }
+
+  // ---- binder art that nothing points at is reclaimed ----
+  // Uploads land on disk before any binder mentions them, so the sweep leaves
+  // anything recent alone; only files old enough to be certainly abandoned go.
+  {
+    const reg = await jfetch('http://localhost:3111/api/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'binderart', password: 'password123' }) });
+    const bAuth = { 'Content-Type': 'application/json', Authorization: 'Bearer ' + reg.token };
+    const artDir = path.join(ROOT, '.test-data', 'binder-images');
+    fs.mkdirSync(artDir, { recursive: true });
+    const uuid = (n) => `00000000-0000-4000-8000-0000000000${String(n).padStart(2, '0')}`;
+    const write = (name, ageMs) => {
+      const f = path.join(artDir, name + '.webp');
+      fs.writeFileSync(f, 'not really a webp, the sweep only reads names and dates');
+      const t = (Date.now() - ageMs) / 1000;
+      fs.utimesSync(f, t, t);
+      return f;
+    };
+    const keptRef = write(uuid(1), 3 * 60 * 60 * 1000);   // old, but a binder uses it
+    const orphanOld = write(uuid(2), 3 * 60 * 60 * 1000); // old and unreferenced
+    const orphanNew = write(uuid(3), 0);                  // unreferenced, just uploaded
+    const made = await jfetch('http://localhost:3111/api/binders', { method: 'POST', headers: bAuth, body: JSON.stringify({ name: 'Art Binder', size: 2 }) });
+    const bid = made.binder && made.binder.id;
+    await jfetch(`http://localhost:3111/api/binders/${bid}`, { method: 'PUT', headers: bAuth, body: JSON.stringify({
+      cover: { type: 'art', img: `/bimg/${uuid(1)}.webp` },
+      slots: { 0: { img: `/bimg/${uuid(2)}.webp`, cells: [0] } },
+    }) });
+    check('binder art: a save keeps every picture the binder points at',
+      fs.existsSync(keptRef) && fs.existsSync(orphanOld));
+    // now take the slot art away — that is what strands the file
+    await jfetch(`http://localhost:3111/api/binders/${bid}`, { method: 'PUT', headers: bAuth, body: JSON.stringify({ slots: {} }) });
+    check('binder art: art nothing points at any more is reclaimed', !fs.existsSync(orphanOld));
+    check('binder art: the cover picture is still referenced, so it stays', fs.existsSync(keptRef));
+    check('binder art: a picture uploaded moments ago is never swept', fs.existsSync(orphanNew));
+    // deleting the binder strands the cover too
+    await fetch(`http://localhost:3111/api/binders/${bid}`, { method: 'DELETE', headers: bAuth });
+    check('binder art: deleting a binder reclaims its cover', !fs.existsSync(keptRef));
+    check('binder art: the recent upload survives even a delete sweep', fs.existsSync(orphanNew));
+    try { fs.unlinkSync(orphanNew); } catch { /* tidy */ }
+  }
 
   console.log('=== 7/8 variant importer + read-only mode + offline mirror ===');
 
@@ -772,6 +849,99 @@ function fail(msg) {
     (rvIdx2.sets || []).some((x) => x.id === 'promo-z') &&
     ((rvZ && rvZ.cards) || []).some((c) => c.id === 'promo-z-1'));
 
+  // ---- how this install keeps up with the master ----
+  // Checking is safe and happens on a timer; applying carries the master's
+  // deletions and skips the review above, so it has to be asked for.
+  {
+    const cfg0 = await jfetch('http://localhost:3117/api/app-config');
+    check('auto-update: an install checks but does not apply, unless told otherwise', cfg0.autoUpdate === 'check');
+    const anon = await fetch('http://localhost:3117/api/auto-update', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: 'apply' }) });
+    check('auto-update: changing the mode needs the administrator', anon.status === 403);
+    const bad = await fetch('http://localhost:3117/api/auto-update', { method: 'POST', headers: pAuth, body: JSON.stringify({ mode: 'whenever' }) });
+    check('auto-update: nonsense modes are refused', bad.status === 400);
+    await jfetch('http://localhost:3117/api/auto-update', { method: 'POST', headers: pAuth, body: JSON.stringify({ mode: 'apply' }) });
+    const cfg1 = await jfetch('http://localhost:3117/api/app-config');
+    check('auto-update: the chosen mode sticks', cfg1.autoUpdate === 'apply');
+    await jfetch('http://localhost:3117/api/auto-update', { method: 'POST', headers: pAuth, body: JSON.stringify({ mode: 'check' }) });
+    // and a check — scheduled or asked for — records WHEN, so "up to date"
+    // carries a date rather than being a claim with nothing behind it
+    await jfetch('http://localhost:3117/api/catalog/update-check');
+    const cfg2 = await jfetch('http://localhost:3117/api/app-config');
+    check('auto-update: a check records when it last succeeded',
+      cfg2.autoUpdate === 'check' && !!cfg2.updateCheckedAt && !Number.isNaN(Date.parse(cfg2.updateCheckedAt)));
+  }
+
+  // ---- the review modal itself, in a real browser ----
+  // The contract underneath it is proven above; this is the part that turns
+  // checkboxes into the bypass list, which is where a mistake would quietly
+  // hide something the admin meant to keep.
+  {
+    const { chromium } = require('playwright');
+    const exe = process.env.CHROMIUM_PATH || undefined;
+    const rbrowser = await chromium.launch(exe ? { executablePath: exe } : {});
+    const rctx = await rbrowser.newContext({ serviceWorkers: 'block' });
+    const rp = await rctx.newPage();
+    // the master gains one more set, so there is something to review
+    {
+      const { DatabaseSync } = require('node:sqlite');
+      const mdb = new DatabaseSync(path.join(ROOT, '.test-data', 'ptcg.db'));
+      mdb.exec("INSERT INTO sets (lang,id,name,official_count,position,source,hidden) VALUES ('en','promo-y','Promo Y',1,998,'master',0)");
+      mdb.exec("INSERT INTO cards (lang,id,set_id,local_id,name,variants_csv,position,source,hidden) VALUES ('en','promo-y-1','promo-y','1','Yveltal Promo','normal',0,'master',0)");
+      mdb.close();
+    }
+    const pubY = spawnSync('node', ['scripts/publish-images.js'], { cwd: ROOT, env: { ...process.env, ...r2env }, encoding: 'utf8' });
+    if (pubY.status !== 0) fail('review-modal publish failed: ' + (pubY.stdout || '') + (pubY.stderr || ''));
+
+    await rp.goto('http://localhost:3117/');
+    await rp.evaluate((t) => localStorage.setItem('ptcg.auth', JSON.stringify(t)),
+      { token: pReg.token, username: 'pulladmin' });
+    const pageErrors = [];
+    rp.on('pageerror', (e) => pageErrors.push(e.message));
+    await rp.reload();
+    // Let the home route finish painting first. route() ends in
+    // view.replaceChildren(), and the overlay is a child of view — open it
+    // mid-render and the render that lands next wipes it off the page.
+    await rp.waitForSelector('.set-card');
+    const prev = await rp.evaluate(async (tok) => {
+      const r = await fetch('api/catalog/preview', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + tok }, body: '{}' });
+      return r.json();
+    }, pReg.token);
+    check('review UI: there is an addition to review', (prev.newSets || []).some((s) => s.id === 'promo-y'));
+    await rp.evaluate((p) => openPullReview(p), prev);
+    await rp.waitForSelector('.picker-overlay', { timeout: 15000 })
+      .catch(() => fail('review modal never appeared' + (pageErrors.length ? ' — page errors: ' + pageErrors.join('; ') : '')));
+    const panel = rp.locator('.picker-overlay').last();
+    check('review UI: the panel names the new set',
+      (await panel.textContent()).includes('Promo Y'));
+    const boxes = panel.locator('input[type=checkbox]');
+    const n = await boxes.count();
+    check('review UI: every addition arrives already accepted',
+      n > 0 && (await boxes.evaluateAll((els) => els.every((e) => e.checked))));
+    // untick the set, confirm — that is the bypass path
+    const yBox = panel.locator('.pr-row:has-text("Promo Y") input[type=checkbox]').first();
+    await yBox.uncheck();
+    check('review UI: unticking is what marks something to skip', (await yBox.isChecked()) === false);
+    await panel.locator('button:has-text("Apply update")').first().click();
+    let rvuDone = null;
+    for (let i = 0; i < 150 && !rvuDone; i++) {
+      const st = await jfetch('http://localhost:3117/api/build-status');
+      if (!st.running) rvuDone = st; else await new Promise((r) => setTimeout(r, 300));
+    }
+    const idxY = await jfetch('http://localhost:3117/api/catalog/index?lang=en');
+    check('review UI: the unticked set was bypassed, not installed',
+      rvuDone && !rvuDone.error && !(idxY.sets || []).some((x) => x.id === 'promo-y'));
+    {
+      const { DatabaseSync } = require('node:sqlite');
+      const idb = new DatabaseSync(path.join(pullRoot, 'data', 'ptcg.db'));
+      const ys = idb.prepare("SELECT hidden, source FROM sets WHERE lang='en' AND id='promo-y'").get();
+      idb.close();
+      check('review UI: a bypass from the modal is soft, exactly like the API one',
+        ys && ys.hidden === 1 && ys.source === 'local');
+    }
+    await rctx.close();
+    await rbrowser.close();
+  }
+
   // ---- a workspace seeded by PULLING the master (no local image tree)
   //      can still publish — catalog only, images stay on the bucket ----
   // (the scan-index fallback caches into public/cdn, so clear it to get the
@@ -783,13 +953,18 @@ function fail(msg) {
   });
   check('image-less workspace refuses --prune (would delete every bucket image)', wsPrune.status === 1);
   fs.rmSync(path.join(pullRoot, 'public', 'cdn'), { recursive: true, force: true });
+  // read the master's version rather than hard-coding it: every publish added
+  // above this line shifts the number, and a hard-coded one fails somewhere
+  // unrelated to whatever actually changed
+  const wsBefore = Number((await jfetch('http://localhost:3998/cards/catalog.json')).version) || 0;
   const wsPub = spawnSync('node', ['scripts/publish-images.js'], {
     cwd: pullRoot, encoding: 'utf8',
     env: { ...process.env, ...r2env, DATA_DIR: path.join(pullRoot, 'data'), PTCG_CDN_BASE: 'http://localhost:3998/cards' },
   });
   const wsOut = (wsPub.stdout || '') + (wsPub.stderr || '');
   check('image-less workspace publishes the master catalog (no public/cdn needed)',
-    wsPub.status === 0 && /publishing the master catalog only/.test(wsOut) && /version 4/.test(wsOut));   // v3 was the reviewed-additions publish above
+    wsPub.status === 0 && /publishing the master catalog only/.test(wsOut) &&
+    new RegExp(`version ${wsBefore + 1}\\b`).test(wsOut));
 
   const pullOk = catRes.ok && pullCfg.remoteCatalog === 'http://localhost:3998/cards' && pullStats.cards > 10 &&
     pullCard && pullCard.printings && pullCard.printings['cracked-ice-holo'] === 'Cracked Ice Holo' &&

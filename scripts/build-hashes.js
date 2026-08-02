@@ -42,48 +42,10 @@ const LANGS = opt('langs', '')
   ? opt('langs', '').split(',').map((s) => s.trim()).filter(Boolean)
   : fs.readdirSync(OUT, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name);
 
-function bitsToHex(bits) {
-  let hex = '';
-  for (let i = 0; i < bits.length; i += 4) {
-    hex += parseInt(bits.slice(i, i + 4).join(''), 2).toString(16);
-  }
-  return hex;
-}
-
-/* IMPORTANT: this box-average + dHash algorithm is duplicated in
- * public/app.js (computeCardHash). The two implementations must stay
- * byte-identical in behavior — no library resizing in the hash path,
- * exact area averages over the full-resolution pixels — so that hashes
- * computed here match hashes computed in the browser. */
-function boxGrid(rgba, W, H, gw, gh) {
-  const g = new Float64Array(gw * gh);
-  for (let j = 0; j < gh; j++) {
-    const y0 = Math.floor((j * H) / gh), y1 = Math.floor(((j + 1) * H) / gh);
-    for (let i = 0; i < gw; i++) {
-      const x0 = Math.floor((i * W) / gw), x1 = Math.floor(((i + 1) * W) / gw);
-      let sum = 0, n = 0;
-      for (let y = y0; y < y1; y++) {
-        for (let x = x0; x < x1; x++) {
-          const p = (y * W + x) * 4;
-          sum += 0.299 * rgba[p] + 0.587 * rgba[p + 1] + 0.114 * rgba[p + 2];
-          n++;
-        }
-      }
-      g[j * gw + i] = n ? sum / n : 0;
-    }
-  }
-  return g;
-}
-
-function hashFromPixels(rgba, W, H) {
-  const gx = boxGrid(rgba, W, H, 9, 8);
-  const bx = [];
-  for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) bx.push(gx[y * 9 + x] < gx[y * 9 + x + 1] ? 1 : 0);
-  const gy = boxGrid(rgba, W, H, 8, 9);
-  const by = [];
-  for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) by.push(gy[y * 8 + x] < gy[(y + 1) * 8 + x] ? 1 : 0);
-  return bitsToHex(bx) + bitsToHex(by);
-}
+/* The fingerprint itself lives in scripts/card-hash.js so the server can
+ * reuse it for a single freshly uploaded image without a third copy of
+ * the algorithm drifting away from the other two. */
+const { ALGO, hashFromPixels } = require('./card-hash');
 
 async function hashImage(file) {
   const { data, info } = await sharp(file).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
@@ -114,7 +76,7 @@ async function hashImage(file) {
       }
       process.stdout.write(`\r  hashed ${rows.length} cards…`);
     }
-    fs.writeFileSync(path.join(langOut, 'scan-index.json'), JSON.stringify({ algo: 'boxdhash2-9x8', cards: rows }));
+    fs.writeFileSync(path.join(langOut, 'scan-index.json'), JSON.stringify({ algo: ALGO, cards: rows }));
     console.log(`\r  ${rows.length} cards hashed${missing ? ` (${missing} without local images skipped)` : ''} → scan-index.json`);
   }
   console.log('Done.');

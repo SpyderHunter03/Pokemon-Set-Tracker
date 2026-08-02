@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.51.0';
+const APP_VERSION = '3.52.0';
 
 /* ============================================================
  * Storage helpers
@@ -2385,7 +2385,44 @@ async function renderAdminArea() {
           updateArea.replaceChildren(h('p', { class: 'muted small' },
             `Card database is up to date with the master (v${chk.localVersion || chk.remoteVersion}).`));
         }
+        // the check above now also happens on its own, six-hourly — say when it
+        // last ran, so "up to date" carries a date rather than just a claim
+        if (appConfig.updateCheckedAt) {
+          updateArea.append(h('p', { class: 'muted small', style: 'margin-top:-6px' },
+            `Checked automatically ${new Date(appConfig.updateCheckedAt).toLocaleString()}.`));
+        }
       })();
+    }
+
+    // What this install does when the master moves on. Knowing is safe, so it
+    // is the default; applying is not, because a pull carries the master's
+    // deletions and skips the review of its additions — so it is opt-in and
+    // says so in words.
+    const autoArea = h('div', { class: 'ce-field', style: 'margin-bottom:12px' });
+    if (appConfig.remoteCatalog && !appConfig.master && !appConfig.readonly) {
+      const modes = [
+        ['check', 'Check for updates, tell me'],
+        ['apply', 'Check and update by itself'],
+        ['off', "Don't check"],
+      ];
+      const note = h('p', { class: 'muted small', style: 'margin:0' });
+      const say = (m) => { note.textContent = m === 'apply'
+        ? 'Updating by itself accepts every addition without the review step, and carries the master\u2019s deletions through. Your own cards and printings are never touched.'
+        : m === 'off' ? 'This install will not look for newer card data. You can still update it by hand above.'
+          : 'Checked every six hours. Nothing changes until you press the update button.'; };
+      const sel = h('select', {}, ...modes.map(([v, lbl]) => h('option', { value: v }, lbl)));
+      sel.value = appConfig.autoUpdate || 'check';
+      say(sel.value);
+      sel.addEventListener('change', async () => {
+        const want = sel.value;
+        sel.disabled = true;
+        try {
+          await apiCall('auto-update', { method: 'POST', body: JSON.stringify({ mode: want }) });
+          appConfig.autoUpdate = want; say(want); toast('Saved');
+        } catch (err) { sel.value = appConfig.autoUpdate || 'check'; say(sel.value); toast(err.message); }
+        sel.disabled = false;
+      });
+      autoArea.append(h('span', { class: 'muted small' }, 'When the master database moves on'), sel, note);
     }
 
     // NOTE: replaceChildren stringifies null into literal "null" text (unlike
@@ -2393,6 +2430,7 @@ async function renderAdminArea() {
     content.replaceChildren(...[
       h('p', { class: 'muted small' }, `Database: ${stats.cards || 0} cards, ${stats.sets || 0} sets, ${stats.printings || 0} custom printings.`),
       updateArea,
+      autoArea.children.length ? autoArea : null,
       // Update from TCGdex: only for installs WITHOUT a master (standalone)
       // and for the maintainer workspace — that's where new sets come from.
       // Consumer installs update via the master button above, which appears
@@ -2403,6 +2441,16 @@ async function renderAdminArea() {
           try { await startDatabaseBuild(); renderControls(); }
           catch (err) { e.target.disabled = false; toast(err.message); }
         } }, '🔄 Update cards from TCGdex'),
+      ) : null,
+      // Rebuild the scanner fingerprints from the images on this server. Cards
+      // added here are fingerprinted as their picture is uploaded, so this is
+      // for the bulk case — after a mirror, or a build that lost its index.
+      appConfig.localDbExists ? h('div', { class: 'row', style: 'margin-bottom:12px' },
+        h('button', { class: 'btn ghost small', onclick: async (e) => {
+          e.target.disabled = true;
+          try { await apiCall('scan-index/rebuild', { method: 'POST', body: '{}' }); toast('Rebuilding the scanner index…'); renderControls(); }
+          catch (err) { e.target.disabled = false; toast(err.message); }
+        } }, '🔍 Rebuild scanner index'),
       ) : null,
       // download images locally + repoint rows to the local copies
       h('hr'),

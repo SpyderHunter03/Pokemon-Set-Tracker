@@ -50,6 +50,10 @@ const READONLY = process.env.PTCG_READONLY === '1';
 // workspace".
 const MASTER_MODE = process.env.PTCG_MASTER === '1';
 const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
+// Fingerprints for cards this install added or re-pictured itself. The main
+// scan index is built in bulk (or pulled from the bucket) and knows nothing
+// about them, so they are kept beside it and merged when the scanner asks.
+const SCAN_EXTRA_FILE = path.join(DATA_DIR, 'scan-extra.json');
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
@@ -252,6 +256,69 @@ function cleanBinderCover(c) {
   return null;
 }
 const _binderDel = db.prepare('DELETE FROM binders WHERE user_id = ? AND id = ?');
+
+/* ---------- reclaiming binder art ----------
+ * An uploaded picture is written to disk before anything points at it, and
+ * every way of taking one off a binder — deleting the binder, clearing a
+ * pocket, putting a color on the front — leaves the file behind. Nobody can
+ * reach it again, so it is pure weight in DATA_DIR, which is the folder that
+ * gets backed up.
+ *
+ * The sweep is the obvious one — anything on disk that no binder mentions —
+ * with the one caveat that matters: a file that has just been uploaded is
+ * unreferenced by definition, because the PUT that places it has not happened
+ * yet. So nothing is touched until it has been on disk an hour, which is far
+ * longer than any upload-then-place takes and short enough to keep the folder
+ * honest. Filenames are UUIDs and the folder is shared, so references are
+ * collected across every user's binders, not just the one being saved. */
+const BINDER_ART_GRACE = 60 * 60 * 1000;         // leave a new upload alone this long
+const _allBinderArt = db.prepare('SELECT slots, cover FROM binders');
+
+const _artName = (u) => {
+  const m = /^\/bimg\/([a-f0-9-]{36}\.webp)$/.exec(typeof u === 'string' ? u : '');
+  return m ? m[1] : null;
+};
+
+/** The /bimg/ files one binder points at, cover art included. */
+function artNamesIn(slots, cover) {
+  const out = new Set();
+  const add = (u) => { const n = _artName(u); if (n) out.add(n); };
+  try { const c = typeof cover === 'string' ? JSON.parse(cover) : cover; if (c && c.type === 'art') add(c.img); }
+  catch { /* an unreadable cover keeps nothing alive */ }
+  try {
+    const s = typeof slots === 'string' ? JSON.parse(slots || '{}') : (slots || {});
+    for (const v of Object.values(s)) if (v && typeof v === 'object') add(v.img);
+  } catch { /* same for slots */ }
+  return out;
+}
+
+/** Every /bimg/ file some binder still points at, across every account. */
+function referencedBinderArt() {
+  const refs = new Set();
+  for (const row of _allBinderArt.all()) for (const n of artNamesIn(row.slots, row.cover)) refs.add(n);
+  return refs;
+}
+
+/** Delete unreferenced art older than the grace period. Returns how many went.
+ * Only called when something actually stopped pointing at a picture, so it
+ * does not need a timer to keep it from running on every ordinary save. */
+function sweepBinderArt() {
+  const now = Date.now();
+  let files;
+  try { files = fs.readdirSync(BINDER_IMG_DIR); } catch { return 0; }   // nothing uploaded yet
+  const refs = referencedBinderArt();
+  let gone = 0;
+  for (const f of files) {
+    if (!/^[a-f0-9-]{36}\.webp$/.test(f) || refs.has(f)) continue;
+    const full = path.join(BINDER_IMG_DIR, f);
+    try {
+      if (now - fs.statSync(full).mtimeMs < BINDER_ART_GRACE) continue;  // still in flight
+      fs.unlinkSync(full);
+      gone++;
+    } catch { /* raced with another sweep, or gone already */ }
+  }
+  return gone;
+}
 
 /** First-run migration: import any pre-SQLite JSON accounts/collections. */
 function migrateJsonToDb() {
@@ -518,6 +585,10 @@ function runHashes() {
   const finish = (ok) => {
     // the freshly downloaded catalog (public/cdn) becomes the DB's card source
     try { importCatalogToDb(); } catch (e) { pushLog('Catalog import after build failed: ' + e.message); }
+    // NOTE: the overlay is deliberately NOT cleared here. A full rebuild reads
+    // public/cdn/<lang>/sets/*.json, and a card this install invented has no
+    // entry there — so the rebuild would silently drop exactly the cards the
+    // overlay exists to carry. Merging a fingerprint twice costs nothing.
     build.running = false; build.phase = null; build.hashesOk = ok;
   };
   const runScript = () => {
@@ -1052,6 +1123,96 @@ const catalogStats = () => ({
   cards: _countCards.get().n, sets: _countSets.get().n, printings: _countPrintings.get().n,
 });
 
+/* ---------- the scanner index, and the cards the bulk build never sees ----------
+ * scan-index.json is produced in one pass over public/cdn (or pulled straight
+ * from the bucket). Neither route knows about a card this install invented in
+ * the editor, or one whose picture the admin replaced here — so the scanner
+ * would look straight past exactly the cards somebody cared enough to add by
+ * hand, and say nothing about why.
+ *
+ * So every card image uploaded here is fingerprinted on the spot and kept in a
+ * small overlay next to the settings. The published index is never rewritten —
+ * the overlay is merged on the way out, and wins on a shared id because it is
+ * the fresher picture. */
+const SCAN_ALGO = require('./scripts/card-hash').ALGO;
+const loadScanExtras = () => readJSON(SCAN_EXTRA_FILE, {});
+
+/** Remember this install's own fingerprint for one card. */
+function rememberScanHash(lang, cardId, hash) {
+  const all = loadScanExtras();
+  if (!all[lang] || typeof all[lang] !== 'object') all[lang] = {};
+  all[lang][cardId] = hash;
+  writeJSONAtomic(SCAN_EXTRA_FILE, all);
+}
+
+/** Merge this install's fingerprints over a published index. */
+function withScanExtras(lang, index) {
+  const extra = loadScanExtras()[lang];
+  const rows = Array.isArray(index && index.cards) ? index.cards : [];
+  if (!extra || !Object.keys(extra).length) return { algo: (index && index.algo) || SCAN_ALGO, cards: rows };
+  const merged = rows.filter((r) => !(Array.isArray(r) && extra[r[0]] !== undefined));
+  for (const [id, hash] of Object.entries(extra)) merged.push([id, hash]);
+  return { algo: (index && index.algo) || SCAN_ALGO, cards: merged };
+}
+
+/* ---------- keeping up with the master ----------
+ * Checking whether the master has moved on is one tiny request for
+ * catalog.json. Doing it only when somebody happens to open the admin panel
+ * means an install can sit a month behind and look fine, so the same check
+ * also runs on a timer. What happens NEXT is a separate question, because a
+ * pull is not a read: master deletions propagate, and additions are supposed
+ * to pass under the admin's eye first. So the timer's job is to KNOW, and
+ * 'apply' is something you have to ask for. */
+const AUTO_UPDATE_MODES = ['off', 'check', 'apply'];
+const AUTO_UPDATE_EVERY = 6 * 60 * 60 * 1000;      // six hours
+const autoUpdateMode = () => {
+  const m = loadSettings().autoUpdate;
+  return AUTO_UPDATE_MODES.includes(m) ? m : 'check';
+};
+
+/** Is the master ahead of us? One fetch of catalog.json, no card data moved. */
+async function masterUpdateStatus() {
+  const base = configCdnBase();
+  if (!base) return { configured: false };
+  const local = loadSettings().masterVersion || 0;
+  try {
+    const r = await fetch(base + '/catalog.json');
+    if (!r.ok) return { configured: true, reachable: false, localVersion: local };
+    const m = await r.json();
+    const remote = Number(m.version) || 0;
+    return {
+      configured: true, reachable: true,
+      localVersion: local, remoteVersion: remote,
+      behind: remote > local,
+      remoteCards: m.cards || null, remoteSets: m.sets || null,
+    };
+  } catch {
+    return { configured: true, reachable: false, localVersion: local };
+  }
+}
+
+/** The scheduled half: record what we found, and pull only if asked to. */
+async function runScheduledUpdateCheck() {
+  // an install with no cards at all is tryMasterPull's problem, not this one;
+  // the workspace PRODUCES the master, so it never follows one
+  if (READONLY || MASTER_MODE || build.running || !configCdnBase()) return;
+  if (catalogStats().cards === 0) return;
+  const mode = autoUpdateMode();
+  if (mode === 'off') return;
+  let st;
+  try { st = await masterUpdateStatus(); } catch { return; }
+  const s = loadSettings();
+  s.updateCheckedAt = new Date().toISOString();
+  s.updateReachable = !!st.reachable;
+  if (st.reachable) s.updateRemoteVersion = st.remoteVersion || 0;
+  saveSettings(s);
+  if (mode !== 'apply' || !st.behind || build.running) return;
+  // unattended, so nothing is bypassed — every addition is accepted, which is
+  // exactly why this is not the default
+  try { startCatalogPull(configCdnBase()); }
+  catch (e) { console.error('Scheduled master update failed to start: ' + e.message); }
+}
+
 // ---------- catalog served from the DB (the app reads cards from here) ----------
 const LANG_NAMES = {
   en: 'English', fr: 'Français', de: 'Deutsch', es: 'Español', it: 'Italiano',
@@ -1270,6 +1431,9 @@ async function handleApi(req, res, pathname, ip, url) {
       remoteCatalog: configCdnBase() || null,
       masterVersion: s.masterVersion || null,
       masterPulledAt: s.masterPulledAt || null,
+      autoUpdate: autoUpdateMode(),
+      updateCheckedAt: s.updateCheckedAt || null,
+      updateRemoteVersion: s.updateRemoteVersion || null,
       master: MASTER_MODE,
       release: RELEASE_VERSION,
       canPublish: !READONLY && !!(process.env.R2_ACCESS_KEY_ID && process.env.R2_SECRET_ACCESS_KEY && process.env.R2_BUCKET),
@@ -1322,7 +1486,7 @@ async function handleApi(req, res, pathname, ip, url) {
   if (pathname === '/api/catalog/scan-index' && req.method === 'GET') {
     const lang = LANG_RE.test(url.searchParams.get('lang') || '') ? url.searchParams.get('lang') : 'en';
     const localFile = path.join(CDN_DIR, lang, 'scan-index.json');
-    if (fs.existsSync(localFile)) return sendJSON(res, 200, readJSON(localFile, { cards: [] }));
+    if (fs.existsSync(localFile)) return sendJSON(res, 200, withScanExtras(lang, readJSON(localFile, { cards: [] })));
     // No local scanner index (this install pulled the master rather than
     // building locally) — fetch the published one from the bucket and cache
     // it to disk so the scanner works on pulled-only installs too.
@@ -1333,34 +1497,64 @@ async function handleApi(req, res, pathname, ip, url) {
         if (r.ok) {
           const data = await r.json();
           try { fs.mkdirSync(path.dirname(localFile), { recursive: true }); writeJSONAtomic(localFile, data); } catch { /* cache is best-effort */ }
-          return sendJSON(res, 200, data);
+          // the cached copy stays exactly as published; this install's own
+          // cards are merged on the way out, never written into the master's file
+          return sendJSON(res, 200, withScanExtras(lang, data));
         }
       } catch { /* fall through to empty */ }
     }
-    return sendJSON(res, 200, { cards: [] });
+    // even with no index at all, a card added here is still scannable
+    return sendJSON(res, 200, withScanExtras(lang, { algo: SCAN_ALGO, cards: [] }));
+  }
+
+  // admin: rebuild the whole scanner index from the images on this server.
+  // Only meaningful where those images exist — a pulled-only install serves
+  // the master's index and gets its own cards from the overlay instead.
+  if (pathname === '/api/scan-index/rebuild' && req.method === 'POST') {
+    if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
+    const rbUser = authUser(req);
+    if (!rbUser || !isAdminUser(rbUser)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    if (build.running) return sendJSON(res, 409, { error: 'Another job is already running' });
+    if (!dbExists()) {
+      return sendJSON(res, 400, { error: 'There are no card images on this server to hash. Cards you add here are fingerprinted as you upload their pictures, so the scanner already knows them.' });
+    }
+    try { require.resolve('sharp'); } catch {
+      return sendJSON(res, 501, { error: 'Rebuilding the scanner index needs the sharp package on the server: npm install --no-save sharp' });
+    }
+    build = { running: true, phase: 'hashes', startedAt: Date.now(), error: null, hashesOk: null, log: [] };
+    runHashes();
+    return sendJSON(res, 200, { ok: true, started: true });
   }
 
   // does the master have a newer database than this install? (cheap ping of
   // catalog.json — no card data moves until the admin actually updates)
   if (pathname === '/api/catalog/update-check' && req.method === 'GET') {
-    const base = configCdnBase();
-    if (!base) return sendJSON(res, 200, { configured: false });
-    const s = loadSettings();
-    const local = s.masterVersion || 0;
-    try {
-      const r = await fetch(base + '/catalog.json');
-      if (!r.ok) return sendJSON(res, 200, { configured: true, reachable: false, localVersion: local });
-      const m = await r.json();
-      const remote = Number(m.version) || 0;
-      return sendJSON(res, 200, {
-        configured: true, reachable: true,
-        localVersion: local, remoteVersion: remote,
-        behind: remote > local,
-        remoteCards: m.cards || null, remoteSets: m.sets || null,
-      });
-    } catch {
-      return sendJSON(res, 200, { configured: true, reachable: false, localVersion: local });
+    // same answer the scheduled check records, asked on demand
+    const st = await masterUpdateStatus();
+    if (st.configured && st.reachable) {
+      const s = loadSettings();
+      s.updateCheckedAt = new Date().toISOString();
+      s.updateReachable = true;
+      s.updateRemoteVersion = st.remoteVersion || 0;
+      saveSettings(s);
     }
+    return sendJSON(res, 200, st);
+  }
+
+  // admin: how this install keeps up with the master — know only, or apply
+  if (pathname === '/api/auto-update' && req.method === 'POST') {
+    if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
+    // `user` is not bound this early in handleApi — ask for it directly
+    const auUser = authUser(req);
+    if (!auUser || !isAdminUser(auUser)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    const body = await readBody(req);
+    if (!AUTO_UPDATE_MODES.includes(body.mode)) {
+      return sendJSON(res, 400, { error: 'mode must be one of: ' + AUTO_UPDATE_MODES.join(', ') });
+    }
+    const s = loadSettings();
+    s.autoUpdate = body.mode;
+    saveSettings(s);
+    return sendJSON(res, 200, { ok: true, autoUpdate: body.mode });
   }
 
   // admin: download all remote card images to this server, repointing rows local
@@ -1720,7 +1914,16 @@ async function handleApi(req, res, pathname, ip, url) {
     const low = `/cdn/${cLang}/images/${setId}/${localId}/card-low.webp`;
     const high = `/cdn/${cLang}/images/${setId}/${localId}/card-high.webp`;
     _setCardBaseImg.run(low, high, cLang, cardId);
-    return sendJSON(res, 200, { ok: true, urls: { low, high } });
+    // fingerprint it now, so the scanner can find this card without waiting
+    // for a rebuild it may never get (a pulled-only install never runs one)
+    let scannable = false;
+    try {
+      rememberScanHash(cLang, cardId, await require('./scripts/card-hash').hashImageFile(path.join(dir, 'card-low.webp')));
+      scannable = true;
+    } catch (e) {
+      pushLog(`Could not fingerprint ${cardId} for the scanner: ${e.message}`);
+    }
+    return sendJSON(res, 200, { ok: true, urls: { low, high }, scannable });
   }
 
   // ---- admin: upload your own image for a specific printing of a card ----
@@ -1943,10 +2146,17 @@ async function handleApi(req, res, pathname, ip, url) {
       }
       const updated = Date.now();
       _binderPut.run(user.id, row.id, name, size, color, pages, JSON.stringify(slots), cover, row.created, updated);
+      // Sweep only when this save actually dropped a picture — a cleared
+      // pocket, a color over the front. Comparing before against after means
+      // the ordinary save (moving a card, renaming) never touches the disk.
+      const wasUsing = artNamesIn(row.slots, row.cover);
+      const nowUsing = artNamesIn(slots, cover);
+      if ([...wasUsing].some((n) => !nowUsing.has(n))) sweepBinderArt();
       return sendJSON(res, 200, { ok: true, updated });
     }
     if (req.method === 'DELETE') {
       _binderDel.run(user.id, row.id);
+      sweepBinderArt();   // a whole binder's worth just became unreachable
       return sendJSON(res, 200, { ok: true });
     }
   }
@@ -2040,6 +2250,14 @@ if (process.argv.includes('--pull-master')) {
     };
     tryMasterPull();
     setInterval(tryMasterPull, 10 * 60 * 1000).unref();
+
+    // An install that already HAS cards never asked itself whether the master
+    // had moved on — it waited for somebody to open the admin panel. Now it
+    // asks on its own, six-hourly, starting a minute after boot so a container
+    // coming up in a batch does not stampede the bucket.
+    const sched = () => { runScheduledUpdateCheck().catch(() => { /* offline is normal */ }); };
+    setTimeout(sched, 60 * 1000).unref();
+    setInterval(sched, AUTO_UPDATE_EVERY).unref();
   });
 }
 

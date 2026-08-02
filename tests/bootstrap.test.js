@@ -154,7 +154,11 @@ const { chromium } = require('playwright');
   check('editor: the Pokedex field says it takes a list',
     (await page.textContent('.ce-panel .ce-field:has(input[placeholder^="e.g. 133"]) span')).includes('comma-separated'));
   await page.fill('.ce-panel input[placeholder^="e.g. 133"]', '133');
-  await page.setInputFiles('.ce-panel input[type=file]', require('path').join(__dirname, 'fixtures', 'base1-4.png'));
+  // a picture no real card in the fixture set has. It used to be base1-4.png,
+  // which was harmless while nothing fingerprinted editor uploads — now that
+  // they land in the scan index, giving two cards the identical artwork would
+  // make the scanner's own separation check measure the fixture, not the code.
+  await page.setInputFiles('.ce-panel input[type=file]', require('path').join(__dirname, 'fixtures', 'promo-star.png'));
   await page.click('.ce-panel button:has-text("Add card")');
   await page.waitForSelector('.tcg-card[data-card-id="test-promos-1"]');
   check('editor: brand-new card appears in its set', true);
@@ -244,6 +248,33 @@ const { chromium } = require('playwright');
   await page.waitForSelector('.tcg-card[data-card-id="test-promos-3"]');
   check('editor: copied card lands in THIS set with the source picture',
     ((await page.locator('.tcg-card[data-card-id="test-promos-3"] >> nth=0 >> img').getAttribute('src')) || '').includes('base1/58/'));
+
+  // ---- ⬆ From another card: borrow a picture for a card that already exists ----
+  // Same picker as Copy-from, but it takes only the image, and it offers only
+  // cards that HAVE one — an empty tile would be a picture you cannot borrow.
+  await page.click('.tcg-card[data-card-id="test-promos-3"] >> nth=0 >> .info-btn');
+  await page.waitForSelector('#card-modal[open] button:has-text("Edit card")');
+  await page.click('#card-modal button:has-text("Edit card")');
+  await page.waitForSelector('.ce-panel');
+  await page.click('.ce-panel button:has-text("From another card")');
+  await page.waitForSelector('.picker-overlay .picker-row');
+  const picked = await page.$$eval('.picker-overlay .picker-row', (els) => els.map((e) => e.textContent));
+  check('editor: the image picker offers only cards that have a picture',
+    picked.length > 0 && !picked.some((t) => t.includes('No Image Card')));
+  await page.fill('.picker-overlay input[placeholder="Search cards by name…"]', 'Charizard');
+  await page.waitForSelector('.picker-row:has-text("Charizard")');
+  await page.click('.picker-row:has-text("Charizard") >> nth=0');
+  await page.waitForFunction(() => {
+    const p = document.querySelector('.ce-panel');
+    return p && p.textContent.includes('Using the picture of Charizard');
+  });
+  check('editor: picking a card borrows its picture and says whose it is', true);
+  await page.click('.ce-panel button:has-text("Save changes")');
+  await page.waitForFunction(() => !document.querySelector('.ce-panel'));
+  await page.goto('http://localhost:3111/#/set/test-promos');
+  await page.waitForSelector('.tcg-card[data-card-id="test-promos-3"]');
+  check('editor: the borrowed picture is the one the card now shows',
+    ((await page.locator('.tcg-card[data-card-id="test-promos-3"] >> nth=0 >> img').getAttribute('src')) || '').includes('base1/4/'));
 
   // ---- his bug: uncheck every default variant + type a custom name WITHOUT
   //      clicking ＋Add — the card must save with ONLY the custom printing ----
