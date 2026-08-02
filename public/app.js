@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.54.0';
+const APP_VERSION = '3.54.1';
 
 /* ============================================================
  * Storage helpers
@@ -2579,9 +2579,22 @@ async function renderAdminArea() {
     // no symptom until strangers start locking each other out, so the answer
     // belongs on screen rather than in a lockout.
     const connArea = h('div', { class: 'ce-field', style: 'margin-bottom:12px' });
+    connArea.append(h('span', { class: 'muted small' }, 'This connection'),
+      h('p', { class: 'muted small', style: 'margin:0' }, 'Checking\u2026'));
     (async () => {
       let c;
-      try { c = await apiCall('connection'); } catch { return; }
+      try {
+        c = await apiCall('connection');
+      } catch (e) {
+        // A block that vanishes when it fails teaches the reader nothing, and
+        // "the setting is fine" and "the question was never asked" look
+        // identical from the outside. Say which.
+        connArea.replaceChildren(h('span', { class: 'muted small' }, 'This connection'),
+          h('p', { class: 'muted small', style: 'margin:0' },
+            `Could not ask this server where you are coming from: ${e.message}. If this install was just updated, the app may still be the old one — use Repair & reload below.`));
+        return;
+      }
+      connArea.replaceChildren();
       const priv = /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|127\.|::1$|f[cd])/i.test(c.you || '');
       const verdict = !c.proxyConfigured
         ? (priv

@@ -2763,7 +2763,38 @@ if (catalogStats().cards === 0 && dbExists()) {
   }
 }
 
-if (process.argv.includes('--pull-master')) {
+/* ---------- setting a password from the machine itself ----------
+ * Mail is optional, so an install without it has no self-service way back in,
+ * and "forgot my password" would otherwise mean editing ptcg.db by hand. The
+ * answer is the same one the setup code rests on: whoever can run commands on
+ * the server is entitled to the account. The new password is read from stdin
+ * rather than taken as an argument, because arguments end up in shell history
+ * and in the process list where anyone on the box can read them. */
+if (process.argv.includes('--set-password')) {
+  const who = process.argv[process.argv.indexOf('--set-password') + 1];
+  if (!who) {
+    console.error('Usage: node server.js --set-password <username>   (the new password is read from stdin)');
+    process.exit(2);
+  }
+  (async () => {
+    const user = getUserByName(String(who).toLowerCase());
+    if (!user) { console.error(`No account called ${who} on this install.`); process.exit(1); }
+    let input = '';
+    process.stdin.setEncoding('utf8');
+    for await (const chunk of process.stdin) input += chunk;
+    const pw = input.replace(/\r?\n$/, '');
+    if (pw.length < MIN_PASSWORD) {
+      console.error(`That password is ${pw.length} characters; the minimum is ${MIN_PASSWORD}.`);
+      process.exit(1);
+    }
+    const salt = crypto.randomBytes(16).toString('hex');
+    _updateUserHash.run(salt, await hashPassword(pw, salt), user.id);
+    try { _dropTokensOf.run(user.id, 'reset'); } catch { /* nothing outstanding */ }
+    console.log(`Password changed for ${user.display}. Every device that was signed in has been signed out.`);
+    try { db.close(); } catch { /* already closed */ }
+    process.exit(0);
+  })();
+} else if (process.argv.includes('--pull-master')) {
   // CLI mode (no web server): load the master card database into this
   // install's DB and exit. Used by the installers so a fresh install comes
   // up with every card already in place; safe to re-run any time (same

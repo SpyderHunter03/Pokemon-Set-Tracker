@@ -303,6 +303,17 @@ The setup screen writes the same settings if you would rather not touch the unit
 
 Confirmation links last 24 hours, reset links 45 minutes, both are single-use, and only the SHA-256 of each is stored — the usable value exists in the email and nowhere else. Setting a new password signs out every device. Asking to reset an address the server has never seen gets exactly the same answer as asking about one it has, so the endpoint cannot be used to find out who has an account here.
 
+### Setting a password from the console
+
+Mail is optional, so an install without it needs a way back in that does not involve editing the database. Whoever can run commands on the machine can set a password:
+
+```bash
+cd /opt/pokemon-set-tracker
+echo -n 'the new password' | node server.js --set-password yourname
+```
+
+The password is read from stdin rather than taken as an argument, so it stays out of your shell history and out of the process list. Every device that was signed in is signed out.
+
 ## Project layout
 
 ```

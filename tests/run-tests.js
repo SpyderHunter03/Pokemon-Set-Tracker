@@ -516,6 +516,27 @@ function fail(msg) {
     const staleUse = await fetch(`${M}/api/me`, { headers: { Authorization: 'Bearer ' + stale } });
     check('reset: every session from before the reset is dead', staleUse.status === 401);
 
+    // ---- and the way back in when there is no mail server at all ----
+    // Mail is optional, so this is the floor: whoever can run commands on the
+    // machine can set a password, and nobody else can.
+    const setPw = (user, pw) => {
+      const r = spawnSync('node', ['server.js', '--set-password', user], {
+        cwd: ROOT, encoding: 'utf8', input: pw,
+        env: { ...process.env, DATA_DIR: mailDir },
+      });
+      return { status: r.status, out: (r.stdout || '') + (r.stderr || '') };
+    };
+    const tooShort = setPw('owner', 'short');
+    check('set-password: a short password is refused', tooShort.status === 1 && /minimum is 10/.test(tooShort.out));
+    const noSuch = setPw('nobody-here', 'a-perfectly-fine-password');
+    check('set-password: an account that does not exist is refused', noSuch.status === 1 && /No account called/.test(noSuch.out));
+    const ok = setPw('owner', 'set-from-the-console');
+    check('set-password: it says what it did', ok.status === 0 && /signed out/.test(ok.out));
+    const wasReset = await fetch(`${M}/api/login`, { method: 'POST', headers: jbody2, body: JSON.stringify({ username: 'owner', password: 'a-brand-new-password' }) });
+    const isSet = await fetch(`${M}/api/login`, { method: 'POST', headers: jbody2, body: JSON.stringify({ username: 'owner', password: 'set-from-the-console' }) });
+    check('set-password: the previous password stops working', wasReset.status === 401);
+    check('set-password: and the console one works', isSet.status === 200);
+
     mail.close();
   }
 
