@@ -35,10 +35,34 @@ function restoreConfig() {
 }
 process.on('exit', restoreConfig);
 
-function start(cmd, args, env = {}) {
-  const child = spawn(cmd, args, { cwd: ROOT, env: { ...process.env, ...env }, stdio: 'inherit' });
+/* `capture` pipes the child's output instead of inheriting it, keeps a copy on
+ * child.log, and still echoes it so the run reads the same. Needed because the
+ * first-run setup code is printed to the server's own log and reading it there
+ * IS the mechanism under test — there is deliberately no other way to get it. */
+function start(cmd, args, env = {}, capture = false) {
+  const child = spawn(cmd, args, {
+    cwd: ROOT, env: { ...process.env, ...env },
+    stdio: capture ? ['ignore', 'pipe', 'pipe'] : 'inherit',
+  });
+  if (capture) {
+    child.log = '';
+    const tee = (d) => { child.log += d.toString(); process.stdout.write(d); };
+    child.stdout.on('data', tee);
+    child.stderr.on('data', tee);
+  }
   children.push(child);
   return child;
+}
+
+/** Wait for something to show up in a captured child's log. */
+async function waitForLog(child, re, timeoutMs = 10000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const m = re.exec(child.log || '');
+    if (m) return m;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return null;
 }
 
 function run(cmd, args, env = {}) {
@@ -80,15 +104,20 @@ function fail(msg) {
   pinTestConfig();
   fs.rmSync(path.join(ROOT, 'public', 'cdn'), { recursive: true, force: true });
   fs.rmSync(path.join(ROOT, '.test-data'), { recursive: true, force: true });
-  start('node', ['server.js'], {
+  const mainServer = start('node', ['server.js'], {
     PORT: '3111',
     DATA_DIR: path.join(ROOT, '.test-data'),
     PTCG_SOURCE_API: 'http://localhost:3999/v2',
-  });
+  }, true);
   await waitForPort(3111).catch((e) => fail(e.message));
+  // the install is unclaimed, so it printed a code; the browser suite needs it
+  const codeMatch = await waitForLog(mainServer, /\b([0-9a-f]{32})\b/);
+  if (!codeMatch) fail('the server never printed a first-run setup code');
 
-  console.log('=== 3/8 bootstrap suite (in-app download button + admin update) ===');
-  const bootstrap = spawnSync('node', ['tests/bootstrap.test.js'], { cwd: ROOT, stdio: 'inherit', env: process.env });
+  console.log('=== 3/8 bootstrap suite (first-run setup + download button + admin update) ===');
+  const bootstrap = spawnSync('node', ['tests/bootstrap.test.js'], {
+    cwd: ROOT, stdio: 'inherit', env: { ...process.env, SETUP_CODE: codeMatch[1] },
+  });
   if (bootstrap.status !== 0) fail('bootstrap suite failed');
 
   console.log('=== 4/8 top up database via CLI (adds French; detects a custom variant scan) ===');
@@ -382,6 +411,112 @@ function fail(msg) {
     check('registration: a closed server turns away a new account', closed.status === 403);
     check('registration: and the account that was already there still signs in',
       (await login(P, 'bystander', 'correcthorsebattery', { 'X-Forwarded-For': '10.5.5.2' })).status === 200);
+  }
+
+  // ---- claiming an install, confirming an address, getting back in ----
+  // A real mail server that only remembers, so the test can read the link the
+  // app actually sent — a token that exists nowhere else by design.
+  {
+    const { startMockSmtp } = require('./mock-smtp');
+    const mail = startMockSmtp({ smtpPort: 3997, httpPort: 3996 });
+    const mailDir = path.join(ROOT, '.test-data-mail');
+    fs.rmSync(mailDir, { recursive: true, force: true });
+
+    // spawned with a pipe rather than start(): reading the setup code out of
+    // the log IS the mechanism, so the test has to read it the same way
+    const child = spawn('node', ['server.js'], {
+      cwd: ROOT,
+      env: {
+        ...process.env, PORT: '3121', DATA_DIR: mailDir,
+        PTCG_SMTP_HOST: 'localhost', PTCG_SMTP_PORT: '3997',
+        PTCG_SMTP_FROM: 'cards@example.com',
+        PTCG_PUBLIC_URL: 'https://cards.example.test',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    children.push(child);
+    let log = '';
+    child.stdout.on('data', (d) => { log += d.toString(); });
+    child.stderr.on('data', (d) => { log += d.toString(); });
+    await waitForPort(3121).catch((e) => fail(e.message));
+    for (let i = 0; i < 40 && !/setup code/i.test(log); i++) await new Promise((r) => setTimeout(r, 100));
+
+    const M = 'http://localhost:3121';
+    const jbody2 = { 'Content-Type': 'application/json' };
+    const inbox = () => jfetch('http://localhost:3996/messages');
+    const emptyInbox = () => jfetch('http://localhost:3996/reset');
+    const linkIn = (msg) => (/(https:\/\/\S+)/.exec(msg.text) || [])[1] || '';
+
+    const code = (/([A-Za-z0-9_-]{32})/.exec(log) || [])[1];
+    check('setup: a fresh install prints a code to its own log', !!code);
+    const st0 = await jfetch(`${M}/api/setup/status`);
+    check('setup: and says it is waiting to be claimed', st0.needed === true);
+
+    const wrong = await fetch(`${M}/api/setup`, { method: 'POST', headers: jbody2, body: JSON.stringify({ token: 'x'.repeat(32), username: 'imposter', password: 'correcthorsebattery' }) });
+    check('setup: the wrong code claims nothing', wrong.status === 403);
+    check('setup: and the install is still unclaimed', (await jfetch(`${M}/api/setup/status`)).needed === true);
+
+    const claimed = await fetch(`${M}/api/setup`, { method: 'POST', headers: jbody2, body: JSON.stringify({
+      token: code, username: 'owner', password: 'correcthorsebattery', email: 'owner@example.test', registration: 'closed',
+    }) });
+    const claimedBody = await claimed.json();
+    check('setup: the right code claims it, and signs you in', claimed.status === 200 && claimedBody.username === 'owner');
+    check('setup: which closes setup for good', (await jfetch(`${M}/api/setup/status`)).needed === false);
+    const again = await fetch(`${M}/api/setup`, { method: 'POST', headers: jbody2, body: JSON.stringify({ token: code, username: 'second', password: 'correcthorsebattery' }) });
+    check('setup: the same code cannot be spent twice', again.status === 409);
+    check('setup: the choices made during setup stuck',
+      (await jfetch(`${M}/api/app-config`)).registration === 'closed');
+
+    // ---- confirming the address ----
+    for (let i = 0; i < 40 && !(await inbox()).length; i++) await new Promise((r) => setTimeout(r, 100));
+    const box1 = await inbox();
+    check('email: claiming the install sends a confirmation', box1.length === 1 && box1[0].to.includes('owner@example.test'));
+    check('email: the link points at the address this install is reached by',
+      linkIn(box1[0]).startsWith('https://cards.example.test/#/verify/'));
+    const vTok = linkIn(box1[0]).split('/verify/')[1];
+    const vOk = await jfetch(`${M}/api/verify-email`, { method: 'POST', headers: jbody2, body: JSON.stringify({ token: vTok }) });
+    check('email: opening it confirms the address', vOk.ok === true && vOk.username === 'owner');
+    const vTwice = await fetch(`${M}/api/verify-email`, { method: 'POST', headers: jbody2, body: JSON.stringify({ token: vTok }) });
+    check('email: the same link cannot be opened twice', vTwice.status === 400);
+    const vJunk = await fetch(`${M}/api/verify-email`, { method: 'POST', headers: jbody2, body: JSON.stringify({ token: 'not-a-real-token' }) });
+    check('email: a made-up link confirms nothing', vJunk.status === 400);
+    {
+      const { DatabaseSync } = require('node:sqlite');
+      const db = new DatabaseSync(path.join(mailDir, 'ptcg.db'), { readOnly: true });
+      const rows = db.prepare('SELECT hash FROM auth_tokens').all();
+      db.close();
+      check('email: the database holds hashes, never a usable link',
+        rows.every((r) => /^[0-9a-f]{64}$/.test(r.hash) && r.hash !== vTok));
+    }
+
+    // ---- forgetting the password ----
+    await emptyInbox();
+    const unknown = await jfetch(`${M}/api/forgot-password`, { method: 'POST', headers: jbody2, body: JSON.stringify({ email: 'stranger@example.test' }) });
+    const known = await jfetch(`${M}/api/forgot-password`, { method: 'POST', headers: jbody2, body: JSON.stringify({ email: 'owner@example.test' }) });
+    check('reset: the answer is the same whether or not we know the address',
+      JSON.stringify(unknown) === JSON.stringify(known) && known.ok === true);
+    for (let i = 0; i < 40 && !(await inbox()).length; i++) await new Promise((r) => setTimeout(r, 100));
+    const box2 = await inbox();
+    check('reset: only the address we actually know gets a letter',
+      box2.length === 1 && box2[0].to.includes('owner@example.test'));
+    const rTok = linkIn(box2[0]).split('/reset/')[1];
+    check('reset: and it is a different link from the confirmation one', !!rTok && rTok !== vTok);
+    const short = await fetch(`${M}/api/reset-password`, { method: 'POST', headers: jbody2, body: JSON.stringify({ token: rTok, newPassword: 'short' }) });
+    check('reset: a too-short password is refused, and the link survives it', short.status === 400);
+    const rOk = await jfetch(`${M}/api/reset-password`, { method: 'POST', headers: jbody2, body: JSON.stringify({ token: rTok, newPassword: 'a-brand-new-password' }) });
+    check('reset: the link sets the new password and signs you in', rOk.ok === true && !!rOk.token);
+    const oldPw = await fetch(`${M}/api/login`, { method: 'POST', headers: jbody2, body: JSON.stringify({ username: 'owner', password: 'correcthorsebattery' }) });
+    const newPw = await fetch(`${M}/api/login`, { method: 'POST', headers: jbody2, body: JSON.stringify({ username: 'owner', password: 'a-brand-new-password' }) });
+    check('reset: the old password stops working', oldPw.status === 401);
+    check('reset: and the new one works', newPw.status === 200);
+    const rTwice = await fetch(`${M}/api/reset-password`, { method: 'POST', headers: jbody2, body: JSON.stringify({ token: rTok, newPassword: 'yet-another-password' }) });
+    check('reset: a spent link cannot be spent again', rTwice.status === 400);
+    // a session cut before the reset must not survive it
+    const stale = claimedBody.token;
+    const staleUse = await fetch(`${M}/api/me`, { headers: { Authorization: 'Bearer ' + stale } });
+    check('reset: every session from before the reset is dead', staleUse.status === 401);
+
+    mail.close();
   }
 
   console.log('=== 7/8 variant importer + read-only mode + offline mirror ===');

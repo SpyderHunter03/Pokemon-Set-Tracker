@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.53.1';
+const APP_VERSION = '3.54.0';
 
 /* ============================================================
  * Storage helpers
@@ -622,8 +622,8 @@ async function apiCall(path, options = {}) {
   return data;
 }
 
-async function doAuth(kind, username, password) {
-  const data = await apiCall(kind, { method: 'POST', body: JSON.stringify({ username, password }) });
+async function doAuth(kind, username, password, email) {
+  const data = await apiCall(kind, { method: 'POST', body: JSON.stringify({ username, password, ...(email ? { email } : {}) }) });
   // Only who we are, never the token: that came back in a cookie this page is
   // not allowed to read, which is the whole point of putting it there.
   auth = { username: data.username };
@@ -1828,6 +1828,178 @@ function printingTally(cards) {
   return { owned, total };
 }
 
+/* ============================================================
+ * Links that arrive by email, and the way back in
+ * ============================================================ */
+
+/** Landing page for a confirmation link. The token is spent on arrival. */
+async function renderVerifyPage(token) {
+  view.replaceChildren(spinner());
+  const done = (msg, ok) => view.replaceChildren(
+    h('div', { class: 'page-head' }, h('h1', {}, ok ? 'Email confirmed' : 'That link did not work')),
+    h('p', { class: 'muted' }, msg),
+    h('a', { class: 'btn', href: '#/' }, 'Back to your cards'),
+  );
+  try {
+    const r = await apiCall('verify-email', { method: 'POST', body: JSON.stringify({ token }) });
+    done(`Thanks, ${r.username} \u2014 this address can now be used to reset your password.`, true);
+  } catch (e) {
+    done(e.message, false);
+  }
+}
+
+/** Landing page for a reset link: choose a new password, and be signed in. */
+async function renderResetPage(token) {
+  const passIn = h('input', { type: 'password', placeholder: `New password (${appConfig.minPassword || 10}+ characters)`, autocomplete: 'new-password' });
+  const againIn = h('input', { type: 'password', placeholder: 'Type it again', autocomplete: 'new-password' });
+  const err = h('p', { class: 'muted small', style: 'color:var(--accent)' });
+  const submit = h('button', { class: 'btn' }, 'Set new password');
+  const form = h('form', {
+    onsubmit: async (e) => {
+      e.preventDefault();
+      err.textContent = '';
+      if (passIn.value !== againIn.value) { err.textContent = 'Those two do not match.'; return; }
+      submit.disabled = true;
+      try {
+        const r = await apiCall('reset-password', { method: 'POST', body: JSON.stringify({ token, newPassword: passIn.value }) });
+        auth = { username: r.username };
+        lsSet('ptcg.auth', auth);
+        updateAccountButton();
+        toast('Password changed \u2014 you are signed in');
+        location.hash = '#/';
+      } catch (ex) {
+        err.textContent = ex.message;
+        submit.disabled = false;
+      }
+    },
+  },
+    h('div', { class: 'field' }, passIn),
+    h('div', { class: 'field' }, againIn),
+    err,
+    submit,
+  );
+  view.replaceChildren(
+    h('div', { class: 'page-head' }, h('h1', {}, 'Choose a new password')),
+    h('p', { class: 'muted' }, 'Setting a new password signs out every device that is currently signed in, including any you did not expect.'),
+    form,
+  );
+}
+
+/** Ask for a reset link. The answer is the same whether or not we know you. */
+function openForgotPassword() {
+  const mailIn = h('input', { type: 'email', placeholder: 'The address on your account', autocomplete: 'email' });
+  const note = h('p', { class: 'muted small' });
+  const send = h('button', { class: 'btn small' }, 'Send me a link');
+  const ov = h('div', { class: 'picker-overlay' },
+    h('div', { class: 'picker-panel' },
+      h('h3', { style: 'margin:0' }, 'Forgotten password'),
+      h('p', { class: 'muted small', style: 'margin:0' }, 'We will send a link that lets you choose a new one. It works once and lasts 45 minutes.'),
+      h('div', { class: 'field' }, mailIn),
+      note,
+      h('div', { class: 'row', style: 'justify-content:flex-end; gap:8px' },
+        h('button', { type: 'button', class: 'btn ghost small', onclick: () => ov.remove() }, 'Close'),
+        send),
+    ));
+  send.addEventListener('click', async () => {
+    send.disabled = true;
+    try {
+      const r = await apiCall('forgot-password', { method: 'POST', body: JSON.stringify({ email: mailIn.value.trim() }) });
+      note.textContent = r.message;
+    } catch (e) {
+      note.textContent = e.message;
+    }
+    send.disabled = false;
+  });
+  (document.querySelector('dialog[open]') || document.body).append(ov);
+}
+
+/** First run: claim the install with the code printed in its own log. */
+function renderSetupPage(status) {
+  const f = (label, input, hint) => h('label', { class: 'ce-field' },
+    h('span', { class: 'muted small' }, label), input,
+    hint ? h('span', { class: 'muted small' }, hint) : null);
+  const t = (ph, type) => h('input', { type: type || 'text', placeholder: ph || '' });
+
+  const codeIn = t('Paste the setup code');
+  const userIn = t('Username');
+  const passIn = t('Password (10+ characters)', 'password');
+  const mailIn = t('you@example.com', 'email');
+  const urlIn = t('https://cards.example.com');
+  const regSel = h('select', {},
+    h('option', { value: 'open' }, 'Anyone may create an account'),
+    h('option', { value: 'closed' }, 'Only me \u2014 no one else may sign up'));
+  const smtpHost = t('smtp.example.com');
+  const smtpPort = t('587');
+  const smtpUser = t('SMTP username');
+  const smtpPass = t('SMTP password', 'password');
+  const smtpFrom = t('Pokemon Tracker <cards@example.com>');
+  const err = h('p', { class: 'muted small', style: 'color:var(--accent)' });
+  const go = h('button', { class: 'btn' }, 'Claim this install');
+
+  const mailBlock = h('div', {},
+    h('p', { class: 'muted small' }, status.mailPossible
+      ? 'Optional. With a mail server the app can confirm addresses and send password resets. Any provider that gives you SMTP credentials will do \u2014 or your own mail server.'
+      : 'The nodemailer package is not installed on this server, so mail is unavailable for now. You can add it later and fill this in from the Administration panel.'),
+    f('SMTP host', smtpHost), f('Port', smtpPort), f('Username', smtpUser),
+    f('Password', smtpPass), f('From address', smtpFrom),
+  );
+
+  go.addEventListener('click', async () => {
+    err.textContent = '';
+    go.disabled = true;
+    try {
+      const r = await fetch('api/setup', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          token: codeIn.value.trim(),
+          username: userIn.value.trim(),
+          password: passIn.value,
+          email: mailIn.value.trim(),
+          registration: regSel.value,
+          publicUrl: urlIn.value.trim(),
+          smtp: smtpHost.value.trim() ? {
+            host: smtpHost.value.trim(), port: smtpPort.value.trim() || '587',
+            secure: (smtpPort.value.trim() || '587') === '465',
+            user: smtpUser.value.trim(), pass: smtpPass.value, from: smtpFrom.value.trim(),
+          } : undefined,
+        }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || `Setup failed (${r.status})`);
+      auth = { username: d.username };
+      lsSet('ptcg.auth', auth);
+      await loadAppConfig();
+      updateAccountButton();
+      toast('This install is yours');
+      location.hash = '#/';
+      route();
+    } catch (ex) {
+      err.textContent = ex.message;
+      go.disabled = false;
+    }
+  });
+
+  view.replaceChildren(
+    h('div', { class: 'page-head' }, h('h1', {}, 'Set up this install')),
+    h('p', { class: 'muted' },
+      'Nobody owns this server yet. Its log printed a setup code when it started \u2014 on Proxmox that is the container console, under Docker it is `docker logs`. Paste it here to claim the install as its administrator.'),
+    h('div', { class: 'ce-field' },
+      f('Setup code', codeIn),
+      h('hr'),
+      f('Your username', userIn),
+      f('Your password', passIn),
+      f('Your email', mailIn, 'Used to confirm the address and to reset your password. Leave blank to skip.'),
+      f('Public address', urlIn, 'Where people reach this app, used to build links in emails.'),
+      f('Who may sign up', regSel),
+      h('hr'),
+      h('h3', { style: 'margin:0' }, 'Sending mail'),
+      mailBlock,
+      err,
+      go,
+    ),
+  );
+}
+
 async function renderPokemonList() {
   view.replaceChildren(spinner());
   let idx;
@@ -2403,6 +2575,31 @@ async function renderAdminArea() {
       })();
     }
 
+    // Does this install know who is knocking? A wrong PTCG_TRUSTED_PROXY has
+    // no symptom until strangers start locking each other out, so the answer
+    // belongs on screen rather than in a lockout.
+    const connArea = h('div', { class: 'ce-field', style: 'margin-bottom:12px' });
+    (async () => {
+      let c;
+      try { c = await apiCall('connection'); } catch { return; }
+      const priv = /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|127\.|::1$|f[cd])/i.test(c.you || '');
+      const verdict = !c.proxyConfigured
+        ? (priv
+          ? 'Nothing is trusted, and this looks like a local address \u2014 right for an app reached directly.'
+          : 'Nothing is trusted: every visitor is counted by the address they connect from.')
+        : c.proxyTrusted
+          ? (priv
+            ? 'A proxy is trusted, but you still look like a local address \u2014 the header is not arriving, so everyone behind the proxy is counted as one. Check PTCG_CLIENT_IP_HEADER or the proxy\u2019s forwarding.'
+            : 'A proxy is trusted and you are being seen as yourself. This is right.')
+          : 'A proxy list is set, but this connection did not come from one of them \u2014 its headers are being ignored.';
+      connArea.append(
+        h('span', { class: 'muted small' }, 'This connection'),
+        h('p', { class: 'muted small', style: 'margin:0' },
+          `You look like ${c.you}${c.peer !== c.you ? ` (arriving via ${c.peer})` : ''}${c.secure ? ' over HTTPS' : ' over plain HTTP'}.`),
+        h('p', { class: 'muted small', style: 'margin:0' }, verdict),
+      );
+    })();
+
     // What this install does when the master moves on. Knowing is safe, so it
     // is the default; applying is not, because a pull carries the master's
     // deletions and skips the review of its additions — so it is opt-in and
@@ -2439,6 +2636,7 @@ async function renderAdminArea() {
     content.replaceChildren(...[
       h('p', { class: 'muted small' }, `Database: ${stats.cards || 0} cards, ${stats.sets || 0} sets, ${stats.printings || 0} custom printings.`),
       updateArea,
+      connArea,
       autoArea.children.length ? autoArea : null,
       // Update from TCGdex: only for installs WITHOUT a master (standalone)
       // and for the maintainer workspace — that's where new sets come from.
@@ -2522,10 +2720,19 @@ function renderAccountModal() {
     autocomplete: 'username', autocapitalize: 'none', autocorrect: 'off', spellcheck: 'false',
   });
   const passIn = h('input', {
-    type: 'password', name: 'password', id: 'ptcg-password', placeholder: 'Password (8+ characters)',
+    type: 'password', name: 'password', id: 'ptcg-password', placeholder: 'Password (10+ characters)',
     autocomplete: 'current-password',
   });
   const submit = h('button', { class: 'btn', style: 'width:100%' }, 'Sign in');
+
+  // An address is the only way back in if the password goes. Optional, because
+  // an install with no mail server configured cannot do anything with one.
+  const mailIn = h('input', {
+    type: 'email', name: 'email', id: 'ptcg-email', placeholder: 'Email (for password resets)',
+    autocomplete: 'email', autocapitalize: 'none', autocorrect: 'off', spellcheck: 'false',
+  });
+  const mailRow = h('div', { class: 'field' }, mailIn);
+  mailRow.hidden = true;
 
   const tabs = h('div', { class: 'tabs' },
     h('button', { type: 'button', class: 'active', onclick: (e) => switchMode('login', e.target) }, 'Sign in'),
@@ -2539,8 +2746,14 @@ function renderAccountModal() {
     // "new-password" tells the password manager this is a sign-up field (offer to
     // generate/save), "current-password" that it's an existing login (offer to fill)
     passIn.setAttribute('autocomplete', m === 'login' ? 'current-password' : 'new-password');
+    mailRow.hidden = !(m === 'register' && appConfig.mailConfigured);
+    forgotRow.hidden = !(m === 'login' && appConfig.mailConfigured);
     err.textContent = '';
   }
+
+  const forgotRow = h('div', { style: 'text-align:right' },
+    h('button', { type: 'button', class: 'btn ghost small', onclick: () => openForgotPassword() }, 'Forgot password?'));
+  forgotRow.hidden = !appConfig.mailConfigured;
 
   const form = h('form', {
     onsubmit: async (e) => {
@@ -2548,7 +2761,7 @@ function renderAccountModal() {
       err.textContent = '';
       submit.disabled = true;
       try {
-        await doAuth(mode, userIn.value.trim(), passIn.value);
+        await doAuth(mode, userIn.value.trim(), passIn.value, mode === 'register' ? mailIn.value.trim() : null);
         toast(mode === 'login' ? 'Signed in — collection synced' : 'Account created — collection synced');
         // signing in was the whole reason this modal was open — get out of the way
         accountModal.close();
@@ -2563,11 +2776,15 @@ function renderAccountModal() {
   },
     tabs,
     h('div', { class: 'field' }, userIn),
+    mailRow,
     h('div', { class: 'field' }, passIn),
     err,
     submit,
   );
-  formsEl.replaceChildren(form);
+  // deliberately outside the form: it opens a panel rather than submitting
+  // anything, and inside it would be a second `.btn` for anything aiming at
+  // the submit button to trip over
+  formsEl.replaceChildren(form, forgotRow);
 }
 
 /* ============================================================
@@ -4133,8 +4350,13 @@ function route() {
   const setMatch = hash.match(/^\/set\/(.+)$/);
   const searchMatch = hash.match(/^\/search\/(.*)$/);
   const pokeMatch = hash.match(/^\/pokemon\/(\d+)$/);
+  // links that arrive by email — they carry a one-shot token in the URL
+  const verifyMatch = hash.match(/^\/verify\/(.+)$/);
+  const resetMatch = hash.match(/^\/reset\/(.+)$/);
   let nav = 'sets';
-  if (setMatch) renderSetPage(decodeURIComponent(setMatch[1]));
+  if (verifyMatch) renderVerifyPage(decodeURIComponent(verifyMatch[1]));
+  else if (resetMatch) renderResetPage(decodeURIComponent(resetMatch[1]));
+  else if (setMatch) renderSetPage(decodeURIComponent(setMatch[1]));
   else if (searchMatch) renderSearchPage(searchMatch[1]);
   else if (hash === '/pokemon') { nav = 'pokemon'; renderPokemonList(); }
   else if (pokeMatch) { nav = 'pokemon'; renderPokemonPage(pokeMatch[1]); }
@@ -4196,7 +4418,15 @@ function renderNoServerGate() {
 detectServer().then(() => {
   if (auth && serverAvailable) pullAndMerge().catch(() => {});
 });
-Promise.all([detectServer(), loadAppConfig()]).then(() => {
+Promise.all([detectServer(), loadAppConfig()]).then(async () => {
   if (!serverAvailable && !serverEverSeen()) { renderNoServerGate(); return; }
+  // An install nobody owns yet asks to be claimed before it does anything
+  // else. Whoever can read the server's log is the person entitled to do it.
+  if (serverAvailable) {
+    try {
+      const st = await (await fetch('api/setup/status')).json();
+      if (st && st.needed) { renderSetupPage(st); return; }
+    } catch { /* not a fresh install, or not reachable — carry on */ }
+  }
   route();
 });

@@ -20,9 +20,24 @@ const { chromium } = require('playwright');
     await page.waitForSelector('.confirm-panel', { state: 'detached' });
   };
 
-  // no database yet → welcome panel with the download button
+  // Nobody owns this install yet, so the first thing it does is ask to be
+  // claimed — with the code its own log printed. Only then is there an
+  // administrator, and only then will it download anything: an unclaimed
+  // server should not let a passer-by start a multi-gigabyte fetch either.
   await page.goto('http://localhost:3111/');
-  await page.waitForSelector('button:has-text("Download card database")');
+  await page.waitForSelector('h1:has-text("Set up this install")');
+  check('a fresh install asks to be claimed before anything else', true);
+  const setupCode = process.env.SETUP_CODE || '';
+  check('the harness could read the setup code from the log', /^[0-9a-f]{32}$/.test(setupCode));
+  const setupFields = page.locator('.ce-field input');
+  await setupFields.nth(0).fill(setupCode);
+  await setupFields.nth(1).fill('ptcgadmin');
+  await setupFields.nth(2).fill('password123');
+  await page.click('button:has-text("Claim this install")');
+
+  // claimed → signed in as the administrator, and now the welcome appears
+  await page.waitForSelector('button:has-text("Download card database")', { timeout: 30000 });
+  check('claiming it signs you in and hands over to the normal welcome', true);
   check('main page offers database download when none exists', true);
 
   // trigger the download and watch the progress UI
@@ -38,21 +53,16 @@ const { chromium } = require('playwright');
   check('build reported done', status.running === false && status.dbExists === true && status.progress && status.progress.done === true);
   check('scanner index was built too', status.hashesOk === true);
 
-  // re-running now requires an admin → unauthenticated POST must be rejected
-  const denied = await page.evaluate(async () => (await fetch('api/build-data', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).status);
+  // Re-running requires an admin. Asked from outside the browser: the page
+  // has been signed in since setup, and a fetch made there carries the session
+  // cookie by itself, so asking on the page proves nothing about strangers.
+  const denied = (await fetch('http://localhost:3111/api/build-data', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+  })).status;
   check('unauthenticated re-run is rejected', denied === 403);
 
-  // first registered account becomes the administrator (fixed creds so the
+  // the account made during setup is the administrator (fixed creds so the
   // test runner can log in later to refresh the catalog)
-  await page.click('#account-btn');
-  await page.waitForSelector('#account-modal[open]');
-  await page.click('.tabs button:has-text("Create account")');
-  await page.fill('#account-forms input[type=text]', 'ptcgadmin');
-  await page.fill('#account-forms input[type=password]', 'password123');
-  await page.click('#account-forms .btn');
-  // signing in closes the modal it was opened for — reopen it for the admin panel
-  await page.waitForFunction(() => !document.getElementById('account-modal').open);
-  check('creating the first account closes the account modal', true);
   await page.click('#account-btn');
   await page.waitForSelector('#account-status button:has-text("Sign out")');
   await page.waitForSelector('#admin-area button:has-text("Update cards from TCGdex")');

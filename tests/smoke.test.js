@@ -898,6 +898,10 @@ const { chromium } = require('playwright');
     });
     await flakyPage.goto('http://localhost:3111/#/set/base1');
     await flakyPage.waitForSelector('.tcg-card');
+    // A tile is on screen before its picture has been asked for, so checking
+    // the moment the tiles appear is a race the test sometimes loses. Wait for
+    // the first drop instead of assuming it has already happened.
+    for (let i = 0; i < 50 && !failed.size; i++) await flakyPage.waitForTimeout(100);
     check('a dropped image request is actually seen as dropped', failed.size > 0);
     await flakyPage.waitForFunction(() => {
       const imgs = [...document.querySelectorAll('.tcg-card img')];

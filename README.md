@@ -263,9 +263,45 @@ Your card database is served openly (CORS `*`), so other apps — or friends run
 
 A note on sourcing: for a public API, share images of your own cards (or scans you made). Pictures saved from marketplaces like Cardmarket are fine as personal reference, but redistributing them publicly isn't yours to license.
 
+## First run
+
+A brand-new install belongs to nobody, and the first person to open it would otherwise become its administrator — which on a public address means whoever finds it first. So the server prints a **setup code** to its own log when it starts with no accounts:
+
+```
+  ┌─────────────────────────────────────────────────────────────┐
+  │  This install has no account yet. Open it in a browser and  │
+  │  enter this setup code to claim it:                         │
+  │                                                             │
+  │      86b58e26d8bad9dd6b11a4ead0e16a3c                       │
+  └─────────────────────────────────────────────────────────────┘
+```
+
+Read it with `docker logs`, `journalctl -u pokemon-set-tracker`, or the Proxmox container console, then open the app and paste it in. Being able to read the log is the proof that the machine is yours. A new code is issued on every restart, and the whole screen closes for good once an account exists.
+
+Setup is also where you choose whether anyone else may sign up, and give the app a mail server if you want one.
+
 ## Cloud sync
 
-With the bundled server running, the 👤 button lets anyone create an account. Collections auto-sync (variant quantities included): local changes push after ~1.5 s; signing in on a new device pulls and merges (per-variant highest count wins, merges never delete). Passwords hashed with scrypt; signed 90-day tokens; rate-limited auth endpoints. Put it behind HTTPS if it faces the internet.
+With the bundled server running, the 👤 button lets people create an account — subject to the registration setting chosen at setup. Collections auto-sync (variant quantities included): local changes push after ~1.5 s; signing in on a new device pulls and merges (per-variant highest count wins, merges never delete).
+
+Sign-in specifics: scrypt with the cost stored alongside each hash (old hashes keep working and are quietly re-hashed on next sign-in), sessions in an httpOnly `SameSite=Strict` cookie, failed attempts throttled per account as well as per address, and a ten-character minimum. Bearer tokens still work for scripts and API clients.
+
+### Sending mail (optional)
+
+With a mail server configured, the app can confirm email addresses and send password resets. Without one, neither is offered and a forgotten password is an admin job. Any provider that gives you SMTP credentials works — Brevo, Resend, SES, Postmark, Mailgun — as does your own mail server.
+
+```bash
+PTCG_SMTP_HOST=smtp.example.com
+PTCG_SMTP_PORT=587           # 465 is TLS from the first byte; 587 upgrades with STARTTLS
+PTCG_SMTP_USER=apikey
+PTCG_SMTP_PASS=…
+PTCG_SMTP_FROM='Pokémon Tracker <cards@example.com>'
+PTCG_PUBLIC_URL=https://cards.example.com   # how links in emails should address this app
+```
+
+The setup screen writes the same settings if you would rather not touch the unit file; the environment wins where both are set. Sending needs the optional `nodemailer` package (`npm install --no-save nodemailer`), in the same spirit as `sharp`.
+
+Confirmation links last 24 hours, reset links 45 minutes, both are single-use, and only the SHA-256 of each is stored — the usable value exists in the email and nowhere else. Setting a new password signs out every device. Asking to reset an address the server has never seen gets exactly the same answer as asking about one it has, so the endpoint cannot be used to find out who has an account here.
 
 ## Project layout
 

@@ -158,6 +158,27 @@ db.exec(`
 try { db.exec('ALTER TABLE sets ADD COLUMN official_count INTEGER'); } catch { /* already present */ }
 try { db.exec('ALTER TABLE binders ADD COLUMN cover TEXT'); } catch { /* already present */ }
 try { db.exec('ALTER TABLE printings ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0'); } catch { /* already present */ }
+// An account had no address to reach it at, so a forgotten password had
+// nowhere to go. Nullable on purpose: accounts that predate this keep working
+// and are asked for one when their owner next has a reason to give it.
+try { db.exec('ALTER TABLE users ADD COLUMN email TEXT'); } catch { /* already present */ }
+try { db.exec('ALTER TABLE users ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0'); } catch { /* already present */ }
+
+/* One-shot links: verify this address, reset this password. Only the SHA-256
+ * of each token is kept — the raw value exists in the email and nowhere else,
+ * so a copy of the database is not a set of skeleton keys. Every one carries
+ * an expiry and is struck off the moment it is spent. */
+db.exec(`
+  CREATE TABLE IF NOT EXISTS auth_tokens (
+    hash    TEXT PRIMARY KEY,               -- sha256 of the token, never the token
+    user_id TEXT NOT NULL,
+    kind    TEXT NOT NULL,                  -- 'verify' | 'reset'
+    created INTEGER NOT NULL,
+    expires INTEGER NOT NULL,
+    used    INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE INDEX IF NOT EXISTS auth_tokens_user ON auth_tokens (user_id, kind);
+`);
 
 // ---------- storage helpers ----------
 
@@ -189,12 +210,21 @@ function writeJSONAtomic(file, obj) {
 
 // ---------- user & collection queries ----------
 
-const rowToUser = (r) => (r ? { id: r.id, username: r.username, display: r.display, salt: r.salt, hash: r.hash, created: r.created, admin: !!r.admin } : null);
+const rowToUser = (r) => (r ? { id: r.id, username: r.username, display: r.display, salt: r.salt, hash: r.hash, created: r.created, admin: !!r.admin, email: r.email || null, emailVerified: !!r.email_verified } : null);
 
 const _getUserById = db.prepare('SELECT * FROM users WHERE id = ?');
 const _getUserByName = db.prepare('SELECT * FROM users WHERE username = ?');
-const _insertUser = db.prepare('INSERT INTO users (id, username, display, salt, hash, created, admin) VALUES (?, ?, ?, ?, ?, ?, ?)');
+const _getUserByEmail = db.prepare('SELECT * FROM users WHERE email IS NOT NULL AND lower(email) = ?');
+const _insertUser = db.prepare('INSERT INTO users (id, username, display, salt, hash, created, admin, email, email_verified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
 const _updateUserHash = db.prepare('UPDATE users SET salt = ?, hash = ? WHERE id = ?');
+const _setUserEmail = db.prepare('UPDATE users SET email = ?, email_verified = ? WHERE id = ?');
+const _markEmailVerified = db.prepare('UPDATE users SET email_verified = 1 WHERE id = ?');
+
+const _putToken = db.prepare('INSERT INTO auth_tokens (hash, user_id, kind, created, expires, used) VALUES (?, ?, ?, ?, ?, 0)');
+const _getToken = db.prepare('SELECT * FROM auth_tokens WHERE hash = ?');
+const _spendToken = db.prepare('UPDATE auth_tokens SET used = 1 WHERE hash = ?');
+const _dropTokensOf = db.prepare('DELETE FROM auth_tokens WHERE user_id = ? AND kind = ?');
+const _dropExpiredTokens = db.prepare('DELETE FROM auth_tokens WHERE expires < ?');
 const _countUsers = db.prepare('SELECT COUNT(*) AS n FROM users');
 const _countAdmins = db.prepare('SELECT COUNT(*) AS n FROM users WHERE admin = 1');
 const _earliestUser = db.prepare('SELECT * FROM users ORDER BY created ASC, id ASC LIMIT 1');
@@ -207,8 +237,10 @@ const getUserById = (id) => rowToUser(_getUserById.get(id));
 const getUserByName = (key) => rowToUser(_getUserByName.get(key));
 const userCount = () => _countUsers.get().n;
 function createUser(u) {
-  _insertUser.run(u.id, u.username, u.display, u.salt, u.hash, u.created, u.admin ? 1 : 0);
+  _insertUser.run(u.id, u.username, u.display, u.salt, u.hash, u.created, u.admin ? 1 : 0,
+    u.email || null, u.emailVerified ? 1 : 0);
 }
+const getUserByEmail = (addr) => rowToUser(_getUserByEmail.get(String(addr || '').trim().toLowerCase()));
 function getCollectionOf(userId) {
   const row = _getCollection.get(userId);
   return row ? { collection: JSON.parse(row.data), updatedAt: row.updated_at } : { collection: {}, updatedAt: 0 };
@@ -330,7 +362,8 @@ function migrateJsonToDb() {
   try {
     for (const [key, u] of Object.entries(users)) {
       if (!u || !u.id) continue;
-      _insertUser.run(u.id, key, u.display || key, u.salt || '', u.hash || '', u.created || new Date(0).toISOString(), u.admin ? 1 : 0);
+      // pre-SQLite accounts predate email entirely — they arrive without one
+      _insertUser.run(u.id, key, u.display || key, u.salt || '', u.hash || '', u.created || new Date(0).toISOString(), u.admin ? 1 : 0, null, 0);
       const coll = readJSON(path.join(COLLECTIONS_DIR, u.id + '.json'), null);
       if (coll && coll.collection) _upsertCollection.run(u.id, JSON.stringify(coll.collection), coll.updatedAt || 0);
       migrated++;
@@ -423,6 +456,37 @@ async function upgradeHashIfStale(user, password) {
  * the password invalidates every existing session (as Uptime Kuma does). */
 function pwFingerprint(hash) {
   return crypto.createHash('sha256').update(hash).digest('hex').slice(0, 16);
+}
+
+/* ---------- one-shot links ----------
+ * The value that goes in the email is 32 random bytes. What the database
+ * keeps is its SHA-256, so somebody holding a copy of ptcg.db holds no usable
+ * link — the same reason passwords are not stored either. Single use, short
+ * life, and issuing a new one of a kind cancels the last, so a reset link
+ * sent twice does not leave two working doors. */
+const EMAIL_TOKEN_BYTES = 32;
+const VERIFY_TTL_MS = 24 * 60 * 60 * 1000;
+const RESET_TTL_MS = 45 * 60 * 1000;
+const tokenHash = (raw) => crypto.createHash('sha256').update(String(raw)).digest('hex');
+
+function issueEmailToken(userId, kind) {
+  const ttl = kind === 'reset' ? RESET_TTL_MS : VERIFY_TTL_MS;
+  const raw = crypto.randomBytes(EMAIL_TOKEN_BYTES).toString('base64url');
+  _dropTokensOf.run(userId, kind);                 // the newest link is the only link
+  const now = Date.now();
+  _putToken.run(tokenHash(raw), userId, kind, now, now + ttl);
+  try { _dropExpiredTokens.run(now); } catch { /* tidying is optional */ }
+  return raw;
+}
+
+/** Spend a token: valid, unused, unexpired, of the right kind. */
+function redeemEmailToken(raw, kind) {
+  if (typeof raw !== 'string' || !raw) return null;
+  const h = tokenHash(raw);
+  const row = _getToken.get(h);
+  if (!row || row.kind !== kind || row.used || row.expires < Date.now()) return null;
+  _spendToken.run(h);
+  return getUserById(row.user_id);
 }
 
 function b64url(buf) {
@@ -640,6 +704,101 @@ function noteLoginFailure(accountKey) {
 }
 
 const clearLoginFailures = (accountKey) => loginFailures.delete(accountKey);
+
+/* ---------- sending mail ----------
+ * SMTP, because it is the one thing every provider speaks: Brevo, Resend,
+ * SES, Postmark and Mailgun all hand out credentials for it, and somebody
+ * with their own mail server just points at that. No provider-specific code,
+ * nothing to sign up for, and an install that configures none of it simply
+ * does not offer the features that need mail.
+ *
+ * nodemailer is an optional dependency, exactly like sharp — a password-reset
+ * mail that silently fails to arrive is worse than a dependency, and TLS
+ * negotiation and AUTH mechanisms are not places to be clever.
+ *
+ * Settings come from the environment first and the settings file second, so a
+ * container can be configured without a wizard and a wizard can configure an
+ * install without editing a unit file. */
+const mailSettings = () => {
+  const s = loadSettings().smtp || {};
+  const e = process.env;
+  const host = e.PTCG_SMTP_HOST || s.host || '';
+  const port = parseInt(e.PTCG_SMTP_PORT || s.port || '587', 10) || 587;
+  return {
+    host,
+    port,
+    // 465 is TLS from the first byte; 587 upgrades with STARTTLS
+    secure: (e.PTCG_SMTP_SECURE || s.secure) === undefined ? port === 465 : String(e.PTCG_SMTP_SECURE ?? s.secure) === 'true' || port === 465,
+    user: e.PTCG_SMTP_USER || s.user || '',
+    pass: e.PTCG_SMTP_PASS || s.pass || '',
+    from: e.PTCG_SMTP_FROM || s.from || (e.PTCG_SMTP_USER || s.user || ''),
+  };
+};
+const mailConfigured = () => !!mailSettings().host;
+
+/** The address to build links with. Behind a proxy the app cannot know its own
+ * public name, so it is told — otherwise the request's own Host is the best
+ * guess available, and a link to the wrong host is worse than none. */
+function publicBase(req) {
+  const set = (process.env.PTCG_PUBLIC_URL || loadSettings().publicUrl || '').replace(/\/+$/, '');
+  if (set) return set;
+  const host = (req && req.headers.host) || `localhost:${PORT}`;
+  return `${req && isSecureRequest(req) ? 'https' : 'http'}://${host}`;
+}
+
+const EMAIL_RE = /^[^\s@]+@[^\s@.]+(\.[^\s@.]+)+$/;
+const nodemailerAvailable = () => { try { require.resolve('nodemailer'); return true; } catch { return false; } };
+
+/* The setup code. Generated once per boot while the install is still empty,
+ * printed to the console, and never written to disk — reading the container
+ * log is the proof of ownership, and a restart simply issues a new one.
+ *
+ * Hex rather than base64url deliberately: this is the one token a person has
+ * to get out of a terminal and into a browser by hand, and `-` and `_` break
+ * double-click selection, look like line noise in a box-drawn banner, and are
+ * easy to mistake for each other read aloud. 128 bits is plenty. */
+let _setupToken = null;
+function setupToken() {
+  if (!_setupToken) _setupToken = crypto.randomBytes(16).toString('hex');
+  return _setupToken;
+}
+
+async function sendMail({ to, subject, text }) {
+  const cfg = mailSettings();
+  if (!cfg.host) throw new Error('No mail server is configured on this install');
+  let nodemailer;
+  try { nodemailer = require('nodemailer'); }
+  catch { throw new Error('Sending mail needs the nodemailer package on the server: npm install --no-save nodemailer'); }
+  const transport = nodemailer.createTransport({
+    host: cfg.host,
+    port: cfg.port,
+    secure: cfg.secure,
+    ...(cfg.user ? { auth: { user: cfg.user, pass: cfg.pass } } : {}),
+  });
+  await transport.sendMail({ from: cfg.from || cfg.user, to, subject, text });
+}
+
+/** Ask someone to confirm the address they gave us. */
+async function sendVerificationMail(req, user) {
+  const raw = issueEmailToken(user.id, 'verify');
+  const link = `${publicBase(req)}/#/verify/${raw}`;
+  await sendMail({
+    to: user.email,
+    subject: 'Confirm your email for Pokémon TCG Tracker',
+    text: `Hello ${user.display},\n\nConfirm this address so your account can be recovered if you ever forget your password:\n\n${link}\n\nThe link works once and expires in 24 hours. If you did not create this account, you can ignore this message — nothing happens until the link is opened.\n`,
+  });
+}
+
+/** Send a way back in. Only ever to an address that has been confirmed. */
+async function sendResetMail(req, user) {
+  const raw = issueEmailToken(user.id, 'reset');
+  const link = `${publicBase(req)}/#/reset/${raw}`;
+  await sendMail({
+    to: user.email,
+    subject: 'Reset your Pokémon TCG Tracker password',
+    text: `Hello ${user.display},\n\nOpen this link to choose a new password:\n\n${link}\n\nIt works once and expires in 45 minutes. Setting a new password signs out every device that is currently signed in.\n\nIf you did not ask for this, no action is needed — your password has not changed.\n`,
+  });
+}
 
 // ---------- http helpers ----------
 
@@ -1671,6 +1830,9 @@ async function handleApi(req, res, pathname, ip, url) {
       masterVersion: s.masterVersion || null,
       masterPulledAt: s.masterPulledAt || null,
       autoUpdate: autoUpdateMode(),
+      mailConfigured: mailConfigured(),
+      registration: registrationMode(),
+      minPassword: MIN_PASSWORD,
       updateCheckedAt: s.updateCheckedAt || null,
       updateRemoteVersion: s.updateRemoteVersion || null,
       master: MASTER_MODE,
@@ -1890,9 +2052,67 @@ async function handleApi(req, res, pathname, ip, url) {
     return sendJSON(res, 200, { lang, images: variantImageManifest(lang) });
   }
 
+  /* ---------- first run ----------
+   * An install with no accounts hands the first person to arrive the keys, and
+   * on a public address that person is whoever finds it first. So setup is
+   * gated by a token the server prints to its own console at boot — you have
+   * to be able to read the container log to claim the install, which is the
+   * one thing a stranger cannot do. Once an account exists, all of this is
+   * closed and stays closed. */
+  if (pathname === '/api/setup/status' && req.method === 'GET') {
+    return sendJSON(res, 200, {
+      needed: userCount() === 0,
+      mailConfigured: mailConfigured(),
+      mailPossible: nodemailerAvailable(),
+    });
+  }
+
+  if (pathname === '/api/setup' && req.method === 'POST') {
+    if (rateLimited(ip, 'setup', 20, 10 * 60 * 1000)) return sendJSON(res, 429, { error: 'Too many attempts, try again later' });
+    if (userCount() > 0) return sendJSON(res, 409, { error: 'This install has already been set up' });
+    const body = await readBody(req);
+    // constant-time, so the answer cannot be found one character at a time
+    const given = Buffer.from(String(body.token || ''));
+    const want = Buffer.from(setupToken());
+    if (given.length !== want.length || !crypto.timingSafeEqual(given, want)) {
+      return sendJSON(res, 403, { error: 'That setup code is not right. It is printed in this server’s log when it starts.' });
+    }
+    if (!USERNAME_RE.test(body.username || '')) return sendJSON(res, 400, { error: 'Username must be 3-30 letters, numbers or underscores' });
+    if (typeof body.password !== 'string' || body.password.length < MIN_PASSWORD) {
+      return sendJSON(res, 400, { error: `Password must be at least ${MIN_PASSWORD} characters` });
+    }
+    const email = typeof body.email === 'string' && body.email.trim() ? body.email.trim() : null;
+    if (email && !EMAIL_RE.test(email)) return sendJSON(res, 400, { error: 'That does not look like an email address' });
+    const s = loadSettings();
+    if (REGISTRATION_MODES.includes(body.registration)) s.registration = body.registration;
+    if (body.smtp && typeof body.smtp === 'object') {
+      s.smtp = {
+        host: String(body.smtp.host || '').trim(),
+        port: parseInt(body.smtp.port, 10) || 587,
+        secure: !!body.smtp.secure,
+        user: String(body.smtp.user || '').trim(),
+        pass: String(body.smtp.pass || ''),
+        from: String(body.smtp.from || '').trim(),
+      };
+    }
+    if (typeof body.publicUrl === 'string' && body.publicUrl.trim()) s.publicUrl = body.publicUrl.trim().replace(/\/+$/, '');
+    saveSettings(s);
+    const salt = crypto.randomBytes(16).toString('hex');
+    const admin = {
+      id: crypto.randomUUID(), username: body.username.toLowerCase(), display: body.username, salt,
+      hash: await hashPassword(body.password, salt), created: new Date().toISOString(),
+      admin: true, email, emailVerified: false,
+    };
+    try { createUser(admin); }
+    catch { return sendJSON(res, 409, { error: 'Username already taken' }); }
+    _setupToken = null;                      // spent: the log line is now useless
+    if (email && mailConfigured()) sendVerificationMail(req, admin).catch(() => { /* the account exists either way */ });
+    return sendSession(req, res, admin);
+  }
+
   if (pathname === '/api/register' && req.method === 'POST') {
     if (rateLimited(ip, 'auth', 20, 10 * 60 * 1000)) return sendJSON(res, 429, { error: 'Too many attempts, try again later' });
-    const { username, password } = await readBody(req);
+    const { username, password, email: rawEmail } = await readBody(req);
     // who may sign up at all — a server anyone can reach is a server anyone
     // can fill with accounts, so this is a choice the install makes
     const mode = registrationMode();
@@ -1903,6 +2123,12 @@ async function handleApi(req, res, pathname, ip, url) {
     if (typeof password !== 'string' || password.length < MIN_PASSWORD) {
       return sendJSON(res, 400, { error: `Password must be at least ${MIN_PASSWORD} characters` });
     }
+    // Optional, and only worth asking for where the install can actually send
+    // mail. Unverified until the link is opened — an address nobody has proved
+    // they own is somebody else's address.
+    const email = typeof rawEmail === 'string' && rawEmail.trim() ? rawEmail.trim() : null;
+    if (email && !EMAIL_RE.test(email)) return sendJSON(res, 400, { error: 'That does not look like an email address' });
+    if (email && getUserByEmail(email)) return sendJSON(res, 409, { error: 'That email address is already in use' });
     const key = username.toLowerCase();
     if (getUserByName(key)) return sendJSON(res, 409, { error: 'Username already taken' });
     const salt = crypto.randomBytes(16).toString('hex');
@@ -1914,12 +2140,17 @@ async function handleApi(req, res, pathname, ip, url) {
       hash: await hashPassword(password, salt),
       created: new Date().toISOString(),
       admin: userCount() === 0, // first account = administrator
+      email,
+      emailVerified: false,
     };
     try {
       createUser(user);
     } catch {
       return sendJSON(res, 409, { error: 'Username already taken' }); // UNIQUE race
     }
+    // the account is made either way; a mail server having a bad day is not a
+    // reason to refuse somebody an account they just created
+    if (email && mailConfigured()) sendVerificationMail(req, user).catch((e) => console.error('Verification mail failed: ' + e.message));
     return sendSession(req, res, user);
   }
 
@@ -1946,12 +2177,81 @@ async function handleApi(req, res, pathname, ip, url) {
     return sendJSON(res, 200, { ok: true }, { 'Set-Cookie': clearSessionCookie() });
   }
 
+  // ---- confirming an address ----
+  if (pathname === '/api/verify-email' && req.method === 'POST') {
+    if (rateLimited(ip, 'token', 30, 10 * 60 * 1000)) return sendJSON(res, 429, { error: 'Too many attempts, try again later' });
+    const body = await readBody(req);
+    const who = redeemEmailToken(body.token, 'verify');
+    if (!who) return sendJSON(res, 400, { error: 'That confirmation link has already been used, or it has expired. Ask for a new one from your account.' });
+    _markEmailVerified.run(who.id);
+    return sendJSON(res, 200, { ok: true, username: who.display });
+  }
+
+  /* ---- forgetting a password ----
+   * The reply never varies. Saying "no such address" here would turn this
+   * endpoint into a way to ask which of a list of addresses has an account,
+   * which is worth more to a stranger than it is to the person who genuinely
+   * forgot. Unverified addresses get nothing sent either — mail to an address
+   * nobody proved they own is mail to somebody else. */
+  if (pathname === '/api/forgot-password' && req.method === 'POST') {
+    if (rateLimited(ip, 'forgot', 10, 15 * 60 * 1000)) return sendJSON(res, 429, { error: 'Too many attempts, try again later' });
+    const body = await readBody(req);
+    const sameAnswer = { ok: true, message: 'If that address belongs to a confirmed account, a reset link is on its way.' };
+    const who = typeof body.email === 'string' ? getUserByEmail(body.email) : null;
+    if (who && who.emailVerified && mailConfigured()) {
+      try { await sendResetMail(req, who); }
+      catch (e) { console.error('Password reset mail failed: ' + e.message); }
+    }
+    return sendJSON(res, 200, sameAnswer);
+  }
+
+  if (pathname === '/api/reset-password' && req.method === 'POST') {
+    if (rateLimited(ip, 'token', 30, 10 * 60 * 1000)) return sendJSON(res, 429, { error: 'Too many attempts, try again later' });
+    const body = await readBody(req);
+    if (typeof body.newPassword !== 'string' || body.newPassword.length < MIN_PASSWORD) {
+      return sendJSON(res, 400, { error: `Password must be at least ${MIN_PASSWORD} characters` });
+    }
+    const who = redeemEmailToken(body.token, 'reset');
+    if (!who) return sendJSON(res, 400, { error: 'That reset link has already been used, or it has expired. Ask for a new one.' });
+    const salt = crypto.randomBytes(16).toString('hex');
+    const hash = await hashPassword(body.newPassword, salt);
+    _updateUserHash.run(salt, hash, who.id);
+    // a reset is also how you throw out whoever might already be in: every
+    // token issued against the old hash stops matching the moment it changes
+    _dropTokensOf.run(who.id, 'reset');
+    clearLoginFailures(who.username);
+    const token = issueToken({ id: who.id, hash });
+    return sendJSON(res, 200, { ok: true, token, username: who.display }, { 'Set-Cookie': sessionCookie(req, token) });
+  }
+
   // authenticated routes
   const user = authUser(req);
   if (!user) return sendJSON(res, 401, { error: 'Not signed in' });
 
   if (pathname === '/api/me' && req.method === 'GET') {
     return sendJSON(res, 200, { username: user.display, admin: isAdminUser(user) });
+  }
+
+  /* What this server thinks of the connection you are on. PTCG_TRUSTED_PROXY
+   * fails silently when it is wrong — the rate limiter simply counts everyone
+   * behind the proxy as one person, and the first anyone hears of it is being
+   * locked out by a stranger's typo. This says it out loud: if `you` is the
+   * address you actually browse from, the setting is right. Administrator
+   * only, because it reports the shape of the network in front of the app. */
+  if (pathname === '/api/connection' && req.method === 'GET') {
+    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    const peer = normIp(req.socket.remoteAddress) || '?';
+    const trusted = isTrustedProxy(peer);
+    return sendJSON(res, 200, {
+      you: ip,
+      peer,
+      proxyTrusted: trusted,
+      proxyConfigured: TRUSTED_PROXIES.length > 0,
+      clientIpHeader: CLIENT_IP_HEADER || null,
+      clientIpHeaderSeen: CLIENT_IP_HEADER ? (req.headers[CLIENT_IP_HEADER] || null) : null,
+      forwardedFor: req.headers['x-forwarded-for'] || null,
+      secure: isSecureRequest(req),
+    });
   }
 
   // ---- change password (invalidates all other sessions via the hash-bound token) ----
@@ -2495,6 +2795,22 @@ if (process.argv.includes('--pull-master')) {
   server.listen(PORT, HOST, () => {
     console.log(`Pokemon TCG Tracker running at http://localhost:${PORT}`);
     console.log(`Data directory: ${DATA_DIR}`);
+
+    // Nobody owns this install yet. Whoever opens it first would otherwise
+    // become its administrator, so the setup screen asks for a code that only
+    // exists here — in the log of the machine running it.
+    if (userCount() === 0 && !READONLY) {
+      console.log('');
+      console.log('  ┌─────────────────────────────────────────────────────────────┐');
+      console.log('  │  This install has no account yet. Open it in a browser and  │');
+      console.log('  │  enter this setup code to claim it:                         │');
+      console.log('  │                                                             │');
+      console.log(`  │      ${setupToken().padEnd(55)}│`);
+      console.log('  │                                                             │');
+      console.log('  │  A new code is issued every time the server restarts.        │');
+      console.log('  └─────────────────────────────────────────────────────────────┘');
+      console.log('');
+    }
 
     // Fresh install with no local card build but a remote database configured
     // (reads cards from a shared CDN): pull the catalog into the DB so cards
