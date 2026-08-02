@@ -203,7 +203,21 @@ Resumable: re-run any time — it skips what's already downloaded and picks up n
 
 The in-app download builds the scanner fingerprints automatically (it installs `sharp`, the one optional dependency, on the fly). Manual equivalent: `npm install --no-save sharp && node scripts/build-hashes.js`.
 
-Env vars: `PORT` (default 3000), `DATA_DIR` (default `./data` — the local SQLite database `ptcg.db` holds the card catalog, user accounts and synced collections; back up that folder and you've backed up everything), `PTCG_CDN_BASE` (override the master database location from `public/config.js`).
+Env vars: `PORT` (default 3000), `DATA_DIR` (default `./data` — the local SQLite database `ptcg.db` holds the card catalog, user accounts and synced collections; back up that folder and you've backed up everything), `PTCG_CDN_BASE` (override the master database location from `public/config.js`), `PTCG_TRUSTED_PROXY` (see below).
+
+### Running behind a reverse proxy
+
+**If anything sits in front of this app, set `PTCG_TRUSTED_PROXY`.** Without it every visitor arrives wearing the proxy's address, so the sign-in rate limit counts them all as one person.
+
+```bash
+PTCG_TRUSTED_PROXY=loopback                  # proxy on the same machine
+PTCG_TRUSTED_PROXY=private                   # any RFC1918 / ULA address
+PTCG_TRUSTED_PROXY=10.0.0.5,172.18.0.0/16    # specific addresses or IPv4 ranges
+```
+
+Set it only for proxies you actually run. `X-Forwarded-For` is a header anyone can put on a request, so the app believes it only when the connection itself came from an address on this list — trusting everyone would let a stranger claim a fresh address on every attempt and never trip the rate limit at all. Leave it unset when the app is reachable directly; the socket address is then the only thing counted, which is the one thing a stranger cannot choose.
+
+The same setting decides whether the session cookie is marked `Secure`: the app reads `X-Forwarded-Proto` from a trusted proxy, so terminating HTTPS at Caddy or Traefik does the right thing with no extra configuration.
 
 Or with Docker: `docker compose up -d`.
 

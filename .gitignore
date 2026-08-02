@@ -1,6 +1,6 @@
 # runtime state (user accounts, synced collections)
 data/
-.test-data/
+.test-data*/
 
 # generated card database (rebuild with scripts/build-data.js)
 public/cdn/

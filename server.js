@@ -352,8 +352,71 @@ migrateJsonToDb();
 
 // ---------- auth ----------
 
-function hashPassword(password, salt) {
-  return crypto.scryptSync(password, salt, 64).toString('hex');
+/* Passwords were hashed with scrypt at Node's defaults, synchronously. Two
+ * problems with that on a server strangers can reach: the defaults (N=16384)
+ * are below what is now advised, and scryptSync stops the entire event loop
+ * for the duration — every sign-in freezes the server for everyone, which is
+ * a lever worth pulling if you want to take the thing down.
+ *
+ * Cost now travels WITH the hash rather than being implied by whatever the
+ * code happened to use the day it ran: `scrypt$N=65536,r=8,p=1$<hex>`. A hash
+ * with no parameters in it is one of the old ones and verifies at the old
+ * cost, so nobody is locked out of an account they already had; the next time
+ * they sign in correctly it is quietly rewritten at the new cost. That is the
+ * only way to raise the floor without a flag day. */
+const SCRYPT_PARAMS = { N: 65536, r: 8, p: 1 };
+const LEGACY_SCRYPT = { N: 16384, r: 8, p: 1 };          // Node's defaults, what the old rows used
+const SCRYPT_KEYLEN = 64;
+// scrypt needs roughly 128*N*r bytes; Node's default ceiling is 32 MB, which
+// N=65536 sails straight past, so say the number rather than discover it
+const scryptMem = (o) => 256 * o.N * o.r;
+
+const paramsOf = (stored) => {
+  const m = /^scrypt\$N=(\d+),r=(\d+),p=(\d+)\$/.exec(String(stored || ''));
+  return m ? { N: +m[1], r: +m[2], p: +m[3] } : LEGACY_SCRYPT;
+};
+const digestOf = (stored) => {
+  const s = String(stored || '');
+  const i = s.lastIndexOf('$');
+  return i < 0 ? s : s.slice(i + 1);
+};
+const isCurrent = (stored) => {
+  const p = paramsOf(stored);
+  return p.N === SCRYPT_PARAMS.N && p.r === SCRYPT_PARAMS.r && p.p === SCRYPT_PARAMS.p;
+};
+
+function scryptHex(password, salt, opts) {
+  return new Promise((resolve, reject) => {
+    crypto.scrypt(password, salt, SCRYPT_KEYLEN,
+      { N: opts.N, r: opts.r, p: opts.p, maxmem: scryptMem(opts) },
+      (err, key) => (err ? reject(err) : resolve(key.toString('hex'))));
+  });
+}
+
+/** A new hash, at today's cost, carrying the cost it was made with. */
+async function hashPassword(password, salt) {
+  const hex = await scryptHex(password, salt, SCRYPT_PARAMS);
+  return `scrypt$N=${SCRYPT_PARAMS.N},r=${SCRYPT_PARAMS.r},p=${SCRYPT_PARAMS.p}$${hex}`;
+}
+
+/** Check a password against a stored hash of any vintage, in constant time. */
+async function verifyPassword(password, salt, stored) {
+  if (typeof password !== 'string' || !stored) return false;
+  let hex;
+  try { hex = await scryptHex(password, salt, paramsOf(stored)); }
+  catch { return false; }
+  const a = Buffer.from(hex), b = Buffer.from(digestOf(stored));
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+/** After a correct sign-in on an old hash, quietly bring it up to date. */
+async function upgradeHashIfStale(user, password) {
+  if (isCurrent(user.hash)) return user;
+  try {
+    const fresh = await hashPassword(password, user.salt);
+    _updateUserHash.run(user.salt, fresh, user.id);
+    return { ...user, hash: fresh };
+  } catch { return user; }        // an upgrade that fails is not a failed login
 }
 
 /** Short fingerprint of a password hash, embedded in tokens so that changing
@@ -396,7 +459,8 @@ function verifyToken(token) {
 
 function authUser(req) {
   const header = req.headers.authorization || '';
-  const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+  // an explicit Bearer token wins; otherwise the cookie the browser holds
+  const token = header.startsWith('Bearer ') ? header.slice(7) : cookieOf(req, SESSION_COOKIE);
   const payload = verifyToken(token);
   if (!payload) return null;
   const user = getUserById(payload.uid);
@@ -404,6 +468,119 @@ function authUser(req) {
   // token bound to the password hash: a password change logs out old sessions
   if (payload.pv && payload.pv !== pwFingerprint(user.hash)) return null;
   return user;
+}
+
+/* ---------- who is actually asking ----------
+ * X-Forwarded-For is a claim, not a fact — anyone can put one on a request.
+ * Believing it unconditionally means the rate limiter counts a different
+ * "address" every time and therefore never fires, which on a server anyone
+ * can reach is the same as having no rate limiter at all. So it is believed
+ * only when the connection itself came from a proxy this install was told
+ * about: PTCG_TRUSTED_PROXY, a comma-separated list of addresses, IPv4 CIDRs,
+ * or the words `loopback`, `private` and `any`. Empty by default, because an
+ * install nobody told about a proxy does not have one. */
+const TRUSTED_PROXIES = (process.env.PTCG_TRUSTED_PROXY || '')
+  .split(',').map((s) => s.trim()).filter(Boolean);
+
+const normIp = (a) => {
+  const s = String(a || '');
+  return s.startsWith('::ffff:') ? s.slice(7) : s;
+};
+
+function proxyMatch(addr, rule) {
+  const a = normIp(addr);
+  if (rule === 'any' || rule === '*') return true;
+  if (rule === 'loopback') return a === '127.0.0.1' || a === '::1';
+  if (rule === 'private') {
+    return /^10\./.test(a) || /^192\.168\./.test(a) ||
+      /^172\.(1[6-9]|2\d|3[01])\./.test(a) || /^f[cd]/i.test(a);
+  }
+  if (rule.includes('/')) {
+    const [net, bitsRaw] = rule.split('/');
+    const bits = parseInt(bitsRaw, 10);
+    const quad = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/;
+    if (!quad.test(a) || !quad.test(net) || !(bits >= 0 && bits <= 32)) return false;
+    const toInt = (x) => x.split('.').reduce((n, o) => ((n * 256) + (parseInt(o, 10) || 0)), 0) >>> 0;
+    const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
+    return (toInt(a) & mask) >>> 0 === (toInt(net) & mask) >>> 0;
+  }
+  return a === normIp(rule);
+}
+const isTrustedProxy = (addr) => TRUSTED_PROXIES.some((r) => proxyMatch(addr, r));
+
+/** The address to hold responsible: walk X-Forwarded-For from the right,
+ * stepping over proxies we trust. With nothing trusted this is the socket,
+ * which is the only thing a stranger cannot choose for themselves. */
+function clientIp(req) {
+  const peer = normIp(req.socket.remoteAddress) || '?';
+  if (!TRUSTED_PROXIES.length || !isTrustedProxy(peer)) return peer;
+  const chain = String(req.headers['x-forwarded-for'] || '')
+    .split(',').map((s) => normIp(s.trim())).filter(Boolean);
+  for (let i = chain.length - 1; i >= 0; i--) if (!isTrustedProxy(chain[i])) return chain[i];
+  return chain[0] || peer;
+}
+
+/** Was the request HTTPS by the time it reached the user? Same trust rule —
+ * this decides whether the session cookie may carry the Secure flag, and
+ * guessing yes on a plain-http install would throw the cookie away. */
+function isSecureRequest(req) {
+  if (req.socket.encrypted) return true;
+  if (TRUSTED_PROXIES.length && isTrustedProxy(normIp(req.socket.remoteAddress))) {
+    const proto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase();
+    if (proto) return proto === 'https';
+  }
+  return false;
+}
+
+/* ---------- the session, in a cookie the page cannot read ----------
+ * The token used to live in localStorage, which means any script that ever
+ * runs on the page — one bad dependency, one reflected string — can read it
+ * and keep the account for the ninety days the token lasts. httpOnly takes
+ * that off the table: the browser sends it and JavaScript cannot see it.
+ *
+ * SameSite=Strict is the other half. Once the browser attaches credentials by
+ * itself, a form on someone else's site could POST to this one on your behalf
+ * — Strict means the cookie simply is not sent on anything that did not start
+ * here. Bearer tokens still work for scripts and for anything that is not a
+ * browser; they were never the part at risk. */
+const SESSION_COOKIE = 'ptcg_session';
+const MIN_PASSWORD = 10;
+
+const cookieOf = (req, name) => {
+  const raw = req.headers.cookie;
+  if (!raw) return null;
+  for (const part of raw.split(';')) {
+    const eq = part.indexOf('=');
+    if (eq > 0 && part.slice(0, eq).trim() === name) return decodeURIComponent(part.slice(eq + 1).trim());
+  }
+  return null;
+};
+
+const sessionCookie = (req, token) => `${SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${Math.floor(TOKEN_TTL_MS / 1000)}` + (isSecureRequest(req) ? '; Secure' : '');
+const clearSessionCookie = () => `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`;
+
+/** Hand back a signed-in session: the cookie for browsers, and the token in
+ * the body for everything else (the tests and any script API client). */
+function sendSession(req, res, user) {
+  const token = issueToken(user);
+  return sendJSON(res, 200, { token, username: user.display }, { 'Set-Cookie': sessionCookie(req, token) });
+}
+
+/* A cookie is sent by the browser whether or not the page meant it, so a
+ * cookie-authenticated write needs to prove it came from here. SameSite=Strict
+ * already does that in every browser that honours it; this is the second lock,
+ * for the ones that do not and for anything that predates it. A Bearer token
+ * is exempt — nothing attaches that by accident. */
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+function crossSiteWrite(req) {
+  if (SAFE_METHODS.has(req.method)) return false;
+  if ((req.headers.authorization || '').startsWith('Bearer ')) return false;
+  if (!cookieOf(req, SESSION_COOKIE)) return false;
+  const site = req.headers['sec-fetch-site'];
+  if (site) return !(site === 'same-origin' || site === 'none');
+  const origin = req.headers.origin;
+  if (!origin) return false;              // not a browser form post
+  try { return new URL(origin).host !== req.headers.host; } catch { return true; }
 }
 
 // ---------- rate limiting (in-memory, per IP) ----------
@@ -422,14 +599,47 @@ function rateLimited(ip, key, max, windowMs) {
   return bucket.count > max;
 }
 
+/* Failed sign-ins are counted per ACCOUNT as well as per address. A per-IP
+ * limit does nothing about one account guessed from a thousand addresses,
+ * which is what credential stuffing actually looks like. Only failures count
+ * — signing in correctly ten times in a row is not an attack — and the window
+ * is short on purpose: a lockout an attacker can trigger at will is itself a
+ * way to keep someone out, so this slows guessing without handing anyone a
+ * lever to lock a known username out for the day. */
+const LOGIN_MAX_FAILURES = 10;
+const LOGIN_LOCKOUT_MS = 15 * 60 * 1000;
+const loginFailures = new Map();
+
+function loginLocked(accountKey) {
+  const b = loginFailures.get(accountKey);
+  if (!b) return false;
+  if (Date.now() - b.start > LOGIN_LOCKOUT_MS) { loginFailures.delete(accountKey); return false; }
+  return b.count >= LOGIN_MAX_FAILURES;
+}
+
+function noteLoginFailure(accountKey) {
+  const now = Date.now();
+  let b = loginFailures.get(accountKey);
+  if (!b || now - b.start > LOGIN_LOCKOUT_MS) { b = { start: now, count: 0 }; loginFailures.set(accountKey, b); }
+  b.count++;
+  if (loginFailures.size > 10000) loginFailures.clear();
+}
+
+const clearLoginFailures = (accountKey) => loginFailures.delete(accountKey);
+
 // ---------- http helpers ----------
 
-function sendJSON(res, code, obj) {
+function sendJSON(res, code, obj, extraHeaders) {
   const body = JSON.stringify(obj);
   res.writeHead(code, {
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store',
-    'Access-Control-Allow-Origin': '*', // token auth, no cookies — safe to open reads
+    // Open on purpose so other apps can read the card database. Note the
+    // absence of Access-Control-Allow-Credentials: without it no browser will
+    // attach the session cookie to a cross-origin call, so opening reads does
+    // not open anybody's account. Do not add it.
+    'Access-Control-Allow-Origin': '*',
+    ...(extraHeaders || {}),
   });
   res.end(body);
 }
@@ -1170,6 +1380,18 @@ const autoUpdateMode = () => {
   return AUTO_UPDATE_MODES.includes(m) ? m : 'check';
 };
 
+/* Who may make an account here. A box on the internet with open registration
+ * collects accounts whether or not anyone wanted it to, so this is a decision
+ * the install makes rather than one the code makes for it. `open` stays the
+ * default because the very first account has to be creatable — and until the
+ * setup screen exists, `closed` would lock an empty install out of itself,
+ * which is why closed still lets account number one through. */
+const REGISTRATION_MODES = ['open', 'closed'];
+const registrationMode = () => {
+  const m = loadSettings().registration;
+  return REGISTRATION_MODES.includes(m) ? m : 'open';
+};
+
 /** Is the master ahead of us? One fetch of catalog.json, no card data moved. */
 async function masterUpdateStatus() {
   const base = configCdnBase();
@@ -1414,6 +1636,9 @@ function variantImageManifest(lang) {
 const USERNAME_RE = /^[a-zA-Z0-9_]{3,30}$/;
 
 async function handleApi(req, res, pathname, ip, url) {
+  // a write that arrived on somebody else's say-so, carrying our cookie
+  if (crossSiteWrite(req)) return sendJSON(res, 403, { error: 'Cross-site request refused' });
+
   if (pathname === '/api/health' && req.method === 'GET') {
     return sendJSON(res, 200, { ok: true, auth: true, version: 2, readonly: READONLY });
   }
@@ -1654,8 +1879,16 @@ async function handleApi(req, res, pathname, ip, url) {
   if (pathname === '/api/register' && req.method === 'POST') {
     if (rateLimited(ip, 'auth', 20, 10 * 60 * 1000)) return sendJSON(res, 429, { error: 'Too many attempts, try again later' });
     const { username, password } = await readBody(req);
+    // who may sign up at all — a server anyone can reach is a server anyone
+    // can fill with accounts, so this is a choice the install makes
+    const mode = registrationMode();
+    if (mode === 'closed' && userCount() > 0) {
+      return sendJSON(res, 403, { error: 'This server is not accepting new accounts' });
+    }
     if (!USERNAME_RE.test(username || '')) return sendJSON(res, 400, { error: 'Username must be 3-30 letters, numbers or underscores' });
-    if (typeof password !== 'string' || password.length < 8) return sendJSON(res, 400, { error: 'Password must be at least 8 characters' });
+    if (typeof password !== 'string' || password.length < MIN_PASSWORD) {
+      return sendJSON(res, 400, { error: `Password must be at least ${MIN_PASSWORD} characters` });
+    }
     const key = username.toLowerCase();
     if (getUserByName(key)) return sendJSON(res, 409, { error: 'Username already taken' });
     const salt = crypto.randomBytes(16).toString('hex');
@@ -1664,7 +1897,7 @@ async function handleApi(req, res, pathname, ip, url) {
       username: key,
       display: username,
       salt,
-      hash: hashPassword(password, salt),
+      hash: await hashPassword(password, salt),
       created: new Date().toISOString(),
       admin: userCount() === 0, // first account = administrator
     };
@@ -1673,19 +1906,30 @@ async function handleApi(req, res, pathname, ip, url) {
     } catch {
       return sendJSON(res, 409, { error: 'Username already taken' }); // UNIQUE race
     }
-    return sendJSON(res, 200, { token: issueToken(user), username: user.display });
+    return sendSession(req, res, user);
   }
 
   if (pathname === '/api/login' && req.method === 'POST') {
     if (rateLimited(ip, 'auth', 20, 10 * 60 * 1000)) return sendJSON(res, 429, { error: 'Too many attempts, try again later' });
     const { username, password } = await readBody(req);
-    const user = getUserByName((username || '').toLowerCase());
+    const key = (username || '').toLowerCase();
+    const user = getUserByName(key);
     const bad = () => sendJSON(res, 401, { error: 'Invalid username or password' });
-    if (!user || typeof password !== 'string') return bad();
-    const hash = hashPassword(password, user.salt);
-    const a = Buffer.from(hash), b = Buffer.from(user.hash);
-    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return bad();
-    return sendJSON(res, 200, { token: issueToken(user), username: user.display });
+    // the account itself is throttled, not only the address asking
+    if (key && loginLocked(key)) {
+      return sendJSON(res, 429, { error: 'Too many failed attempts for this account. Try again in a few minutes.' });
+    }
+    if (!user || typeof password !== 'string') { if (key) noteLoginFailure(key); return bad(); }
+    if (!(await verifyPassword(password, user.salt, user.hash))) { noteLoginFailure(key); return bad(); }
+    clearLoginFailures(key);
+    // right password on an old hash: rewrite it before the token is cut, so
+    // the token is bound to the hash the account will actually have
+    return sendSession(req, res, await upgradeHashIfStale(user, password));
+  }
+
+  if (pathname === '/api/logout' && req.method === 'POST') {
+    // the cookie is httpOnly, so only the server can take it away
+    return sendJSON(res, 200, { ok: true }, { 'Set-Cookie': clearSessionCookie() });
   }
 
   // authenticated routes
@@ -1703,16 +1947,18 @@ async function handleApi(req, res, pathname, ip, url) {
     if (typeof body.currentPassword !== 'string' || typeof body.newPassword !== 'string') {
       return sendJSON(res, 400, { error: 'currentPassword and newPassword are required' });
     }
-    if (body.newPassword.length < 8) return sendJSON(res, 400, { error: 'New password must be at least 8 characters' });
-    const cur = hashPassword(body.currentPassword, user.salt);
-    const a = Buffer.from(cur), b = Buffer.from(user.hash);
-    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return bad();
+    if (body.newPassword.length < MIN_PASSWORD) {
+      return sendJSON(res, 400, { error: `New password must be at least ${MIN_PASSWORD} characters` });
+    }
+    if (!(await verifyPassword(body.currentPassword, user.salt, user.hash))) return bad();
     const salt = crypto.randomBytes(16).toString('hex');
-    const hash = hashPassword(body.newPassword, salt);
+    const hash = await hashPassword(body.newPassword, salt);
     _updateUserHash.run(salt, hash, user.id);
-    // fresh token for THIS session; every previously-issued token no longer
-    // matches the new hash fingerprint and is now dead
-    return sendJSON(res, 200, { ok: true, token: issueToken({ id: user.id, hash }) });
+    clearLoginFailures(user.username);
+    // fresh token (and cookie) for THIS session; every previously-issued token
+    // no longer matches the new hash fingerprint and is now dead
+    const token = issueToken({ id: user.id, hash });
+    return sendJSON(res, 200, { ok: true, token }, { 'Set-Cookie': sessionCookie(req, token) });
   }
 
   // ---- admin: mirror a remote card database onto this server (offline use) ----
@@ -2168,7 +2414,7 @@ async function handleApi(req, res, pathname, ip, url) {
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
-  const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || '?';
+  const ip = clientIp(req);
   try {
     if (url.pathname.startsWith('/api/')) {
       await handleApi(req, res, url.pathname, ip, url);

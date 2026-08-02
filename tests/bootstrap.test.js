@@ -107,9 +107,14 @@ const { chromium } = require('playwright');
     manifest.cors === '*' &&
     manifest.body.images.some((i) => i.card === 'base1-4' && i.variant === 'cracked-ice-holo' && i.urls.low && i.urls.high));
 
-  // non-admins cannot add printings or upload
-  const denied2 = await page.evaluate(async () =>
-    (await fetch('api/custom-variant', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ cardId: 'base1-4', label: 'Hax' }) })).status);
+  // Non-admins cannot add printings or upload. Asked from outside the browser
+  // on purpose: the session now lives in a cookie, so a fetch made ON the page
+  // carries it whether or not a header is set, and asking there would only
+  // prove the admin is still an admin.
+  const denied2 = (await fetch('http://localhost:3111/api/custom-variant', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ cardId: 'base1-4', label: 'Hax' }),
+  })).status;
   check('unauthenticated custom-variant rejected', denied2 === 401 || denied2 === 403);
 
   // ---- removing a printing from the modal, and bringing it back ----

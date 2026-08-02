@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.52.0';
+const APP_VERSION = '3.53.0';
 
 /* ============================================================
  * Storage helpers
@@ -593,8 +593,12 @@ function canTrack() { return !!auth; }
  * with no server behind it (and no memory of ever having one) can do nothing. */
 function serverEverSeen() { return !!lsGet('ptcg.serverSeen'); }
 
+/* The session now rides in an httpOnly cookie the browser attaches by itself,
+ * so there is nothing here to send — and nothing here for a stray script to
+ * steal. A token is still accepted in the header for anything that is not a
+ * browser; older sign-ins that kept one carry on working until they lapse. */
 function authHeaders() {
-  return auth ? { Authorization: 'Bearer ' + auth.token } : {};
+  return auth && auth.token ? { Authorization: 'Bearer ' + auth.token } : {};
 }
 
 let _meCache = null;
@@ -620,7 +624,9 @@ async function apiCall(path, options = {}) {
 
 async function doAuth(kind, username, password) {
   const data = await apiCall(kind, { method: 'POST', body: JSON.stringify({ username, password }) });
-  auth = { token: data.token, username: data.username };
+  // Only who we are, never the token: that came back in a cookie this page is
+  // not allowed to read, which is the whole point of putting it there.
+  auth = { username: data.username };
   lsSet('ptcg.auth', auth);
   await pullAndMerge();
   updateAccountButton();
@@ -658,6 +664,9 @@ function scheduleSyncPush() {
 }
 
 function logout() {
+  // the cookie is httpOnly, so signing out has to be asked for — forgetting it
+  // here would leave the session alive on the server
+  if (auth && serverAvailable) apiCall('logout', { method: 'POST', body: '{}' }).catch(() => { /* leaving anyway */ });
   auth = null;
   _meCache = null;
   lsSet('ptcg.auth', null);

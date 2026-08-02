@@ -241,6 +241,126 @@ function fail(msg) {
     check('binder ceiling: zero pages is still one page', tinyGot.binder.pages === 1);
   }
 
+  // ---- sign-in security ----
+  // Its own pair of servers, because most of this is about what an install
+  // was TOLD about its network, and because filling a rate-limit bucket on
+  // purpose has no business happening on a server other stages still use.
+  {
+    const bare = path.join(ROOT, '.test-data-auth');
+    const proxied = path.join(ROOT, '.test-data-auth-proxy');
+    fs.rmSync(bare, { recursive: true, force: true });
+    fs.rmSync(proxied, { recursive: true, force: true });
+    start('node', ['server.js'], { PORT: '3118', DATA_DIR: bare });
+    start('node', ['server.js'], { PORT: '3119', DATA_DIR: proxied, PTCG_TRUSTED_PROXY: 'loopback' });
+    await waitForPort(3118).catch((e) => fail(e.message));
+    await waitForPort(3119).catch((e) => fail(e.message));
+    const A = 'http://localhost:3118', P = 'http://localhost:3119';
+    const jbody = { 'Content-Type': 'application/json' };
+    const login = (base, u, p, hdrs) => fetch(`${base}/api/login`, { method: 'POST', headers: { ...jbody, ...(hdrs || {}) }, body: JSON.stringify({ username: u, password: p }) });
+
+    // ---- a header anyone can send is not an identity ----
+    // Twenty-five attempts, each claiming to come from somewhere new, each
+    // against a different account so the per-account lock cannot be what
+    // stops them. Nothing is trusted here, so all of it is one address.
+    let spoofed = [];
+    for (let i = 1; i <= 25; i++) {
+      spoofed.push((await login(A, 'ghost' + i, 'xxxxxxxxxx', { 'X-Forwarded-For': '10.9.9.' + i })).status);
+    }
+    check('forwarded-for: a spoofed address buys no extra attempts', spoofed.includes(429));
+    // and the same run against an install that DOES sit behind a proxy: each
+    // client it reports is counted on its own, which is the point of the flag
+    let honoured = [];
+    for (let i = 1; i <= 25; i++) {
+      honoured.push((await login(P, 'ghost' + i, 'xxxxxxxxxx', { 'X-Forwarded-For': '10.9.9.' + i })).status);
+    }
+    check('forwarded-for: a trusted proxy is believed, so real clients are not lumped together',
+      !honoured.includes(429));
+
+    // ---- the account is throttled, not just the address ----
+    const reg = await jfetch(`${P}/api/register`, { method: 'POST', headers: jbody, body: JSON.stringify({ username: 'locky', password: 'correcthorsebattery' }) });
+    check('sign-in: registering hands back a session', !!reg.token);
+    let lockCodes = [];
+    for (let i = 0; i < 11; i++) {
+      lockCodes.push((await login(P, 'locky', 'wrongwrongwrong', { 'X-Forwarded-For': '10.8.8.' + i })).status);
+    }
+    check('sign-in: one account guessed from many addresses still gets locked', lockCodes.includes(429));
+    check('sign-in: the lock holds even against the right password',
+      (await login(P, 'locky', 'correcthorsebattery', { 'X-Forwarded-For': '10.8.8.200' })).status === 429);
+    const other = await jfetch(`${P}/api/register`, { method: 'POST', headers: jbody, body: JSON.stringify({ username: 'bystander', password: 'correcthorsebattery' }) });
+    check('sign-in: locking one account leaves the others alone',
+      !!other.token && (await login(P, 'bystander', 'correcthorsebattery', { 'X-Forwarded-For': '10.8.8.201' })).status === 200);
+
+    // ---- a password from the old scheme still opens the door, then moves on ----
+    {
+      const { DatabaseSync } = require('node:sqlite');
+      const crypto = require('crypto');
+      const db = new DatabaseSync(path.join(proxied, 'ptcg.db'));
+      const salt = crypto.randomBytes(16).toString('hex');
+      // exactly what the previous code wrote: bare hex, no parameters with it
+      const legacy = crypto.scryptSync('oldpassword123', salt, 64).toString('hex');
+      db.prepare('INSERT INTO users (id,username,display,salt,hash,created,admin) VALUES (?,?,?,?,?,?,0)')
+        .run('legacy-user-id', 'oldtimer', 'Oldtimer', salt, legacy, new Date().toISOString());
+      db.close();
+      check('passwords: an old hash carries no parameters', !legacy.includes('$'));
+    }
+    check('passwords: an account made under the old scheme still signs in',
+      (await login(P, 'oldtimer', 'oldpassword123', { 'X-Forwarded-For': '10.7.7.1' })).status === 200);
+    {
+      const { DatabaseSync } = require('node:sqlite');
+      const db = new DatabaseSync(path.join(proxied, 'ptcg.db'), { readOnly: true });
+      const row = db.prepare("SELECT hash FROM users WHERE username='oldtimer'").get();
+      db.close();
+      check('passwords: signing in quietly rewrites it at the new cost',
+        row.hash.startsWith('scrypt$N=65536,r=8,p=1$'));
+    }
+    check('passwords: and it still opens the door after the rewrite',
+      (await login(P, 'oldtimer', 'oldpassword123', { 'X-Forwarded-For': '10.7.7.2' })).status === 200);
+    const shortPw = await fetch(`${P}/api/register`, { method: 'POST', headers: jbody, body: JSON.stringify({ username: 'shorty', password: '123456789' }) });
+    check('passwords: nine characters is not enough', shortPw.status === 400);
+
+    // ---- the session is a cookie the page cannot read ----
+    const cookieOf = (res) => (res.headers.getSetCookie ? res.headers.getSetCookie() : [res.headers.get('set-cookie')]).filter(Boolean);
+    const regRes = await fetch(`${P}/api/register`, { method: 'POST', headers: jbody, body: JSON.stringify({ username: 'cookieuser', password: 'correcthorsebattery' }) });
+    const setCookies = cookieOf(regRes);
+    const session = setCookies.find((c) => c.startsWith('ptcg_session='));
+    check('session: signing in sets a cookie script cannot read', !!session && /HttpOnly/i.test(session));
+    check('session: and one a stranger cannot make the browser send', /SameSite=Strict/i.test(session));
+    check('session: Secure is left off on a plain-http install, or the cookie would be dropped',
+      !/;\s*Secure/i.test(session));
+    const jar = session.split(';')[0];
+    const me = await jfetch(`${P}/api/me`, { headers: { Cookie: jar } });
+    check('session: the cookie alone identifies the account', me.username === 'cookieuser');
+
+    // ---- a cookie travels by itself, so a write has to prove it meant to ----
+    const write = (hdrs) => fetch(`${P}/api/collection`, { method: 'PUT', headers: { ...jbody, ...hdrs }, body: JSON.stringify({ collection: {} }) });
+    check('session: a write from this site is fine',
+      (await write({ Cookie: jar, 'Sec-Fetch-Site': 'same-origin' })).status === 200);
+    check('session: the same write from somebody else’s page is refused',
+      (await write({ Cookie: jar, 'Sec-Fetch-Site': 'cross-site' })).status === 403);
+    check('session: an Origin from elsewhere is refused too',
+      (await write({ Cookie: jar, Origin: 'https://evil.example' })).status === 403);
+    const tok = (await jfetch(`${P}/api/login`, { method: 'POST', headers: { ...jbody, 'X-Forwarded-For': '10.6.6.1' }, body: JSON.stringify({ username: 'cookieuser', password: 'correcthorsebattery' }) })).token;
+    check('session: a Bearer token is exempt — nothing attaches one by accident',
+      (await write({ Authorization: 'Bearer ' + tok, Origin: 'https://evil.example' })).status === 200);
+    const bye = await fetch(`${P}/api/logout`, { method: 'POST', headers: { Cookie: jar, 'Sec-Fetch-Site': 'same-origin' }, body: '{}' });
+    check('session: signing out takes the cookie away rather than hoping the page forgets it',
+      cookieOf(bye).some((c) => c.startsWith('ptcg_session=;') && /Max-Age=0/i.test(c)));
+
+    // ---- who may make an account here ----
+    // (on the proxied server, where the spoofing run has not already spent the
+    //  per-address budget — a 429 would prove nothing about registration)
+    {
+      const f = path.join(proxied, 'settings.json');
+      const s = fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, 'utf8') || '{}') : {};
+      s.registration = 'closed';
+      fs.writeFileSync(f, JSON.stringify(s));
+    }
+    const closed = await fetch(`${P}/api/register`, { method: 'POST', headers: { ...jbody, 'X-Forwarded-For': '10.5.5.1' }, body: JSON.stringify({ username: 'walkin', password: 'correcthorsebattery' }) });
+    check('registration: a closed server turns away a new account', closed.status === 403);
+    check('registration: and the account that was already there still signs in',
+      (await login(P, 'bystander', 'correcthorsebattery', { 'X-Forwarded-For': '10.5.5.2' })).status === 200);
+  }
+
   console.log('=== 7/8 variant importer + read-only mode + offline mirror ===');
 
   // ---- shell caching: app.js must ALWAYS revalidate (a max-age here once
