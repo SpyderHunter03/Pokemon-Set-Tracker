@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.54.1';
+const APP_VERSION = '3.55.0';
 
 /* ============================================================
  * Storage helpers
@@ -624,12 +624,63 @@ async function apiCall(path, options = {}) {
 
 async function doAuth(kind, username, password, email) {
   const data = await apiCall(kind, { method: 'POST', body: JSON.stringify({ username, password, ...(email ? { email } : {}) }) });
+  // the password was one of two things asked for
+  if (data.needTotp) return { needTotp: true, ticket: data.ticket, username: data.username };
   // Only who we are, never the token: that came back in a cookie this page is
   // not allowed to read, which is the whole point of putting it there.
   auth = { username: data.username };
   lsSet('ptcg.auth', auth);
   await pullAndMerge();
   updateAccountButton();
+  return { needTotp: false };
+}
+
+/** Finish a sign-in that wants a second factor. */
+async function finishTotpSignIn(ticket) {
+  const codeIn = h('input', { type: 'text', inputmode: 'numeric', autocomplete: 'one-time-code',
+    placeholder: '6-digit code', maxlength: '7' });
+  const recIn = h('input', { type: 'text', placeholder: 'or a recovery code' });
+  const recRow = h('div', { class: 'field' }, recIn);
+  recRow.hidden = true;
+  const err = h('p', { class: 'muted small', style: 'color:var(--accent); margin:0' });
+  const go = h('button', { class: 'btn small' }, 'Sign in');
+  const ov = h('div', { class: 'picker-overlay' },
+    h('div', { class: 'picker-panel' },
+      h('h3', { style: 'margin:0' }, 'Two-factor'),
+      h('p', { class: 'muted small', style: 'margin:0' }, 'Enter the code from your authenticator app.'),
+      h('div', { class: 'field' }, codeIn),
+      recRow,
+      h('button', { type: 'button', class: 'btn ghost small', onclick: () => { recRow.hidden = !recRow.hidden; codeIn.value = ''; } },
+        'Lost your authenticator?'),
+      err,
+      h('div', { class: 'row', style: 'justify-content:flex-end; gap:8px' },
+        h('button', { type: 'button', class: 'btn ghost small', onclick: () => ov.remove() }, 'Cancel'),
+        go),
+    ));
+  const submit = async () => {
+    err.textContent = '';
+    go.disabled = true;
+    try {
+      const body = recRow.hidden ? { ticket, code: codeIn.value.trim() } : { ticket, recoveryCode: recIn.value.trim() };
+      const d = await apiCall('login/totp', { method: 'POST', body: JSON.stringify(body) });
+      auth = { username: d.username };
+      lsSet('ptcg.auth', auth);
+      ov.remove();
+      accountModal.close();
+      await pullAndMerge();
+      updateAccountButton();
+      renderAccountModal();
+      route();
+      toast('Signed in \u2014 collection synced');
+    } catch (ex) {
+      err.textContent = ex.message;
+      go.disabled = false;
+    }
+  };
+  go.addEventListener('click', submit);
+  codeIn.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
+  (document.querySelector('dialog[open]') || document.body).append(ov);
+  codeIn.focus();
 }
 
 async function pullAndMerge() {
@@ -1913,6 +1964,118 @@ function openForgotPassword() {
   (document.querySelector('dialog[open]') || document.body).append(ov);
 }
 
+/** The two-factor block in the account panel: turn it on, turn it off, and
+ * get a fresh set of recovery codes. */
+function twoFactorSection() {
+  const wrap = h('div', {});
+  const show = (me) => {
+    wrap.replaceChildren(h('hr'), h('h3', { style: 'margin:0 0 6px' }, 'Two-factor'));
+    if (!me.totpEnabled) {
+      wrap.append(
+        h('p', { class: 'muted small' }, 'A code from an authenticator app, on top of your password. Nothing to sign up for and nothing to pay \u2014 it works offline, on your phone.'),
+        h('button', { class: 'btn small', onclick: () => startTotpEnrolment(() => refresh()) }, 'Turn on two-factor'),
+      );
+      return;
+    }
+    const codesBtn = h('button', { class: 'btn ghost small' }, 'New recovery codes');
+    codesBtn.addEventListener('click', () => askPassword('New recovery codes',
+      'The set you have now stops working.', async (pw) => {
+        const d = await apiCall('totp/recovery-codes', { method: 'POST', body: JSON.stringify({ password: pw }) });
+        showRecoveryCodes(d.recoveryCodes); refresh();
+      }));
+    const offBtn = h('button', { class: 'btn ghost small' }, 'Turn off');
+    offBtn.addEventListener('click', () => askPassword('Turn off two-factor',
+      'Your password alone will sign you in again.', async (pw) => {
+        await apiCall('totp/disable', { method: 'POST', body: JSON.stringify({ password: pw }) });
+        toast('Two-factor is off'); refresh();
+      }));
+    wrap.append(
+      h('p', { class: 'muted small' }, `On. ${me.recoveryLeft} recovery code${me.recoveryLeft === 1 ? '' : 's'} left.`),
+      me.recoveryLeft <= 2 ? h('p', { class: 'muted small', style: 'color:var(--accent)' },
+        'Running low \u2014 make a fresh set while you can still sign in.') : null,
+      h('div', { class: 'row', style: 'gap:8px' }, codesBtn, offBtn),
+    );
+  };
+  const refresh = async () => { _meCache = null; try { show(await apiCall('me')); } catch { wrap.replaceChildren(); } };
+  refresh();
+  return wrap;
+}
+
+/** Ask for the current password before something that weakens the account. */
+function askPassword(title, why, andThen) {
+  const pwIn = h('input', { type: 'password', placeholder: 'Your password', autocomplete: 'current-password' });
+  const err = h('p', { class: 'muted small', style: 'color:var(--accent); margin:0' });
+  const go = h('button', { class: 'btn small' }, 'Continue');
+  const ov = h('div', { class: 'picker-overlay' },
+    h('div', { class: 'picker-panel' },
+      h('h3', { style: 'margin:0' }, title),
+      h('p', { class: 'muted small', style: 'margin:0' }, why),
+      h('div', { class: 'field' }, pwIn), err,
+      h('div', { class: 'row', style: 'justify-content:flex-end; gap:8px' },
+        h('button', { type: 'button', class: 'btn ghost small', onclick: () => ov.remove() }, 'Cancel'), go),
+    ));
+  go.addEventListener('click', async () => {
+    err.textContent = ''; go.disabled = true;
+    try { await andThen(pwIn.value); ov.remove(); }
+    catch (e) { err.textContent = e.message; go.disabled = false; }
+  });
+  (document.querySelector('dialog[open]') || document.body).append(ov);
+  pwIn.focus();
+}
+
+/** Recovery codes are shown once. Say so, and make them easy to keep. */
+function showRecoveryCodes(codes) {
+  const ov = h('div', { class: 'picker-overlay' },
+    h('div', { class: 'picker-panel' },
+      h('h3', { style: 'margin:0' }, 'Your recovery codes'),
+      h('p', { class: 'muted small', style: 'margin:0' }, 'Each one signs you in once if you lose your authenticator. This is the only time they are shown \u2014 the server keeps only their hashes.'),
+      h('pre', { style: 'user-select:all; white-space:pre-wrap; font-size:15px; line-height:1.8; margin:0' }, codes.join('\n')),
+      h('div', { class: 'row', style: 'justify-content:flex-end; gap:8px' },
+        h('button', { type: 'button', class: 'btn ghost small', onclick: () => {
+          const blob = new Blob([codes.join('\n') + '\n'], { type: 'text/plain' });
+          const a = h('a', { href: URL.createObjectURL(blob), download: 'ptcg-recovery-codes.txt' });
+          a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+        } }, 'Download'),
+        h('button', { type: 'button', class: 'btn small', onclick: () => ov.remove() }, 'I have saved these')),
+    ));
+  (document.querySelector('dialog[open]') || document.body).append(ov);
+}
+
+/** Enrolment: hand over the secret, then prove the app really has it. */
+async function startTotpEnrolment(done) {
+  let setup;
+  try { setup = await apiCall('totp/setup', { method: 'POST', body: '{}' }); }
+  catch (e) { toast(e.message); return; }
+  // grouped in fours: this is going to be typed by hand on a second device
+  const pretty = setup.secret.replace(/(.{4})/g, '$1 ').trim();
+  const codeIn = h('input', { type: 'text', inputmode: 'numeric', placeholder: '6-digit code', maxlength: '7' });
+  const err = h('p', { class: 'muted small', style: 'color:var(--accent); margin:0' });
+  const go = h('button', { class: 'btn small' }, 'Turn it on');
+  const ov = h('div', { class: 'picker-overlay' },
+    h('div', { class: 'picker-panel' },
+      h('h3', { style: 'margin:0' }, 'Set up two-factor'),
+      h('p', { class: 'muted small', style: 'margin:0' }, 'On this phone, open the link. On a computer, type the key into the authenticator app on your phone.'),
+      h('p', { style: 'margin:0' }, h('a', { class: 'btn small', href: setup.otpauth }, 'Open in my authenticator app')),
+      h('p', { class: 'muted small', style: 'margin:0' }, 'Setup key'),
+      h('pre', { style: 'user-select:all; font-size:16px; letter-spacing:1px; white-space:pre-wrap; margin:0' }, pretty),
+      h('p', { class: 'muted small', style: 'margin:0' }, 'Then enter the code it shows, to prove it arrived:'),
+      h('div', { class: 'field' }, codeIn), err,
+      h('div', { class: 'row', style: 'justify-content:flex-end; gap:8px' },
+        h('button', { type: 'button', class: 'btn ghost small', onclick: () => ov.remove() }, 'Cancel'), go),
+    ));
+  go.addEventListener('click', async () => {
+    err.textContent = ''; go.disabled = true;
+    try {
+      const d = await apiCall('totp/enable', { method: 'POST', body: JSON.stringify({ code: codeIn.value.trim() }) });
+      ov.remove();
+      showRecoveryCodes(d.recoveryCodes);
+      if (done) done();
+    } catch (e) { err.textContent = e.message; go.disabled = false; }
+  });
+  (document.querySelector('dialog[open]') || document.body).append(ov);
+  codeIn.focus();
+}
+
 /** First run: claim the install with the code printed in its own log. */
 function renderSetupPage(status) {
   const f = (label, input, hint) => h('label', { class: 'ce-field' },
@@ -2716,6 +2879,7 @@ function renderAccountModal() {
         h('button', { class: 'btn small', onclick: async () => { try { await pullAndMerge(); toast('Synced'); renderAccountModal(); } catch (e) { toast('Sync failed: ' + e.message); } } }, 'Sync now'),
         h('button', { class: 'btn ghost small', onclick: () => { logout(); renderAccountModal(); route(); } }, 'Sign out'),
       ),
+      twoFactorSection(),
     );
     formsEl.replaceChildren();
     return;
@@ -2774,7 +2938,8 @@ function renderAccountModal() {
       err.textContent = '';
       submit.disabled = true;
       try {
-        await doAuth(mode, userIn.value.trim(), passIn.value, mode === 'register' ? mailIn.value.trim() : null);
+        const r = await doAuth(mode, userIn.value.trim(), passIn.value, mode === 'register' ? mailIn.value.trim() : null);
+        if (r && r.needTotp) { submit.disabled = false; finishTotpSignIn(r.ticket); return; }
         toast(mode === 'login' ? 'Signed in — collection synced' : 'Account created — collection synced');
         // signing in was the whole reason this modal was open — get out of the way
         accountModal.close();

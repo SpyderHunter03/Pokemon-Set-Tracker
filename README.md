@@ -303,6 +303,19 @@ The setup screen writes the same settings if you would rather not touch the unit
 
 Confirmation links last 24 hours, reset links 45 minutes, both are single-use, and only the SHA-256 of each is stored — the usable value exists in the email and nowhere else. Setting a new password signs out every device. Asking to reset an address the server has never seen gets exactly the same answer as asking about one it has, so the endpoint cannot be used to find out who has an account here.
 
+### Two-factor
+
+An authenticator app code on top of the password. Nothing to sign up for, nothing to pay, and it works with the phone in flight mode — the app and the server just agree on the time. Turn it on from 👤 → Two-factor: the app hands over a setup key, and only turns the second factor on once you have typed back a code made from it, so a key that never reached your authenticator cannot lock you out.
+
+Ten single-use recovery codes come with it, shown once. If both the authenticator and the codes are gone, the console is the way back:
+
+```bash
+cd /opt/pokemon-set-tracker
+node server.js --clear-2fa yourname
+```
+
+Turning it off through the app needs your password, so a session someone else has borrowed cannot quietly remove it.
+
 ### Setting a password from the console
 
 Mail is optional, so an install without it needs a way back in that does not involve editing the database. Whoever can run commands on the machine can set a password:

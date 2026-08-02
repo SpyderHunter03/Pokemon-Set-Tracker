@@ -537,6 +537,91 @@ function fail(msg) {
     check('set-password: the previous password stops working', wasReset.status === 401);
     check('set-password: and the console one works', isSet.status === 200);
 
+    // ---- the second factor ----
+    // The codes are generated here independently of the server, from the
+    // secret it hands out — if the two implementations ever disagree, no
+    // authenticator app in the world would work with this either.
+    {
+      const crypto = require('crypto');
+      const b32dec = (str) => {
+        const A = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+        let bits = 0, value = 0; const out = [];
+        for (const ch of str.toUpperCase().replace(/[\s=]/g, '')) {
+          value = (value << 5) | A.indexOf(ch); bits += 5;
+          if (bits >= 8) { out.push((value >>> (bits - 8)) & 255); bits -= 8; }
+        }
+        return Buffer.from(out);
+      };
+      const totp = (secret, at = Date.now()) => {
+        const c = Buffer.alloc(8);
+        c.writeBigUInt64BE(BigInt(Math.floor(at / 30000)));
+        const mac = crypto.createHmac('sha1', b32dec(secret)).update(c).digest();
+        const o = mac[mac.length - 1] & 0x0f;
+        const bin = ((mac[o] & 0x7f) << 24) | (mac[o + 1] << 16) | (mac[o + 2] << 8) | mac[o + 3];
+        return String(bin % 1e6).padStart(6, '0');
+      };
+
+      const pw = 'set-from-the-console';       // where the reset tests left it
+      const signIn = () => fetch(`${M}/api/login`, { method: 'POST', headers: jbody2, body: JSON.stringify({ username: 'owner', password: pw }) }).then((r) => r.json());
+      const first = await signIn();
+      const authed = { ...jbody2, Authorization: 'Bearer ' + first.token };
+
+      const setup = await jfetch(`${M}/api/totp/setup`, { method: 'POST', headers: authed, body: '{}' });
+      check('totp: setup hands over a secret and a link an app can open',
+        /^[A-Z2-7]{32}$/.test(setup.secret || '') && setup.otpauth.startsWith('otpauth://totp/'));
+      const stillOff = await signIn();
+      check('totp: handing over the secret does not turn it on yet', !stillOff.needTotp);
+
+      const wrongEnable = await fetch(`${M}/api/totp/enable`, { method: 'POST', headers: authed, body: JSON.stringify({ code: '000000' }) });
+      check('totp: a wrong code does not turn it on', wrongEnable.status === 400);
+      const enabled = await jfetch(`${M}/api/totp/enable`, { method: 'POST', headers: authed, body: JSON.stringify({ code: totp(setup.secret) }) });
+      check('totp: the right code turns it on and hands back recovery codes',
+        enabled.ok === true && Array.isArray(enabled.recoveryCodes) && enabled.recoveryCodes.length === 10);
+
+      const now = await signIn();
+      check('totp: the password alone stops being a way in', now.needTotp === true && !!now.ticket);
+      const ticketAsSession = await fetch(`${M}/api/me`, { headers: { Authorization: 'Bearer ' + now.ticket } });
+      check('totp: and the half-way ticket is not a session', ticketAsSession.status === 401);
+
+      const badCode = await fetch(`${M}/api/login/totp`, { method: 'POST', headers: jbody2, body: JSON.stringify({ ticket: now.ticket, code: '000000' }) });
+      check('totp: a wrong code is refused', badCode.status === 401);
+      const code = totp(setup.secret);
+      const good = await jfetch(`${M}/api/login/totp`, { method: 'POST', headers: jbody2, body: JSON.stringify({ ticket: now.ticket, code }) });
+      check('totp: the right code finishes the sign-in', !!good.token);
+      const replay = await signIn();
+      const replayed = await fetch(`${M}/api/login/totp`, { method: 'POST', headers: jbody2, body: JSON.stringify({ ticket: replay.ticket, code }) });
+      check('totp: the same code cannot be used twice inside its 30 seconds', replayed.status === 401);
+      // a code from well outside the window is not accepted either
+      const stale = totp(setup.secret, Date.now() - 10 * 60 * 1000);
+      const staleTry = await signIn();
+      const staleRes = await fetch(`${M}/api/login/totp`, { method: 'POST', headers: jbody2, body: JSON.stringify({ ticket: staleTry.ticket, code: stale }) });
+      check('totp: a code from ten minutes ago is too old', staleRes.status === 401);
+
+      // recovery codes
+      const rec = enabled.recoveryCodes[0];
+      const recTry = await signIn();
+      const recOk = await jfetch(`${M}/api/login/totp`, { method: 'POST', headers: jbody2, body: JSON.stringify({ ticket: recTry.ticket, recoveryCode: rec.toUpperCase() }) });
+      check('totp: a recovery code signs in, and case does not matter', !!recOk.token);
+      const recAgain = await signIn();
+      const recTwice = await fetch(`${M}/api/login/totp`, { method: 'POST', headers: jbody2, body: JSON.stringify({ ticket: recAgain.ticket, recoveryCode: rec }) });
+      check('totp: and it only works the once', recTwice.status === 401);
+      const meNow = await jfetch(`${M}/api/me`, { headers: { Authorization: 'Bearer ' + recOk.token } });
+      check('totp: the account says how many recovery codes are left',
+        meNow.totpEnabled === true && meNow.recoveryLeft === 9);
+
+      // turning it off is a password-protected act
+      const offNoPw = await fetch(`${M}/api/totp/disable`, { method: 'POST', headers: { ...jbody2, Authorization: 'Bearer ' + recOk.token }, body: JSON.stringify({ password: 'not-the-password' }) });
+      check('totp: a borrowed session cannot quietly turn it off', offNoPw.status === 401);
+
+      // the console way out, for a lost authenticator on an install with no mail
+      const cleared = spawnSync('node', ['server.js', '--clear-2fa', 'owner'], {
+        cwd: ROOT, encoding: 'utf8', env: { ...process.env, DATA_DIR: mailDir },
+      });
+      check('clear-2fa: the console can turn it off', cleared.status === 0 && /turned off/.test(cleared.stdout || ''));
+      const afterClear = await signIn();
+      check('clear-2fa: and the password alone signs in again', !afterClear.needTotp && !!afterClear.token);
+    }
+
     mail.close();
   }
 

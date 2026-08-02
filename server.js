@@ -163,6 +163,12 @@ try { db.exec('ALTER TABLE printings ADD COLUMN hidden INTEGER NOT NULL DEFAULT 
 // and are asked for one when their owner next has a reason to give it.
 try { db.exec('ALTER TABLE users ADD COLUMN email TEXT'); } catch { /* already present */ }
 try { db.exec('ALTER TABLE users ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0'); } catch { /* already present */ }
+// A second factor, off until somebody turns it on. The secret is stored as
+// written: it has to be given back to the authenticator app on enrolment, and
+// unlike a password there is nothing to compare it against — a hash of it
+// could not generate the next code.
+try { db.exec('ALTER TABLE users ADD COLUMN totp_secret TEXT'); } catch { /* already present */ }
+try { db.exec('ALTER TABLE users ADD COLUMN totp_enabled INTEGER NOT NULL DEFAULT 0'); } catch { /* already present */ }
 
 /* One-shot links: verify this address, reset this password. Only the SHA-256
  * of each token is kept — the raw value exists in the email and nowhere else,
@@ -178,6 +184,17 @@ db.exec(`
     used    INTEGER NOT NULL DEFAULT 0
   );
   CREATE INDEX IF NOT EXISTS auth_tokens_user ON auth_tokens (user_id, kind);
+
+  -- Recovery codes: what gets you in when the phone with the authenticator on
+  -- it is at the bottom of a lake. Hashed, because unlike the TOTP secret
+  -- these only ever need checking, never reproducing.
+  CREATE TABLE IF NOT EXISTS recovery_codes (
+    hash    TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    created INTEGER NOT NULL,
+    used    INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE INDEX IF NOT EXISTS recovery_codes_user ON recovery_codes (user_id);
 `);
 
 // ---------- storage helpers ----------
@@ -210,7 +227,7 @@ function writeJSONAtomic(file, obj) {
 
 // ---------- user & collection queries ----------
 
-const rowToUser = (r) => (r ? { id: r.id, username: r.username, display: r.display, salt: r.salt, hash: r.hash, created: r.created, admin: !!r.admin, email: r.email || null, emailVerified: !!r.email_verified } : null);
+const rowToUser = (r) => (r ? { id: r.id, username: r.username, display: r.display, salt: r.salt, hash: r.hash, created: r.created, admin: !!r.admin, email: r.email || null, emailVerified: !!r.email_verified, totpSecret: r.totp_secret || null, totpEnabled: !!r.totp_enabled } : null);
 
 const _getUserById = db.prepare('SELECT * FROM users WHERE id = ?');
 const _getUserByName = db.prepare('SELECT * FROM users WHERE username = ?');
@@ -225,6 +242,13 @@ const _getToken = db.prepare('SELECT * FROM auth_tokens WHERE hash = ?');
 const _spendToken = db.prepare('UPDATE auth_tokens SET used = 1 WHERE hash = ?');
 const _dropTokensOf = db.prepare('DELETE FROM auth_tokens WHERE user_id = ? AND kind = ?');
 const _dropExpiredTokens = db.prepare('DELETE FROM auth_tokens WHERE expires < ?');
+
+const _setTotp = db.prepare('UPDATE users SET totp_secret = ?, totp_enabled = ? WHERE id = ?');
+const _putRecovery = db.prepare('INSERT INTO recovery_codes (hash, user_id, created, used) VALUES (?, ?, ?, 0)');
+const _getRecovery = db.prepare('SELECT * FROM recovery_codes WHERE hash = ? AND user_id = ?');
+const _spendRecovery = db.prepare('UPDATE recovery_codes SET used = 1 WHERE hash = ?');
+const _dropRecovery = db.prepare('DELETE FROM recovery_codes WHERE user_id = ?');
+const _countRecovery = db.prepare('SELECT COUNT(*) AS n FROM recovery_codes WHERE user_id = ? AND used = 0');
 const _countUsers = db.prepare('SELECT COUNT(*) AS n FROM users');
 const _countAdmins = db.prepare('SELECT COUNT(*) AS n FROM users WHERE admin = 1');
 const _earliestUser = db.prepare('SELECT * FROM users ORDER BY created ASC, id ASC LIMIT 1');
@@ -458,6 +482,113 @@ function pwFingerprint(hash) {
   return crypto.createHash('sha256').update(hash).digest('hex').slice(0, 16);
 }
 
+/* ---------- the second factor ----------
+ * TOTP as RFC 6238 describes it: HMAC-SHA1 over a 30-second counter, six
+ * digits. That is the whole algorithm, and node:crypto has every part of it,
+ * so no dependency arrives for this.
+ *
+ * SHA1 here is not the weakness it sounds like. TOTP does not rely on the
+ * hash being collision-resistant; it relies on HMAC being unforgeable without
+ * the key, which SHA1 still gives. It is also what every authenticator app
+ * actually implements — an installation that insisted on SHA256 would simply
+ * not work with most of them.
+ */
+const TOTP_STEP_MS = 30 * 1000;
+const TOTP_DIGITS = 6;
+// how far either side of now a code is still taken. One step covers a clock a
+// little out of true and the user typing the last digit as it rolls over; more
+// than that just widens the window for someone guessing.
+const TOTP_DRIFT_STEPS = 1;
+const B32_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+
+function base32Encode(buf) {
+  let bits = 0, value = 0, out = '';
+  for (const byte of buf) {
+    value = (value << 8) | byte;
+    bits += 8;
+    while (bits >= 5) { out += B32_ALPHABET[(value >>> (bits - 5)) & 31]; bits -= 5; }
+  }
+  if (bits > 0) out += B32_ALPHABET[(value << (5 - bits)) & 31];
+  return out;
+}
+
+function base32Decode(str) {
+  let bits = 0, value = 0;
+  const out = [];
+  for (const ch of String(str).toUpperCase().replace(/[\s=]/g, '')) {
+    const idx = B32_ALPHABET.indexOf(ch);
+    if (idx < 0) return null;
+    value = (value << 5) | idx;
+    bits += 5;
+    if (bits >= 8) { out.push((value >>> (bits - 8)) & 255); bits -= 8; }
+  }
+  return Buffer.from(out);
+}
+
+/** The six digits for one 30-second step. */
+function totpAt(secretB32, stepIndex) {
+  const key = base32Decode(secretB32);
+  if (!key || !key.length) return null;
+  const counter = Buffer.alloc(8);
+  counter.writeBigUInt64BE(BigInt(stepIndex));
+  const mac = crypto.createHmac('sha1', key).update(counter).digest();
+  const offset = mac[mac.length - 1] & 0x0f;
+  const bin = ((mac[offset] & 0x7f) << 24) | (mac[offset + 1] << 16) | (mac[offset + 2] << 8) | mac[offset + 3];
+  return String(bin % 10 ** TOTP_DIGITS).padStart(TOTP_DIGITS, '0');
+}
+
+/** Does this code belong to this secret, now or a step either side? */
+function totpMatches(secretB32, code, at = Date.now()) {
+  const given = String(code || '').replace(/\s/g, '');
+  if (!/^\d{6}$/.test(given)) return false;
+  const step = Math.floor(at / TOTP_STEP_MS);
+  for (let d = -TOTP_DRIFT_STEPS; d <= TOTP_DRIFT_STEPS; d++) {
+    const want = totpAt(secretB32, step + d);
+    if (!want) return false;
+    const a = Buffer.from(given), b = Buffer.from(want);
+    if (a.length === b.length && crypto.timingSafeEqual(a, b)) return true;
+  }
+  return false;
+}
+
+/* A code, once used, must not work again for the rest of its 30 seconds —
+ * otherwise anyone who watches one being typed has half a minute to use it.
+ * Remembering the (user, step) pairs recently spent is enough; they age out
+ * on their own because a step that old would fail the window check anyway. */
+const spentTotp = new Map();
+function totpAlreadyUsed(userId, code) {
+  const k = userId + ':' + code;
+  const now = Date.now();
+  for (const [key, when] of spentTotp) if (now - when > 3 * TOTP_STEP_MS) spentTotp.delete(key);
+  if (spentTotp.has(k)) return true;
+  spentTotp.set(k, now);
+  return false;
+}
+
+/** Recovery codes: shown once at enrolment, stored only as hashes. */
+function issueRecoveryCodes(userId, howMany = 10) {
+  _dropRecovery.run(userId);
+  const codes = [];
+  for (let i = 0; i < howMany; i++) {
+    // grouped for reading aloud and typing without losing your place
+    const raw = crypto.randomBytes(5).toString('hex');
+    const code = `${raw.slice(0, 5)}-${raw.slice(5)}`;
+    codes.push(code);
+    _putRecovery.run(tokenHash(code), userId, Date.now());
+  }
+  return codes;
+}
+
+/** Spend a recovery code. Case and spacing are not the point. */
+function redeemRecoveryCode(userId, given) {
+  const norm = String(given || '').trim().toLowerCase().replace(/\s/g, '');
+  if (!norm) return false;
+  const row = _getRecovery.get(tokenHash(norm), userId);
+  if (!row || row.used) return false;
+  _spendRecovery.run(row.hash);
+  return true;
+}
+
 /* ---------- one-shot links ----------
  * The value that goes in the email is 32 random bytes. What the database
  * keeps is its SHA-256, so somebody holding a copy of ptcg.db holds no usable
@@ -503,6 +634,23 @@ function issueToken(user) {
   return sign({ uid: user.id, pv: pwFingerprint(user.hash), exp: Date.now() + TOKEN_TTL_MS });
 }
 
+/* Between the password and the second factor there is a moment where somebody
+ * has proved one thing and not the other. This names that moment: bound to
+ * the same password fingerprint, marked so it cannot be mistaken for a
+ * session, and short enough that walking away from a half-finished sign-in
+ * does not leave a door ajar. */
+const TOTP_TICKET_TTL_MS = 5 * 60 * 1000;
+const issueTotpTicket = (user) =>
+  sign({ uid: user.id, pv: pwFingerprint(user.hash), stage: 'totp', exp: Date.now() + TOTP_TICKET_TTL_MS });
+
+function redeemTotpTicket(ticket) {
+  const p = verifyToken(ticket);
+  if (!p || p.stage !== 'totp') return null;
+  const user = getUserById(p.uid);
+  if (!user || p.pv !== pwFingerprint(user.hash)) return null;   // password changed underneath it
+  return user;
+}
+
 function verifyToken(token) {
   if (!token || typeof token !== 'string') return null;
   const dot = token.lastIndexOf('.');
@@ -527,6 +675,10 @@ function authUser(req) {
   const token = header.startsWith('Bearer ') ? header.slice(7) : cookieOf(req, SESSION_COOKIE);
   const payload = verifyToken(token);
   if (!payload) return null;
+  // A ticket says "the password was right", not "you are in". Treating one as
+  // a session would make the second factor a formality anyone could skip by
+  // pointing at the API instead of the form.
+  if (payload.stage) return null;
   const user = getUserById(payload.uid);
   if (!user) return null;
   // token bound to the password hash: a password change logs out old sessions
@@ -2169,7 +2321,40 @@ async function handleApi(req, res, pathname, ip, url) {
     clearLoginFailures(key);
     // right password on an old hash: rewrite it before the token is cut, so
     // the token is bound to the hash the account will actually have
-    return sendSession(req, res, await upgradeHashIfStale(user, password));
+    const settled = await upgradeHashIfStale(user, password);
+    // the password was one of two things asked for
+    if (settled.totpEnabled) {
+      return sendJSON(res, 200, { needTotp: true, ticket: issueTotpTicket(settled), username: settled.display });
+    }
+    return sendSession(req, res, settled);
+  }
+
+  /* The second step. A wrong code here counts against the same account lock as
+   * a wrong password: an attacker who has the password and is guessing six
+   * digits is exactly who this is for. */
+  if (pathname === '/api/login/totp' && req.method === 'POST') {
+    if (rateLimited(ip, 'auth', 20, 10 * 60 * 1000)) return sendJSON(res, 429, { error: 'Too many attempts, try again later' });
+    const body = await readBody(req);
+    const who = redeemTotpTicket(body.ticket);
+    if (!who) return sendJSON(res, 401, { error: 'That sign-in took too long. Start again.' });
+    if (loginLocked(who.username)) {
+      return sendJSON(res, 429, { error: 'Too many failed attempts for this account. Try again in a few minutes.' });
+    }
+    if (typeof body.recoveryCode === 'string' && body.recoveryCode.trim()) {
+      if (!redeemRecoveryCode(who.id, body.recoveryCode)) {
+        noteLoginFailure(who.username);
+        return sendJSON(res, 401, { error: 'That recovery code is not valid, or has already been used.' });
+      }
+      clearLoginFailures(who.username);
+      return sendSession(req, res, who);
+    }
+    const code = String(body.code || '').replace(/\s/g, '');
+    if (!totpMatches(who.totpSecret, code) || totpAlreadyUsed(who.id, code)) {
+      noteLoginFailure(who.username);
+      return sendJSON(res, 401, { error: 'That code is not right, or has already been used.' });
+    }
+    clearLoginFailures(who.username);
+    return sendSession(req, res, who);
   }
 
   if (pathname === '/api/logout' && req.method === 'POST') {
@@ -2229,7 +2414,63 @@ async function handleApi(req, res, pathname, ip, url) {
   if (!user) return sendJSON(res, 401, { error: 'Not signed in' });
 
   if (pathname === '/api/me' && req.method === 'GET') {
-    return sendJSON(res, 200, { username: user.display, admin: isAdminUser(user) });
+    return sendJSON(res, 200, {
+      username: user.display, admin: isAdminUser(user),
+      email: user.email, emailVerified: user.emailVerified,
+      totpEnabled: user.totpEnabled,
+      recoveryLeft: user.totpEnabled ? _countRecovery.get(user.id).n : 0,
+    });
+  }
+
+  /* ---- turning the second factor on ----
+   * Two steps on purpose. The first hands over a secret and enables nothing;
+   * the second wants a code made from it, which is the only proof that the
+   * authenticator app really has it. Enabling on the first step would lock
+   * people out of their own accounts with a secret they never successfully
+   * stored. */
+  if (pathname === '/api/totp/setup' && req.method === 'POST') {
+    if (user.totpEnabled) return sendJSON(res, 409, { error: 'Two-factor is already on for this account' });
+    const secret = base32Encode(crypto.randomBytes(20));
+    _setTotp.run(secret, 0, user.id);
+    const label = encodeURIComponent(`Pokemon TCG Tracker:${user.display}`);
+    return sendJSON(res, 200, {
+      secret,
+      otpauth: `otpauth://totp/${label}?secret=${secret}&issuer=Pokemon%20TCG%20Tracker&digits=${TOTP_DIGITS}&period=30`,
+    });
+  }
+
+  if (pathname === '/api/totp/enable' && req.method === 'POST') {
+    if (user.totpEnabled) return sendJSON(res, 409, { error: 'Two-factor is already on for this account' });
+    const body = await readBody(req);
+    if (!user.totpSecret) return sendJSON(res, 400, { error: 'Start again — there is no pending secret for this account' });
+    if (!totpMatches(user.totpSecret, body.code)) {
+      return sendJSON(res, 400, { error: 'That code is not right. Check the time on the device running your authenticator.' });
+    }
+    _setTotp.run(user.totpSecret, 1, user.id);
+    // shown exactly once; from here on only their hashes exist
+    return sendJSON(res, 200, { ok: true, recoveryCodes: issueRecoveryCodes(user.id) });
+  }
+
+  /* Turning it off needs the password. A borrowed session should not be able
+   * to quietly remove the thing standing in the way of the next one. */
+  if (pathname === '/api/totp/disable' && req.method === 'POST') {
+    const body = await readBody(req);
+    if (!(await verifyPassword(body.password, user.salt, user.hash))) {
+      return sendJSON(res, 401, { error: 'Current password is incorrect' });
+    }
+    _setTotp.run(null, 0, user.id);
+    _dropRecovery.run(user.id);
+    return sendJSON(res, 200, { ok: true });
+  }
+
+  if (pathname === '/api/totp/recovery-codes' && req.method === 'POST') {
+    if (!user.totpEnabled) return sendJSON(res, 400, { error: 'Two-factor is not on for this account' });
+    const body = await readBody(req);
+    if (!(await verifyPassword(body.password, user.salt, user.hash))) {
+      return sendJSON(res, 401, { error: 'Current password is incorrect' });
+    }
+    // a fresh set retires the old one, so a list written down and lost stops working
+    return sendJSON(res, 200, { ok: true, recoveryCodes: issueRecoveryCodes(user.id) });
   }
 
   /* What this server thinks of the connection you are on. PTCG_TRUSTED_PROXY
@@ -2794,6 +3035,21 @@ if (process.argv.includes('--set-password')) {
     try { db.close(); } catch { /* already closed */ }
     process.exit(0);
   })();
+} else if (process.argv.includes('--clear-2fa')) {
+  // The companion to --set-password, and needed for the same reason: with no
+  // mail server, a lost authenticator would otherwise be a lost account.
+  const who = process.argv[process.argv.indexOf('--clear-2fa') + 1];
+  if (!who) {
+    console.error('Usage: node server.js --clear-2fa <username>');
+    process.exit(2);
+  }
+  const user = getUserByName(String(who).toLowerCase());
+  if (!user) { console.error(`No account called ${who} on this install.`); process.exit(1); }
+  _setTotp.run(null, 0, user.id);
+  _dropRecovery.run(user.id);
+  console.log(`Two-factor turned off for ${user.display}. The password alone signs in again — set a new one if you are not sure it is still private.`);
+  try { db.close(); } catch { /* already closed */ }
+  process.exit(0);
 } else if (process.argv.includes('--pull-master')) {
   // CLI mode (no web server): load the master card database into this
   // install's DB and exit. Used by the installers so a fresh install comes
