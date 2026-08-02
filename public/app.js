@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.49.0';
+const APP_VERSION = '3.50.0';
 
 /* ============================================================
  * Storage helpers
@@ -199,15 +199,28 @@ async function getSearchIndex() {
   const raw = await catGet('search?lang=' + encodeURIComponent(lang));
   const rarities = new Set(), types = new Set();
   const species = new Map(); // dexId -> {dex, name, cards: [cardObj]}
+  // A card that lists several Pokémon is named after all of them — "Entei &
+  // Raikou LEGEND" is not what either of them is called. So a shared name may
+  // never name a species while a single-Pokémon card is there to do it. A
+  // species holding nothing but shared cards keeps the shared name until a
+  // printing of its own turns up: an odd-looking name still beats a blank one.
+  const soloNamed = new Set(); // dex numbers named by a one-Pokémon card
   for (const c of raw.cards) {
     if (c.rarity) rarities.add(c.rarity);
     (c.types || []).forEach((t) => t && types.add(t));
     const dex = c.dexId && c.dexId[0];
     if (dex) {
+      const solo = !(c.dexId.length > 1);
       if (!species.has(dex)) species.set(dex, { dex, name: c.name, cards: [] });
       const sp = species.get(dex);
       sp.cards.push(c);
-      if (c.name.length < sp.name.length) sp.name = c.name; // shortest name ≈ species name
+      if (solo) {
+        // any single-Pokémon name beats a shared one; among them, shortest wins
+        if (!soloNamed.has(dex) || c.name.length < sp.name.length) sp.name = c.name;
+        soloNamed.add(dex);
+      } else if (!soloNamed.has(dex) && c.name.length < sp.name.length) {
+        sp.name = c.name; // nothing better on offer yet
+      }
     }
   }
   _searchCache = {
@@ -1323,7 +1336,8 @@ async function openCardEditor(opts) {
   if (src && src.category) catSel.value = src.category;
   const hpIn = h('input', { type: 'number', min: '0', max: '9999', value: src && src.hp ? String(src.hp) : '' });
   const typesIn = txt(src && src.types ? src.types.join(', ') : '', 'e.g. Lightning');
-  const dexIn = txt(src && src.dexId ? src.dexId.join(', ') : '', 'e.g. 133');
+  // one number for most cards, several for a card that is more than one Pokémon
+  const dexIn = txt(src && src.dexId ? src.dexId.join(', ') : '', 'e.g. 133, or 244, 243 for a pair');
   const illusIn = txt(src && src.illustrator, '');
   // new cards (and duplicates) can land in any set
   const setSel = editing ? null : h('select', {}, ...allSets.map((x) => h('option', { value: x.id }, x.name)));
@@ -1521,7 +1535,7 @@ async function openCardEditor(opts) {
         field('Name *', nameIn), field('Number *', numIn),
         field('Rarity', rarityIn), field('Category', catSel),
         field('HP', hpIn), field('Types (comma-separated)', typesIn),
-        field('Pok\u00e9dex numbers', dexIn), field('Illustrator', illusIn),
+        field('Pok\u00e9dex numbers (comma-separated)', dexIn), field('Illustrator', illusIn),
       ),
       h('div', { class: 'ce-field' }, h('span', { class: 'muted small' }, 'Printings this card exists in'),
         h('div', { class: 'ce-vars' }, ...varBoxes.map((b) => b.el))),

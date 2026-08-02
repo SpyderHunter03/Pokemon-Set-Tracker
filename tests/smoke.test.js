@@ -1257,6 +1257,45 @@ const { chromium } = require('playwright');
     await sctx.close();
   }
 
+  // ---- a card that is two Pokemon never names one of them ----
+  // The species name is picked by "shortest name wins", which is right until a
+  // card that lists two Pokemon happens to have the shortest name of the lot.
+  // Its own tab again, so the real database is untouched.
+  {
+    const nctx = await browser.newContext({ serviceWorkers: 'block' });
+    const np = await nctx.newPage();
+    const card = (id, name, dexId) => ({
+      id, localId: id.slice(id.lastIndexOf('-') + 1), name,
+      rarity: 'Rare', category: 'Pokemon', dexId, types: ['Psychic'],
+      variants: { normal: true }, img: null,
+    });
+    await np.route('**/api/catalog/search*', async (route) => {
+      await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ cards: [
+        // dex 151 is the trap: the shared name is SHORTER than the only real one
+        card('namea-1', 'Mew & Mewtwo GX', [151, 150]),
+        card('namea-2', 'Mewtwo-EX Ultra Rare Promo', [151]),
+        // dex 149 has nothing but the shared card, and a name beats a blank
+        card('namea-3', 'Dragonite & Ampharos GX', [149, 181]),
+      ] }) });
+    });
+    await np.goto('http://localhost:3111/#/pokemon');
+    await np.waitForSelector('.set-card .name');
+    const named = async (dex) => (await np.$$eval('.set-card .name', (els) => els.map((e) => e.textContent)))
+      .find((t) => t.startsWith('#' + String(dex).padStart(3, '0')));
+    check('species: a card that is two Pokemon does not get to name one',
+      (await named(151)) === '#151 Mewtwo-EX Ultra Rare Promo');
+    check('species: the shared name is kept when the species has nothing else',
+      (await named(149)) === '#149 Dragonite & Ampharos GX');
+    // and the guard changed only the label — the card still sits where it did
+    await np.goto('http://localhost:3111/#/pokemon/151');
+    await np.waitForSelector('h1');
+    check('species: the page heading uses the guarded name',
+      (await np.textContent('h1')).trim() === '#151 Mewtwo-EX Ultra Rare Promo');
+    check('species: the shared card still appears under its first number',
+      (await np.$$eval('.tcg-card', (els) => els.length)) === 2);
+    await nctx.close();
+  }
+
   console.log(errors.length ? 'JS ERRORS:\n' + errors.join('\n') : 'No JS errors, zero external requests.');
   await browser.close();
   if (failCount) console.log(failCount + ' check(s) FAILED');

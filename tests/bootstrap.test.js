@@ -150,7 +150,10 @@ const { chromium } = require('playwright');
   await page.fill('.ce-panel input[placeholder="e.g. Eevee"]', 'Eevee Star');
   await page.fill('.ce-panel input[placeholder="e.g. Rare Holo"]', 'Rare');
   await page.fill('.ce-panel input[placeholder="e.g. Lightning"]', 'Colorless');
-  await page.fill('.ce-panel input[placeholder="e.g. 133"]', '133');
+  // the field takes a list, and now says so on both the label and the hint
+  check('editor: the Pokedex field says it takes a list',
+    (await page.textContent('.ce-panel .ce-field:has(input[placeholder^="e.g. 133"]) span')).includes('comma-separated'));
+  await page.fill('.ce-panel input[placeholder^="e.g. 133"]', '133');
   await page.setInputFiles('.ce-panel input[type=file]', require('path').join(__dirname, 'fixtures', 'base1-4.png'));
   await page.click('.ce-panel button:has-text("Add card")');
   await page.waitForSelector('.tcg-card[data-card-id="test-promos-1"]');
