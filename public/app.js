@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.50.0';
+const APP_VERSION = '3.51.0';
 
 /* ============================================================
  * Storage helpers
@@ -208,9 +208,14 @@ async function getSearchIndex() {
   for (const c of raw.cards) {
     if (c.rarity) rarities.add(c.rarity);
     (c.types || []).forEach((t) => t && types.add(t));
-    const dex = c.dexId && c.dexId[0];
-    if (dex) {
-      const solo = !(c.dexId.length > 1);
+    // Every Pokémon the card names, not just the first one listed. A card is
+    // filed under each of its Pokédex numbers, so "Celebi & Venusaur-GX" is on
+    // Celebi's page and on Venusaur's — which is what the server has always
+    // done when filling a binder from a species. Deduplicated, because the
+    // same number twice on one card would otherwise count it twice.
+    const dexList = [...new Set((c.dexId || []).filter((d) => d))];
+    const solo = dexList.length < 2;
+    for (const dex of dexList) {
       if (!species.has(dex)) species.set(dex, { dex, name: c.name, cards: [] });
       const sp = species.get(dex);
       sp.cards.push(c);

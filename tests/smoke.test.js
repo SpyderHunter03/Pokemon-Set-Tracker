@@ -1257,9 +1257,11 @@ const { chromium } = require('playwright');
     await sctx.close();
   }
 
-  // ---- a card that is two Pokemon never names one of them ----
-  // The species name is picked by "shortest name wins", which is right until a
-  // card that lists two Pokemon happens to have the shortest name of the lot.
+  // ---- a card that is two Pokemon: whose page, and whose name ----
+  // Two separate rules, tested together because they act on the same cards.
+  // Filing: a card is filed under EVERY Pokedex number it names, so it shows
+  // up on both pages and counts on both. Naming: "shortest name wins" picks
+  // the species label, and a shared name may not win while a solo one exists.
   // Its own tab again, so the real database is untouched.
   {
     const nctx = await browser.newContext({ serviceWorkers: 'block' });
@@ -1271,28 +1273,55 @@ const { chromium } = require('playwright');
     });
     await np.route('**/api/catalog/search*', async (route) => {
       await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ cards: [
-        // dex 151 is the trap: the shared name is SHORTER than the only real one
+        // 151 is the naming trap: the shared name is SHORTER than the only real one.
+        // 150 is the filing case: it exists only as a second number.
         card('namea-1', 'Mew & Mewtwo GX', [151, 150]),
         card('namea-2', 'Mewtwo-EX Ultra Rare Promo', [151]),
-        // dex 149 has nothing but the shared card, and a name beats a blank
+        // 149 has nothing but a shared card, and a name beats a blank
         card('namea-3', 'Dragonite & Ampharos GX', [149, 181]),
+        // the same number listed twice is still one Pokemon
+        card('namea-4', 'Doubled Squirtle', [7, 7]),
       ] }) });
     });
-    await np.goto('http://localhost:3111/#/pokemon');
-    await np.waitForSelector('.set-card .name');
-    const named = async (dex) => (await np.$$eval('.set-card .name', (els) => els.map((e) => e.textContent)))
-      .find((t) => t.startsWith('#' + String(dex).padStart(3, '0')));
+    const listRows = async () => {
+      await np.goto('http://localhost:3111/#/pokemon');
+      await np.waitForSelector('.set-card .count');
+      return np.$$eval('.set-card', (els) => els.map((e) =>
+        e.querySelector('.name').textContent + '|' + e.querySelector('.count').textContent));
+    };
+    const rows = await listRows();
+    const row = (dex) => rows.find((t) => t.startsWith('#' + String(dex).padStart(3, '0')));
+    const cardsOn = async (dex) => {
+      await np.goto('http://localhost:3111/#/pokemon/' + dex);
+      await np.waitForSelector('.tcg-card');
+      return np.$$eval('.tcg-card', (els) => els.map((e) => e.dataset.cardId));
+    };
+
+    // naming
     check('species: a card that is two Pokemon does not get to name one',
-      (await named(151)) === '#151 Mewtwo-EX Ultra Rare Promo');
+      row(151).startsWith('#151 Mewtwo-EX Ultra Rare Promo|'));
     check('species: the shared name is kept when the species has nothing else',
-      (await named(149)) === '#149 Dragonite & Ampharos GX');
-    // and the guard changed only the label — the card still sits where it did
+      row(149).startsWith('#149 Dragonite & Ampharos GX|'));
+
+    // filing: every number, not just the first
+    check('species: a second Pokedex number gets a species of its own',
+      !!row(150) && !!row(181));
+    check('species: the shared card sits on its first Pokemon page',
+      (await cardsOn(151)).includes('namea-1'));
+    check('species: the same card sits on its second Pokemon page too',
+      JSON.stringify(await cardsOn(150)) === JSON.stringify(['namea-1']));
     await np.goto('http://localhost:3111/#/pokemon/151');
-    await np.waitForSelector('h1');
+    await np.waitForSelector('.page-head h1');
     check('species: the page heading uses the guarded name',
-      (await np.textContent('h1')).trim() === '#151 Mewtwo-EX Ultra Rare Promo');
-    check('species: the shared card still appears under its first number',
-      (await np.$$eval('.tcg-card', (els) => els.length)) === 2);
+      (await np.textContent('.page-head h1')).trim() === '#151 Mewtwo-EX Ultra Rare Promo');
+
+    // counting: it counts on both — that is the whole of the chosen rule
+    check('species: both cards count on the Pokemon that owns them outright',
+      row(151).includes('0 / 2 cards'));
+    check('species: a shared card counts on its second Pokemon as well',
+      row(150).includes('0 / 1 cards'));
+    check('species: the same number listed twice counts once',
+      row(7).includes('0 / 1 cards') && (await cardsOn(7)).length === 1);
     await nctx.close();
   }
 
