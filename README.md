@@ -219,6 +219,13 @@ Set it only for proxies you actually run. `X-Forwarded-For` is a header anyone c
 
 The same setting decides whether the session cookie is marked `Secure`: the app reads `X-Forwarded-Proto` from a trusted proxy, so terminating HTTPS at Caddy or Traefik does the right thing with no extra configuration.
 
+**Behind Cloudflare**, also set `PTCG_CLIENT_IP_HEADER=CF-Connecting-IP`. Cloudflare *appends* to `X-Forwarded-For` but *overwrites* `CF-Connecting-IP`, so the latter is a single value the visitor has no say in — better than a list they get to contribute the front of. A Cloudflare Tunnel makes this safe to rely on, because the origin has no public port for anyone to reach around the outside.
+
+```bash
+PTCG_TRUSTED_PROXY=private
+PTCG_CLIENT_IP_HEADER=CF-Connecting-IP
+```
+
 Or with Docker: `docker compose up -d`.
 
 ## Serving images from a CDN you control

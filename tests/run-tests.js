@@ -276,6 +276,29 @@ function fail(msg) {
     check('forwarded-for: a trusted proxy is believed, so real clients are not lumped together',
       !honoured.includes(429));
 
+    // ---- a proxy that SETS its own header beats a list anyone can prepend to ----
+    // A third install, told to read CF-Connecting-IP the way a Cloudflare
+    // origin would. The forwarded chain is left deliberately hostile: the
+    // named header is the one that decides.
+    const cfDir = path.join(ROOT, '.test-data-auth-cf');
+    fs.rmSync(cfDir, { recursive: true, force: true });
+    start('node', ['server.js'], { PORT: '3120', DATA_DIR: cfDir, PTCG_TRUSTED_PROXY: 'loopback', PTCG_CLIENT_IP_HEADER: 'CF-Connecting-IP' });
+    await waitForPort(3120).catch((e) => fail(e.message));
+    const C = 'http://localhost:3120';
+    let cfSame = [];
+    for (let i = 1; i <= 25; i++) {
+      // one real client, pretending to be twenty-five by rewriting the chain
+      cfSame.push((await login(C, 'ghost' + i, 'xxxxxxxxxx',
+        { 'CF-Connecting-IP': '203.0.113.7', 'X-Forwarded-For': '10.4.4.' + i })).status);
+    }
+    check('client-ip header: one client cannot become many by rewriting the chain', cfSame.includes(429));
+    let cfMany = [];
+    for (let i = 1; i <= 10; i++) {
+      cfMany.push((await login(C, 'other' + i, 'xxxxxxxxxx', { 'CF-Connecting-IP': '203.0.113.' + (100 + i) })).status);
+    }
+    check('client-ip header: and genuinely different clients are still counted apart',
+      !cfMany.includes(429));
+
     // ---- the account is throttled, not just the address ----
     const reg = await jfetch(`${P}/api/register`, { method: 'POST', headers: jbody, body: JSON.stringify({ username: 'locky', password: 'correcthorsebattery' }) });
     check('sign-in: registering hands back a session', !!reg.token);

@@ -508,12 +508,26 @@ function proxyMatch(addr, rule) {
 }
 const isTrustedProxy = (addr) => TRUSTED_PROXIES.some((r) => proxyMatch(addr, r));
 
-/** The address to hold responsible: walk X-Forwarded-For from the right,
- * stepping over proxies we trust. With nothing trusted this is the socket,
- * which is the only thing a stranger cannot choose for themselves. */
+/* Some proxies publish the client address in a header of their own, which they
+ * SET rather than append — Cloudflare's CF-Connecting-IP is the common one. A
+ * single value the proxy overwrites is better than a list the client gets to
+ * contribute the front of, so when an install names such a header it is used
+ * in preference to the chain. Still only from a trusted connection: a header
+ * is only as good as the hop that put it there. */
+const CLIENT_IP_HEADER = (process.env.PTCG_CLIENT_IP_HEADER || '').trim().toLowerCase();
+
+/** The address to hold responsible: the proxy's own header if this install
+ * named one, otherwise X-Forwarded-For walked from the right, stepping over
+ * proxies we trust — a stranger can prepend to that list but not append to it.
+ * With nothing trusted this is the socket, which is the only thing a stranger
+ * cannot choose at all. */
 function clientIp(req) {
   const peer = normIp(req.socket.remoteAddress) || '?';
   if (!TRUSTED_PROXIES.length || !isTrustedProxy(peer)) return peer;
+  if (CLIENT_IP_HEADER) {
+    const v = normIp(String(req.headers[CLIENT_IP_HEADER] || '').split(',')[0].trim());
+    if (v) return v;
+  }
   const chain = String(req.headers['x-forwarded-for'] || '')
     .split(',').map((s) => normIp(s.trim())).filter(Boolean);
   for (let i = chain.length - 1; i >= 0; i--) if (!isTrustedProxy(chain[i])) return chain[i];
