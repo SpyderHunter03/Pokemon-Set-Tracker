@@ -195,6 +195,52 @@ function fail(msg) {
     try { fs.unlinkSync(orphanNew); } catch { /* tidy */ }
   }
 
+  // ---- the sixty-page ceiling ----
+  // MAX_BINDER_PAGES clamps in three places and none of them was ever
+  // exercised, because reaching it through the UI means sixty sheets. It does
+  // not: every clamp is server-side, so a set too big to fit and a couple of
+  // absurd page counts reach all three in a few requests.
+  {
+    const reg = await jfetch('http://localhost:3111/api/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'binderceiling', password: 'password123' }) });
+    const cAuth = { 'Content-Type': 'application/json', Authorization: 'Bearer ' + reg.token };
+    // a set far larger than any binder holds: 200 cards, two printings each
+    {
+      const { DatabaseSync } = require('node:sqlite');
+      const cdb = new DatabaseSync(path.join(ROOT, '.test-data', 'ptcg.db'));
+      cdb.exec("INSERT OR REPLACE INTO sets (lang,id,name,official_count,position,source,hidden) VALUES ('en','ceiling','Ceiling Set',200,997,'local',0)");
+      const ins = cdb.prepare("INSERT OR REPLACE INTO cards (lang,id,set_id,local_id,name,variants_csv,position,source,hidden) VALUES ('en',?,'ceiling',?,?,'normal,holo',?,'local',0)");
+      for (let i = 1; i <= 200; i++) ins.run('ceiling-' + i, String(i), 'Ceiling ' + i, i);
+      cdb.close();
+    }
+    // 200 cards x 2 printings = 400 pockets wanted; a 2x2 binder holds 60 x 4 = 240
+    const big = await jfetch('http://localhost:3111/api/binders', { method: 'POST', headers: cAuth, body: JSON.stringify({ name: 'Ceiling', size: 2, fillFromSet: 'ceiling' }) });
+    check('binder ceiling: a fill bigger than the binder stops at sixty pages',
+      big.binder && big.binder.pages === 60);
+    check('binder ceiling: it fills what fits and says how much it left',
+      big.filled === 240 && big.skipped === 160 && big.filled + big.skipped === 400);
+    // and a page count typed past the ceiling comes back at the ceiling
+    const bigId = big.binder.id;
+    await jfetch(`http://localhost:3111/api/binders/${bigId}`, { method: 'PUT', headers: cAuth, body: JSON.stringify({ pages: 500 }) });
+    const bigGot = await jfetch(`http://localhost:3111/api/binders/${bigId}`, { headers: cAuth });
+    check('binder ceiling: asking for five hundred pages gets sixty',
+      bigGot.binder && bigGot.binder.pages === 60 && Object.keys(bigGot.binder.slots).length === 240);
+    // a pocket past the last page of a full-size binder is not a pocket
+    const over = await jfetch('http://localhost:3111/api/binders', { method: 'POST', headers: cAuth, body: JSON.stringify({ name: 'Over', size: 2 }) });
+    const overId = over.binder.id;
+    await jfetch(`http://localhost:3111/api/binders/${overId}`, { method: 'PUT', headers: cAuth, body: JSON.stringify({
+      pages: 61, slots: { 239: { card: 'base1-4', variant: 'normal' }, 240: { card: 'base1-58', variant: 'normal' } },
+    }) });
+    const overGot = await jfetch(`http://localhost:3111/api/binders/${overId}`, { headers: cAuth });
+    check('binder ceiling: a pocket beyond the last page is dropped, the one inside kept',
+      overGot.binder.pages === 60 &&
+      Object.keys(overGot.binder.slots).length === 1 && !!overGot.binder.slots['239']);
+    // the floor holds too — a binder cannot have no pages at all
+    const tiny = await jfetch('http://localhost:3111/api/binders', { method: 'POST', headers: cAuth, body: JSON.stringify({ name: 'Tiny', size: 2 }) });
+    await jfetch(`http://localhost:3111/api/binders/${tiny.binder.id}`, { method: 'PUT', headers: cAuth, body: JSON.stringify({ pages: 0 }) });
+    const tinyGot = await jfetch(`http://localhost:3111/api/binders/${tiny.binder.id}`, { headers: cAuth });
+    check('binder ceiling: zero pages is still one page', tinyGot.binder.pages === 1);
+  }
+
   console.log('=== 7/8 variant importer + read-only mode + offline mirror ===');
 
   // ---- shell caching: app.js must ALWAYS revalidate (a max-age here once
