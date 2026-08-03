@@ -1300,6 +1300,30 @@ function fail(msg) {
   check('share: a new link works and kills the old one',
     shRot.share !== tok1 && /^[a-f0-9]{20}$/.test(shRot.share || '') && oldDead === 404 && newLive === 200);
 
+  /* ---- a link that shows the layout without publishing the inventory ----
+   * The counts have to be absent from the ANSWER, not merely undrawn: a page
+   * is the visitor's to read the source of. */
+  const shHide = await jfetch(`http://localhost:3115/api/binders/${bd.id}/share`,
+    { method: 'POST', headers: buAuth, body: JSON.stringify({ on: true, showHave: false }) });
+  const pubHidden = await jfetch(`http://localhost:3115/api/shared/${shRot.share}`);
+  const hiddenSlots = Object.values(pubHidden.binder.slots).filter((e) => e.card);
+  check('share: hiding the ticks keeps the layout and drops the tally',
+    shHide.showHave === false && pubHidden.showHave === false &&
+    hiddenSlots.length > 0 && hiddenSlots.every((e) => e.have === undefined && e.n === undefined) &&
+    hiddenSlots.every((e) => typeof e.card === 'string' && typeof e.variant === 'string'));
+  // the owner's own view of the binder is untouched by what the link shows
+  const ownerStill = await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { headers: buAuth });
+  check('share: hiding them from visitors does not hide them from you',
+    ownerStill.binder.shareHave === false &&
+    Object.values(ownerStill.binder.slots).some((e) => e.have === 1));
+  // and it is a setting, not a one-way door
+  const shShow = await jfetch(`http://localhost:3115/api/binders/${bd.id}/share`,
+    { method: 'POST', headers: buAuth, body: JSON.stringify({ on: true, showHave: true }) });
+  const pubShown = await jfetch(`http://localhost:3115/api/shared/${shRot.share}`);
+  check('share: showing them again puts the tally back, on the same link',
+    shShow.share === shRot.share && shShow.showHave === true && pubShown.showHave === true &&
+    Object.values(pubShown.binder.slots).some((e) => e.have === 1));
+
   const shListOn = await jfetch('http://localhost:3115/api/binders', { headers: buAuth });
   const shOffAgain = await jfetch(`http://localhost:3115/api/binders/${bd.id}/share`,
     { method: 'POST', headers: buAuth, body: JSON.stringify({ on: false }) });

@@ -666,6 +666,62 @@ const { chromium } = require('playwright');
   check('binder: the ×2 copy count survived the resize',
     (await page.textContent('.pocket[data-pocket="0"] .pocket-qty')) === '×2');
 
+  // ---- moving a card to a page you cannot see from where you are ----
+  // Dragging reaches this spread and carrying reaches the next page you turn
+  // to; neither helps when the destination is thirty sheets away.
+  await page.click('.pocket[data-pocket="3"] .pocket-edit');
+  await page.waitForSelector('.pocket-actions');
+  await page.click('.pocket-actions button:has-text("Move to page")');
+  await page.waitForSelector('.picker-panel .move-grid');
+  check('move: every page is offered, and so is a sheet that does not exist yet',
+    (await page.locator('.picker-panel select option').count()) === 4 &&
+    (await page.textContent('.picker-panel select')).includes('new sheet at the end'));
+  check('move: the destination grid is one sheet of pockets',
+    (await page.locator('.picker-panel .move-cell').count()) === 9);
+  check('move: the pocket it already sits in is not a destination',
+    (await page.locator('.picker-panel .move-cell.self').count()) === 1 &&
+    (await page.locator('.picker-panel .move-cell.self[disabled]').count()) === 1);
+  // a picture lying across pockets cannot be half-covered by a card
+  await page.selectOption('.picker-panel select', '2');                 // page 3, where the art is
+  await page.waitForFunction(() => document.querySelectorAll('.picker-panel .move-cell.art').length > 0);
+  check('move: pockets a picture is lying across are refused, not silently torn',
+    (await page.locator('.picker-panel .move-cell.art[disabled]').count()) ===
+    (await page.locator('.picker-panel .move-cell.art').count()));
+  await page.selectOption('.picker-panel select', 'new');
+  await page.waitForFunction(() =>
+    document.querySelectorAll('.picker-panel .move-cell:not(:disabled)').length === 9);
+  check('move: a brand-new sheet offers nine empty pockets and says what it will do',
+    (await page.textContent('.picker-panel')).includes('A new sheet is added at the end'));
+
+  await page.selectOption('.picker-panel select', '2');
+  await page.waitForFunction(() => !!document.querySelector('.picker-panel .move-cell'));
+  await page.click('.picker-panel .move-cell >> nth=8');                // page 3, last pocket = 26
+  await page.waitForFunction(() => !document.querySelector('.picker-panel'));
+  await page.waitForFunction(() => !document.querySelector('.flip-sheet'));
+  check('move: the card crossed two pages without being carried',
+    (await page.locator('.pocket[data-pocket="26"].filled').count()) === 1 &&
+    (await page.locator('.pocket[data-pocket="3"].filled').count()) === 0);
+  // a move you cannot see is a move you would have to go and verify — so it
+  // takes you there instead
+  check('move: the book opens on where the card landed',
+    (await page.textContent('#view')).includes('Pages 2–3 of 3'));
+
+  // put it back, so the rest of the suite finds the binder as it left it
+  await page.click('.pocket[data-pocket="26"] .pocket-edit');
+  await page.waitForSelector('.pocket-actions');
+  await page.click('.pocket-actions button:has-text("Move to page")');
+  await page.waitForSelector('.picker-panel .move-grid');
+  await page.selectOption('.picker-panel select', '0');
+  await page.waitForFunction(() => !!document.querySelector('.picker-panel .move-cell'));
+  await page.click('.picker-panel .move-cell >> nth=3');
+  await page.waitForFunction(() => !document.querySelector('.picker-panel'));
+  await page.waitForSelector('.pocket[data-pocket="3"].filled');
+  await page.waitForFunction(() => !document.querySelector('.flip-sheet'));   // the turn carries a copy of the old page
+  check('move: and it goes back the same way, leaving no trace',
+    (await page.locator('.pocket[data-pocket="3"].filled').count()) === 1 &&
+    (await page.locator('.pocket[data-pocket="26"].filled').count()) === 0 &&
+    (await page.textContent('#view')).includes('1 / 10 in hand'));
+
   // ---- select to print: hand-pick pockets across pages, print just those ----
   await page.click('button:has-text("Done")');                           // leave edit mode
   await page.waitForSelector('button:has-text("Select to print")');
@@ -755,8 +811,32 @@ const { chromium } = require('playwright');
       (await vp.textContent('#view')).includes('1 / 10 in hand'));
     await vp.click('#card-modal button:has-text("Close")');
 
-    // taking it back: one switch, and every copy of the address is dead
+    // ---- the same link, without publishing what is in the house ----
     await page.click('.binder-cover');
+    await page.waitForSelector('button:has-text("Share")');
+    await page.click('button:has-text("Share")');
+    await page.waitForSelector('.picker-panel .move-grid, .picker-panel select');
+    const shareSelects = page.locator('.picker-panel select');
+    await shareSelects.nth(1).selectOption('hide');
+    await page.waitForFunction(() =>
+      (document.querySelector('.picker-panel').textContent || '').includes('is not sent at all'));
+    await page.click('.picker-panel button:has-text("Close")');
+    await vp.reload();
+    await vp.waitForSelector('.binder-cover-page');
+    check('share: hiding the ticks leaves the binder and takes the tally',
+      (await vp.textContent('#view')).includes('10 cards') &&
+      !(await vp.textContent('#view')).includes('in hand'));
+    await vp.click('.binder-cover-page');
+    await vp.waitForSelector('.binder-grid .pocket.filled');
+    check('share: and no pocket claims to be in hand',
+      (await vp.locator('.binder-grid .pocket.have').count()) === 0 &&
+      (await vp.locator('.binder-grid .pocket-badge').count()) === 0 &&
+      (await vp.locator('.binder-grid .pocket.filled').count()) > 0);
+    // the owner's own page is unaffected by what the link chooses to say
+    check('share: the owner still sees their own ticks',
+      (await page.textContent('#view')).includes('1 / 10 in hand'));
+
+    // taking it back: one switch, and every copy of the address is dead
     await page.waitForSelector('button:has-text("Share")');
     await page.click('button:has-text("Share")');
     await page.waitForSelector('.picker-panel select');

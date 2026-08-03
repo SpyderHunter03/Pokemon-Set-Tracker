@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.61.0';
+const APP_VERSION = '3.62.0';
 
 /* ============================================================
  * Storage helpers
@@ -3738,12 +3738,15 @@ async function renderBinderPage(id, shareToken = null) {
   const shared = !!shareToken;
   if (!shared && !auth) return binderGate();
   view.replaceChildren(spinner());
-  let binder, cardsById, setsById, owner = null;
+  let binder, cardsById, setsById, owner = null, showHave = true;
   try {
     const [bRes, idx, setIdx] = await Promise.all([
       apiCall(shared ? 'shared/' + shareToken : 'binders/' + id), getSearchIndex(), getIndex()]);
     binder = bRes.binder;
     owner = bRes.owner || null;
+    // a shared binder may be published without its ticks; the server strips
+    // them, and this is how the page knows the zeroes are silence, not zero
+    showHave = !shared || bRes.showHave !== false;
     cardsById = new Map(idx.cards.map((c) => [c.id, c]));
     setsById = new Map(setIdx.sets.map((x) => [x.id, x]));
   } catch (e) {
@@ -4131,38 +4134,60 @@ async function renderBinderPage(id, shareToken = null) {
         body: 'The address you have handed out so far stops working immediately. Anybody still on the old one sees a binder that no longer exists.',
         confirmLabel: 'Replace it',
       })) return;
-      await apply(true, true);
+      await apply(true, { rotate: true });
       toast('New link — the old one is dead');
     } }, '↻ New link');
 
+    /* What a link admits to. Showing the ticks is what "here is my binder"
+     * usually means, so it is the default — but the same page is also a list
+     * of valuable cardboard next to the name of whoever is holding it, which
+     * is worth being able to withhold while still showing the layout. The
+     * counts are stripped by the server rather than merely not drawn: a
+     * browser is the visitor's to inspect, so anything the answer carries is
+     * published whatever the page chooses to do with it. */
+    const haveSel = h('select', {},
+      h('option', { value: 'show' }, 'Show which ones I have'),
+      h('option', { value: 'hide' }, 'Hide them — the layout only'));
+    const haveRow = h('label', { class: 'ce-field' },
+      h('span', { class: 'muted small' }, 'What the link shows'), haveSel);
+
     const paint = () => {
       sel.value = binder.share ? 'public' : 'private';
+      haveSel.value = binder.shareHave === false ? 'hide' : 'show';
       if (!binder.share) {
+        haveRow.hidden = true;
         linkRow.replaceChildren();
         note.textContent = 'Nobody but you can open this binder. There is no address for it to answer to.';
         return;
       }
+      haveRow.hidden = false;
       urlBox.value = linkOf(binder.share);
       linkRow.replaceChildren(urlBox, h('div', { class: 'row', style: 'gap:8px' }, copyBtn, rotateBtn));
-      note.textContent = 'Anyone with this address can see the binder — its pages, the cards in them, which ones you have, '
-        + 'and your username. They cannot change anything, and they do not need an account here.';
+      note.textContent = binder.shareHave === false
+        ? 'Anyone with this address can see the binder — its pages, the cards in them, and your username. Which ones you '
+          + 'actually hold is not sent at all. They cannot change anything, and they do not need an account here.'
+        : 'Anyone with this address can see the binder — its pages, the cards in them, which ones you have, and your '
+          + 'username. They cannot change anything, and they do not need an account here.';
     };
 
-    const apply = async (on, rotate) => {
-      sel.disabled = true;
+    const apply = async (on, extra = {}) => {
+      sel.disabled = haveSel.disabled = true;
       try {
-        const r = await apiCall('binders/' + id + '/share', { method: 'POST', body: JSON.stringify({ on, rotate: !!rotate }) });
+        const r = await apiCall('binders/' + id + '/share', { method: 'POST', body: JSON.stringify({ on, ...extra }) });
         binder.share = r.share || null;
+        binder.shareHave = r.showHave !== false;
         paint();
       } catch (e) { toast(e.message); paint(); }
-      sel.disabled = false;
+      sel.disabled = haveSel.disabled = false;
     };
-    sel.addEventListener('change', () => apply(sel.value === 'public', false));
+    sel.addEventListener('change', () => apply(sel.value === 'public'));
+    haveSel.addEventListener('change', () => apply(true, { showHave: haveSel.value === 'show' }));
 
     const ov = h('div', { class: 'picker-overlay', onclick: (e) => { if (e.target === ov) ov.remove(); } },
       h('div', { class: 'picker-panel' },
         h('h3', { style: 'margin:0' }, 'Share this binder'),
         h('label', { class: 'ce-field' }, h('span', { class: 'muted small' }, 'Who can open it'), sel),
+        haveRow,
         note,
         linkRow,
         h('div', { class: 'row', style: 'justify-content:flex-end' },
@@ -4220,10 +4245,12 @@ async function renderBinderPage(id, shareToken = null) {
         : h('a', { class: 'back-link', href: '#/binders' }, '← Binders'),
       h('div', { class: 'page-head' },
         h('h1', {}, h('span', { class: 'binder-dot b-' + binder.color }), ' ' + binder.name),
-        h('div', { class: 'muted' }, `${binder.size}×${binder.size} · ${got} / ${total} in hand`),
+        h('div', { class: 'muted' }, showHave
+          ? `${binder.size}×${binder.size} · ${got} / ${total} in hand`
+          : `${binder.size}×${binder.size} · ${total} card${total === 1 ? '' : 's'}`),
       ),
       shared && owner ? h('p', { class: 'muted small', style: 'margin:-6px 0 10px' }, `Shared by ${owner}.`) : null,
-      total ? h('div', { class: 'progress', style: 'height:8px; margin-bottom:10px' },
+      total && showHave ? h('div', { class: 'progress', style: 'height:8px; margin-bottom:10px' },
         h('div', { style: `width:${Math.round((got / total) * 100)}%` })) : null,
       buttons.length ? h('div', { class: 'row', style: 'gap:8px; flex-wrap:wrap' }, ...buttons) : null,
       editMode ? h('p', { class: 'muted small', style: 'margin:6px 0 0' },
@@ -4406,9 +4433,11 @@ async function renderBinderPage(id, shareToken = null) {
       h('span', { class: 'muted small' }, card ? `${card.name} \u2014 ${variantLabel(card, s.variant)}` : 'Pocket ' + (i + 1)),
       h('button', { class: 'btn small', onclick: () => {
         moveFrom = i;
-        actions.replaceChildren(h('p', { class: 'muted small' }, 'Tap the destination pocket (any page). Tap the same pocket to cancel.'));
+        actions.replaceChildren(h('p', { class: 'muted small' }, 'Tap the destination pocket \u2014 turn the page first if it is on another one. Tap the same pocket to cancel.'));
         renderBook();
       } }, '\u2194 Move'),
+      // the other kind of move: the destination is nowhere near here
+      s && s.card ? h('button', { class: 'btn small', onclick: () => openMoveToPage(i) }, '\u21e5 Move to page\u2026') : null,
       card ? h('button', { class: 'btn small', onclick: () => openCardModal(card, cardModalOpts(s)) }, '\u24d8 Details') : null,
       h('button', { class: 'btn small', onclick: async () => {
         if (s && !await confirmDestructive({
@@ -4422,6 +4451,101 @@ async function renderBinderPage(id, shareToken = null) {
       h('button', { class: 'btn ghost small', onclick: () => actions.replaceChildren() }, 'Cancel'),
     ));
   }
+
+  /** Which view of the book a given page is on — the spread puts two pages in
+   * front of you at once, so a page index is not a view index. */
+  const viewOfPage = (p) => (isSpread() ? Math.floor(p / 2) + 1 + (p % 2) : p + 1);
+
+  /* ---- moving a card somewhere you cannot see from here ----
+   * Dragging reaches the spread in front of you; carrying reaches whatever
+   * you can turn to while holding the card. Neither is any use when the card
+   * is on page 3 and it belongs on page 41, which is thirty-eight page turns
+   * with a card in your hand. So this asks where instead of making you travel
+   * there: pick the page, then pick the pocket on it.
+   *
+   * Same swap semantics as every other move, so a full binder can still be
+   * rearranged without first making a hole. And because "farther down the
+   * binder" often means past the end of it, a new sheet is one of the places
+   * you can send a card to.
+   */
+  function openMoveToPage(from) {
+    const s = binder.slots[from];
+    if (!s || !s.card) return;
+    const card = cardsById.get(s.card);
+    const fromPage = Math.floor(from / per);
+    const canGrow = binder.pages < MAX_BINDER_PAGES;
+    let page = fromPage, makeNew = false;
+
+    const freeOn = (p) => {
+      let n = 0;
+      for (let q = 0; q < per; q++) if (!binder.slots[p * per + q]) n++;
+      return n;
+    };
+    const sel = h('select', {},
+      ...Array.from({ length: binder.pages }, (_, p) => h('option', { value: String(p) },
+        `Page ${p + 1} — ${freeOn(p)} free${p === fromPage ? ' (where it is now)' : ''}`)),
+      canGrow ? h('option', { value: 'new' }, `＋ A new sheet at the end (page ${binder.pages + 1})`) : null);
+    sel.value = String(page);
+
+    const grid = h('div', { class: 'move-grid', style: `grid-template-columns: repeat(${binder.size}, 1fr)` });
+    const hint = h('p', { class: 'muted small', style: 'margin:0' });
+
+    const land = async (idx) => {
+      // the sheet has to exist before anything can be put on it
+      if (makeNew) binder.pages += 1;
+      await moveEntry(from, idx);
+      ov.remove();
+      actions.replaceChildren();
+      moveFrom = null;
+      renderHead(); renderNav();
+      // arrive where the card went: a move you cannot see is a move you have
+      // to go and verify
+      const want = viewOfPage(Math.floor(idx / per));
+      if (want === viewIdx) renderBook(); else navTo(want);
+      toast(`Moved to page ${Math.floor(idx / per) + 1}, pocket ${(idx % per) + 1}`);
+    };
+
+    const paint = () => {
+      makeNew = sel.value === 'new';
+      page = makeNew ? binder.pages : parseInt(sel.value, 10);
+      grid.replaceChildren(...Array.from({ length: per }, (_, q) => {
+        const idx = page * per + q;
+        const e = makeNew ? null : binder.slots[idx];
+        // a picture spans several pockets and is anchored at its lowest cell;
+        // dropping a card into one of them would tear it
+        const art = !!(e && e.img);
+        const here = idx === from;
+        const c = e && e.card ? cardsById.get(e.card) : null;
+        return h('button', {
+          class: 'move-cell' + (art ? ' art' : '') + (e && e.card ? ' filled' : '') + (here ? ' self' : ''),
+          type: 'button',
+          disabled: art || here ? '' : null,
+          title: art ? 'A picture sits across this pocket' : here ? 'This is where it already is'
+            : c ? `Swap with ${c.name}` : `Pocket ${q + 1}`,
+          onclick: () => land(idx),
+        }, art ? '🖼' : here ? '•' : c ? (c.name || e.card) : String(q + 1));
+      }));
+      hint.textContent = makeNew
+        ? 'A new sheet is added at the end and the card goes on it.'
+        : 'Tap a pocket. A pocket that already has a card swaps the two.';
+    };
+    sel.addEventListener('change', paint);
+
+    const ov = h('div', { class: 'picker-overlay', onclick: (e) => { if (e.target === ov) ov.remove(); } },
+      h('div', { class: 'picker-panel move-panel' },
+        h('h3', { style: 'margin:0' }, card ? `Move ${card.name}` : 'Move this card'),
+        card ? h('p', { class: 'muted small', style: 'margin:0' },
+          `${variantLabel(card, s.variant)} · currently page ${fromPage + 1}, pocket ${(from % per) + 1}`) : null,
+        h('label', { class: 'ce-field' }, h('span', { class: 'muted small' }, 'Send it to'), sel),
+        grid,
+        hint,
+        h('div', { class: 'row', style: 'justify-content:flex-end' },
+          h('button', { class: 'btn ghost small', onclick: () => ov.remove() }, 'Cancel')),
+      ));
+    paint();
+    view.append(ov);
+  }
+
 
   async function moveEntry(from, to) {
     if (from === to) return;

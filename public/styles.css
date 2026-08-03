@@ -758,6 +758,26 @@ body { padding-bottom: calc(64px + env(safe-area-inset-bottom)); }
 .binder-cover:hover { filter: brightness(1.12); }
 .binder-name { font-weight: 700; font-size: 15px; line-height: 1.2; word-break: break-word; }
 .binder-meta { font-size: 12px; opacity: .85; }
+/* ---------- "move to page": a page you can see without turning to it ---------- */
+/* narrow on purpose: nine card-shaped cells at full panel width make a grid
+   taller than the panel, and a destination you have to scroll to find is a
+   worse map of the page than the page itself */
+.move-grid { display: grid; gap: 6px; max-width: 264px; margin: 2px auto; width: 100%; }
+/* a 5×5 binder is 25 cells — the panel scrolls rather than overflowing */
+.picker-panel.move-panel { overflow-y: auto; }
+.move-cell {
+  aspect-ratio: 63 / 88; border-radius: 6px; cursor: pointer;
+  border: 1px dashed var(--border); background: var(--surface-2); color: var(--muted);
+  font-size: 11px; line-height: 1.15; padding: 4px; overflow: hidden;
+  display: flex; align-items: center; justify-content: center; text-align: center;
+}
+.move-cell.filled { border-style: solid; border-color: var(--accent-soft); color: var(--text); }
+.move-cell:not(:disabled):hover { border-color: var(--accent); background: var(--surface); }
+/* the pocket it is already in, and pockets a picture is lying across: both are
+   places this card cannot go, and they should look it rather than just fail */
+.move-cell:disabled { cursor: default; opacity: .45; }
+.move-cell.self { border-style: solid; }
+
 /* a binder that is out in the world, marked from the shelf */
 .binder-shared {
   position: absolute; top: 8px; right: 8px; font-size: 13px; line-height: 1;
