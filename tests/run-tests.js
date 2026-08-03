@@ -569,6 +569,19 @@ function fail(msg) {
       const setup = await jfetch(`${M}/api/totp/setup`, { method: 'POST', headers: authed, body: '{}' });
       check('totp: setup hands over a secret and a link an app can open',
         /^[A-Z2-7]{32}$/.test(setup.secret || '') && setup.otpauth.startsWith('otpauth://totp/'));
+      // The picture is a convenience, but a picture of the WRONG thing would
+      // enrol somebody against a secret they cannot reproduce. Re-encode the
+      // link here and require the same modules back: this checks what the
+      // server fed the encoder, which is the part that can go wrong.
+      check('totp: and a QR of exactly that link, not of something else', (() => {
+        if (!setup.qrSvg) return false;
+        let qrcode;
+        try { qrcode = require('qrcode-generator'); } catch { return false; }
+        const again = qrcode(0, 'L');
+        again.addData(setup.otpauth, 'Byte');
+        again.make();
+        return setup.qrSvg === again.createSvgTag({ cellSize: 4, margin: 16, scalable: true });
+      })());
       const stillOff = await signIn();
       check('totp: handing over the secret does not turn it on yet', !stillOff.needTotp);
 

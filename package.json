@@ -12,6 +12,7 @@
   "license": "MIT",
   "optionalDependencies": {
     "sharp": "^0.35.3",
-    "nodemailer": "^9.0.3"
+    "nodemailer": "^9.0.3",
+    "qrcode-generator": "^2.0.4"
   }
 }

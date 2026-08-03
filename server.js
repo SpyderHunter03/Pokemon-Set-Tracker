@@ -930,6 +930,24 @@ async function sendMail({ to, subject, text }) {
   await transport.sendMail({ from: cfg.from || cfg.user, to, subject, text });
 }
 
+/* The setup key as something a camera can read. Optional, like sharp and
+ * nodemailer: without it enrolment still works from the key and the
+ * otpauth:// link, it is just more typing on a desktop.
+ *
+ * This is deliberately not hand-rolled. A QR encoder is a specification's
+ * worth of tables, masks and Reed-Solomon, and a subtly wrong one produces
+ * something that looks exactly like a QR code and scans as nothing. */
+function qrSvgFor(text) {
+  let qrcode;
+  try { qrcode = require('qrcode-generator'); } catch { return null; }
+  try {
+    const qr = qrcode(0, 'L');              // 0 = pick the smallest version that fits
+    qr.addData(text, 'Byte');
+    qr.make();
+    return qr.createSvgTag({ cellSize: 4, margin: 16, scalable: true });
+  } catch { return null; }                  // a missing picture is not a failed enrolment
+}
+
 /** Ask someone to confirm the address they gave us. */
 async function sendVerificationMail(req, user) {
   const raw = issueEmailToken(user.id, 'verify');
@@ -2433,10 +2451,8 @@ async function handleApi(req, res, pathname, ip, url) {
     const secret = base32Encode(crypto.randomBytes(20));
     _setTotp.run(secret, 0, user.id);
     const label = encodeURIComponent(`Pokemon TCG Tracker:${user.display}`);
-    return sendJSON(res, 200, {
-      secret,
-      otpauth: `otpauth://totp/${label}?secret=${secret}&issuer=Pokemon%20TCG%20Tracker&digits=${TOTP_DIGITS}&period=30`,
-    });
+    const otpauth = `otpauth://totp/${label}?secret=${secret}&issuer=Pokemon%20TCG%20Tracker&digits=${TOTP_DIGITS}&period=30`;
+    return sendJSON(res, 200, { secret, otpauth, qrSvg: qrSvgFor(otpauth) });
   }
 
   if (pathname === '/api/totp/enable' && req.method === 'POST') {

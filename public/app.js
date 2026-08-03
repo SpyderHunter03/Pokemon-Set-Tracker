@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.55.1';
+const APP_VERSION = '3.56.0';
 
 /* ============================================================
  * Storage helpers
@@ -2053,10 +2053,20 @@ async function startTotpEnrolment(done) {
   const codeIn = h('input', { type: 'text', inputmode: 'numeric', placeholder: '6-digit code', maxlength: '7' });
   const err = h('p', { class: 'muted small', style: 'color:var(--accent); margin:0' });
   const go = h('button', { class: 'btn small' }, 'Turn it on');
+  // The picture is optional — an install without the QR package still enrols
+  // perfectly well from the key below it, just with more typing.
+  let qrBox = null;
+  if (setup.qrSvg) {
+    qrBox = h('div', { style: 'background:#fff; border-radius:8px; padding:8px; align-self:center; max-width:220px' });
+    qrBox.innerHTML = setup.qrSvg;
+  }
   const ov = h('div', { class: 'picker-overlay' },
     h('div', { class: 'picker-panel' },
       h('h3', { style: 'margin:0' }, 'Set up two-factor'),
-      h('p', { class: 'muted small', style: 'margin:0' }, 'On this phone, open the link. On a computer, type the key into the authenticator app on your phone.'),
+      h('p', { class: 'muted small', style: 'margin:0' }, qrBox
+        ? 'Scan this with your authenticator app. On this phone, open the link instead \u2014 or type the key by hand.'
+        : 'On this phone, open the link. On a computer, type the key into the authenticator app on your phone.'),
+      qrBox,
       h('p', { style: 'margin:0' }, h('a', { class: 'btn small', href: setup.otpauth }, 'Open in my authenticator app')),
       h('p', { class: 'muted small', style: 'margin:0' }, 'Setup key'),
       h('pre', { style: 'user-select:all; font-size:16px; letter-spacing:1px; white-space:pre-wrap; margin:0' }, pretty),

@@ -307,6 +307,8 @@ Confirmation links last 24 hours, reset links 45 minutes, both are single-use, a
 
 An authenticator app code on top of the password. Nothing to sign up for, nothing to pay, and it works with the phone in flight mode — the app and the server just agree on the time. Turn it on from 👤 → Two-factor: the app hands over a setup key, and only turns the second factor on once you have typed back a code made from it, so a key that never reached your authenticator cannot lock you out.
 
+Enrolment shows a QR code to scan, the same thing as an `otpauth://` link to tap on the phone you are already holding, and the key in typeable form. The QR needs the optional `qrcode-generator` package (`npm install --no-save qrcode-generator`); without it the link and the key still work.
+
 Ten single-use recovery codes come with it, shown once. If both the authenticator and the codes are gone, the console is the way back:
 
 ```bash
