@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.59.0';
+const APP_VERSION = '3.60.0';
 
 /* ============================================================
  * Storage helpers
@@ -767,8 +767,12 @@ function spinner() { return h('div', { class: 'spinner' }); }
  * rather than as part of the app.
  * Cancel holds the focus, and Escape and the backdrop both mean no — the safe
  * answer should be the effortless one.
+ * `danger: false` for the rare confirmation that is not a warning — something
+ * bulk and additive, where the question is "is this the number you expected?"
+ * rather than "do you understand what you are about to lose?". Red on a button
+ * that only ever adds teaches people to ignore red.
  * @returns {Promise<boolean>} */
-function confirmDestructive({ title, body, confirmLabel = 'Delete', cancelLabel = 'Cancel' }) {
+function confirmDestructive({ title, body, confirmLabel = 'Delete', cancelLabel = 'Cancel', danger = true }) {
   return new Promise((resolve) => {
     let done = false;
     const finish = (yes) => {
@@ -788,7 +792,7 @@ function confirmDestructive({ title, body, confirmLabel = 'Delete', cancelLabel 
           .map((p) => h('p', { class: 'muted small', style: 'margin:0' }, p)),
         h('div', { class: 'row', style: 'justify-content:flex-end; gap:8px; margin-top:2px' },
           noBtn,
-          h('button', { class: 'btn danger', 'data-confirm': '', onclick: () => finish(true) }, confirmLabel))));
+          h('button', { class: danger ? 'btn danger' : 'btn', 'data-confirm': '', onclick: () => finish(true) }, confirmLabel))));
     document.addEventListener('keydown', onKey, true);
     // A <dialog> opened with showModal() sits in the browser's top layer, above
     // everything in the document however you stack it — so a confirmation
@@ -3508,6 +3512,69 @@ const MAX_BINDER_PAGES = 60;   // matches the server's cap; only used to say so 
 const COLOR_LABELS = { red: 'Red', blue: 'Blue', green: 'Green', purple: 'Purple', black: 'Black', none: 'No color' };
 const BINDER_SIZES = [2, 3, 4, 5];
 
+/** Every pocket ticked "in hand", written into the collection.
+ *
+ * A binder's have/need list is deliberately its own thing: you lay a binder
+ * out for cards you are hunting as much as for cards you hold, and ticking a
+ * pocket is a statement about the plastic, not about the ledger. But once a
+ * binder is genuinely full, re-entering forty cards one at a time on the set
+ * pages is work a computer should be doing.
+ *
+ * Two rules make it safe to press:
+ *
+ * Within the binder, copies add up. The same printing in two pockets is two
+ * sleeves with two cards in them — a binder is a physical object, and it
+ * cannot hold the same piece of cardboard twice.
+ *
+ * Against the collection, counts only ever rise. A binder is one place your
+ * cards live, not the whole of them, so a binder saying "1" is not evidence
+ * that the other two on the shelf do not exist. Same rule sync already uses
+ * when two devices disagree, and it makes pressing this twice a no-op.
+ */
+async function addBinderToCollection(binder) {
+  // keyed, never parsed back apart: a custom printing's key is whatever the
+  // administrator named it, and picking a separator is a bug waiting for the
+  // day somebody puts that character in a name
+  const held = new Map();   // card+variant -> { card, variant, n }
+  for (const s of Object.values(binder.slots || {})) {
+    if (!s || !s.card || !s.have) continue;
+    const variant = s.variant || 'normal';
+    const seen = held.get(s.card + ' ' + variant);
+    if (seen) seen.n += (s.n || 1);
+    else held.set(s.card + ' ' + variant, { card: s.card, variant, n: s.n || 1 });
+  }
+  if (!held.size) { toast('Nothing in this binder is ticked as in hand yet'); return; }
+
+  const raises = [];
+  let already = 0;
+  for (const e of held.values()) {
+    const have = variantQty(e.card, e.variant);
+    if (e.n > have) raises.push({ ...e, have });
+    else already++;
+  }
+  if (!raises.length) {
+    toast(`Your collection already covers all ${held.size} of them`);
+    return;
+  }
+  const copies = raises.reduce((t, r) => t + (r.n - r.have), 0);
+  const ok = await confirmDestructive({
+    title: `Add \u201c${binder.name}\u201d to your collection?`,
+    body: [
+      `${raises.length} printing${raises.length === 1 ? '' : 's'} would be added or raised \u2014 ${copies} card${copies === 1 ? '' : 's'} in all.`,
+      already ? `${already} already match your collection, or it holds more, and those stay exactly as they are.` : '',
+      'Counts are only ever raised, never lowered. Pressing this a second time changes nothing.',
+    ].filter(Boolean).join('\n'),
+    confirmLabel: 'Add to collection',
+    danger: false,
+  });
+  if (!ok) return;
+
+  for (const r of raises) setVariantQty(r.card, r.variant, r.n);
+  updateStatsBanner();
+  rerenderCards();
+  toast(`Added \u2014 ${copies} card${copies === 1 ? '' : 's'} across ${raises.length} printing${raises.length === 1 ? '' : 's'}`);
+}
+
 function binderGate() {
   view.replaceChildren(h('div', { class: 'center', style: 'max-width:440px; margin:40px auto' },
     h('h2', {}, 'Binders'),
@@ -4046,10 +4113,14 @@ async function renderBinderPage(id) {
       // one print button at a time: while picking, the bar below owns printing
       h('button', { class: 'btn small', onclick: () => setPickMode(false) }, '\u2713 Done selecting'),
     ] : [
+      // only offered once there is something to offer — an empty binder's
+      // button would do nothing and still have to be explained
+      got ? h('button', { class: 'btn ghost small', onclick: () => addBinderToCollection(binder) },
+        '\ud83d\udce5 Add to collection') : null,
       h('button', { class: 'btn ghost small', onclick: () => openProxyPrintDialog() }, '\ud83d\udda8 Print proxies'),
       h('button', { class: 'btn ghost small', onclick: () => setPickMode(true) }, '\u2611 Select to print'),
       h('button', { class: 'btn small', onclick: () => setEditMode(true) }, '\u270e Edit binder'),
-    ];
+    ].filter(Boolean);
     head.replaceChildren(...[
       h('a', { class: 'back-link', href: '#/binders' }, '\u2190 Binders'),
       h('div', { class: 'page-head' },

@@ -36,7 +36,7 @@ const { chromium } = require('playwright');
   /** say yes to the app's own are-you-sure panel */
   const confirmYes = async (pg) => {
     await pg.waitForSelector('.confirm-panel');
-    await pg.click('.confirm-panel .btn.danger');
+    await pg.click('.confirm-panel [data-confirm]');
     await pg.waitForSelector('.confirm-panel', { state: 'detached' });
   };
 
@@ -280,6 +280,62 @@ const { chromium } = require('playwright');
   await page.waitForSelector('.binder-grid .pocket.have .pocket-qty');
   check('binder: copy count shows as a small ×2 on the pocket',
     (await page.textContent('.binder-grid .pocket.have .pocket-qty')) === '×2');
+  await page.click('.pocket-actions button:has-text("Close")');
+
+  // ---- a whole binder's in-hand pockets, written into the collection ----
+  // A binder keeps its own have/need list on purpose; this is the button that
+  // says "these ones are real, put them in the ledger". The one ticked pocket
+  // is the Holo Charizard, which the collection already records two of — so
+  // the first press has nothing to raise and nothing to ask about.
+  await page.click('button:has-text("Add to collection")');
+  await page.waitForTimeout(400);
+  check('binder: with nothing to raise, there is nothing to confirm',
+    (await page.locator('.confirm-panel').count()) === 0);
+
+  // a third copy in the pocket is a card the collection does not know about
+  await page.click('.binder-grid .pocket.have .pocket-edit');
+  await page.waitForSelector('.pocket-actions');
+  await page.click('.pocket-actions button:has-text("＋")');
+  await page.waitForFunction(() =>
+    document.querySelector('.binder-grid .pocket.have .pocket-qty').textContent === '×3');
+  await page.click('.pocket-actions button:has-text("Close")');
+
+  const beforeAdd = await coll();
+  await page.click('button:has-text("Add to collection")');
+  await page.waitForSelector('.confirm-panel');
+  check('binder: adding to the collection asks first, and says how much',
+    /1 printing would be added or raised/.test(await page.textContent('.confirm-panel')));
+  await confirmYes(page);
+  await page.waitForTimeout(400);
+  const afterAdd = await coll();
+  const grew = [];
+  for (const [cid, vars] of Object.entries(afterAdd)) {
+    for (const [v, n] of Object.entries(vars)) {
+      if (n !== ((beforeAdd[cid] && beforeAdd[cid][v]) || 0)) grew.push([cid, v, n]);
+    }
+  }
+  check('binder: the pocket’s copy count is what lands in the collection',
+    grew.length === 1 && grew[0][0] === 'base1-4' && grew[0][1] === 'holo' && grew[0][2] === 3);
+  check('binder: adding took nothing away',
+    Object.entries(beforeAdd).every(([cid, vars]) =>
+      Object.entries(vars).every(([v, n]) => (afterAdd[cid] || {})[v] >= n)));
+
+  // raise, never lower: a binder is one place your cards live, not all of
+  // them, so a binder holding 3 is no evidence against a collection of 9
+  await page.evaluate(() => { collection['base1-4'].holo = 9; saveCollection(); });
+  await page.click('button:has-text("Add to collection")');
+  await page.waitForTimeout(500);
+  check('binder: a bigger collection count is left alone, and left unasked about',
+    (await page.locator('.confirm-panel').count()) === 0 &&
+    (await coll())['base1-4'].holo === 9);
+
+  // put both back where the rest of the suite expects them
+  await page.evaluate(() => { collection['base1-4'].holo = 2; saveCollection(); });
+  await page.click('.binder-grid .pocket.have .pocket-edit');
+  await page.waitForSelector('.pocket-actions');
+  await page.click('.pocket-actions button:has-text("−")');
+  await page.waitForFunction(() =>
+    document.querySelector('.binder-grid .pocket.have .pocket-qty').textContent === '×2');
   await page.click('.pocket-actions button:has-text("Close")');
 
   await page.click('button:has-text("›")');                             // page 2: the rest of the printings

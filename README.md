@@ -22,6 +22,7 @@ A lightweight, self-hostable web app (PWA) for tracking which Pokémon cards you
 - **Card scanner** — at a shop? Open Scan, point your camera at a card (or take a photo), and the app matches it against your own card database — entirely on-device, no cloud service — and tells you whether you already have it.
 - **Multi-language** — download card data in any language TCGdex supports (`--langs en,ja,de,…`) and switch in-app. Your collection carries across languages (it's keyed by card ID, not name).
 - **One-tap tracking** — tap a card to mark it owned/missing; cards with multiple variants/copies open details instead so a stray tap never wipes your data.
+- **Binders** — build digital versions of your real binders: pick a pocket size and a cover, place cards pocket by pocket, and tick off what is in hand. A binder's have/need list is its own thing, so you can lay one out for cards you are still hunting. Once it is genuinely full, **📥 Add to collection** writes every ticked pocket into your collection in one go — copies in the same binder add up, and counts are only ever raised, never lowered, so pressing it twice does nothing.
 - **Works offline** — installs as an app on your phone; visited sets and images are cached.
 - **Your data, three ways** — saved on-device automatically; JSON export/import backups; optional accounts + cloud sync via the bundled server.
 
