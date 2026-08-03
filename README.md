@@ -22,7 +22,7 @@ A lightweight, self-hostable web app (PWA) for tracking which Pokémon cards you
 - **Card scanner** — at a shop? Open Scan, point your camera at a card (or take a photo), and the app matches it against your own card database — entirely on-device, no cloud service — and tells you whether you already have it.
 - **Multi-language** — download card data in any language TCGdex supports (`--langs en,ja,de,…`) and switch in-app. Your collection carries across languages (it's keyed by card ID, not name).
 - **One-tap tracking** — tap a card to mark it owned/missing; cards with multiple variants/copies open details instead so a stray tap never wipes your data.
-- **Binders** — build digital versions of your real binders: pick a pocket size and a cover, place cards pocket by pocket, and tick off what is in hand. A binder's have/need list is its own thing, so you can lay one out for cards you are still hunting. Once it is genuinely full, **📥 Add to collection** writes every ticked pocket into your collection in one go — copies in the same binder add up, and counts are only ever raised, never lowered, so pressing it twice does nothing.
+- **Binders** — build digital versions of your real binders: pick a pocket size and a cover, place cards pocket by pocket, and tick off what is in hand. A binder's have/need list is its own thing, so you can lay one out for cards you are still hunting. Once it is genuinely full, **📥 Add to collection** writes every ticked pocket into your collection in one go — copies in the same binder add up, and counts are only ever raised, never lowered, so pressing it twice does nothing. Each binder is private until you say otherwise; **🔗 Share** hands out an unguessable link that anyone can open without an account here, and turning it off — or minting a new link — retires the old address on the spot.
 - **Works offline** — installs as an app on your phone; visited sets and images are cached.
 - **Your data, three ways** — saved on-device automatically; JSON export/import backups; optional accounts + cloud sync via the bundled server.
 
@@ -286,6 +286,16 @@ Setup is also where you choose whether anyone else may sign up, and give the app
 With the bundled server running, the 👤 button opens the account page, where people can create an account — subject to the registration setting chosen at setup. Collections auto-sync (variant quantities included): local changes push after ~1.5 s; signing in on a new device pulls and merges (per-variant highest count wins, merges never delete).
 
 Sign-in specifics: scrypt with the cost stored alongside each hash (old hashes keep working and are quietly re-hashed on next sign-in), sessions in an httpOnly `SameSite=Strict` cookie, failed attempts throttled per account as well as per address, and a ten-character minimum. Bearer tokens still work for scripts and API clients.
+
+### Sharing a binder
+
+Binders are private. Nothing about one is reachable without your session until you open **🔗 Share** on it and pick *Anyone with the link*.
+
+Doing that mints a 20-character token and the binder becomes readable at `#/b/<token>`, with no sign-in — that is the point, since the person you are sending it to probably has no account on your server. The token is the whole credential, so it is 80 bits of one, and the binder's real id is never published: a link-holder gets the pages, the cards, which ones you have, and your username, and nothing they could aim at an endpoint that expects you to be signed in.
+
+Taking it back is one switch. Setting a binder to *Private* deletes the token, and every copy of the URL that ever left your machine stops working in the same instant. **↻ New link** is the same retirement with a replacement, for when a link reached somebody it should not have and you would rather not rebuild the binder. Ordinary edits — renaming, moving cards, changing the cover — leave a live link alone.
+
+A shared page is the binder with every handle taken off: no editing, no page moves, no ticking pockets. Tapping a card opens it, and if the visitor happens to have an account on your server they see it against *their* collection, not yours.
 
 ### The account and administration pages
 

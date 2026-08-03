@@ -758,6 +758,11 @@ body { padding-bottom: calc(64px + env(safe-area-inset-bottom)); }
 .binder-cover:hover { filter: brightness(1.12); }
 .binder-name { font-weight: 700; font-size: 15px; line-height: 1.2; word-break: break-word; }
 .binder-meta { font-size: 12px; opacity: .85; }
+/* a binder that is out in the world, marked from the shelf */
+.binder-shared {
+  position: absolute; top: 8px; right: 8px; font-size: 13px; line-height: 1;
+  background: rgba(0,0,0,.45); border-radius: 999px; padding: 4px 6px;
+}
 .b-red    { background: linear-gradient(145deg, #b3271e, #7c1712); }
 .b-blue   { background: linear-gradient(145deg, #2456b3, #16336e); }
 .b-green  { background: linear-gradient(145deg, #1e8a4c, #135631); }

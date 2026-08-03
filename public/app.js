@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.60.0';
+const APP_VERSION = '3.61.0';
 
 /* ============================================================
  * Storage helpers
@@ -3618,6 +3618,9 @@ async function renderBindersPage() {
       h('div', { class: 'binder-name' }, b.name),
       h('div', { class: 'binder-meta' }, `${b.size}\u00d7${b.size} \u00b7 ${b.pages} page${b.pages === 1 ? '' : 's'}`),
       h('div', { class: 'binder-meta' }, b.filled ? `${b.have} / ${b.filled} in hand` : 'empty'),
+      // a binder that is out in the world should say so from the shelf, not
+      // only from inside its own share panel
+      b.shared ? h('div', { class: 'binder-shared', title: 'Anyone with the link can see this binder' }, '🔗') : null,
     );
     if (src && artV) {
       const bg = h('div', { class: 'binder-cover-img' });
@@ -3725,16 +3728,29 @@ async function renderBindersPage() {
   );
 }
 
-async function renderBinderPage(id) {
-  if (!auth) return binderGate();
+/** One binder, opened either as its owner (`id`) or through a link somebody
+ * was given (`shareToken`). The shared case is the same book with every
+ * handle taken off: no edit mode, no print picking, no ticking pockets — the
+ * visitor may not even have an account here, and nothing on this page is
+ * theirs to change. What they can still do is tap a card and see it, which is
+ * the whole reason to send somebody a binder. */
+async function renderBinderPage(id, shareToken = null) {
+  const shared = !!shareToken;
+  if (!shared && !auth) return binderGate();
   view.replaceChildren(spinner());
-  let binder, cardsById, setsById;
+  let binder, cardsById, setsById, owner = null;
   try {
-    const [bRes, idx, setIdx] = await Promise.all([apiCall('binders/' + id), getSearchIndex(), getIndex()]);
+    const [bRes, idx, setIdx] = await Promise.all([
+      apiCall(shared ? 'shared/' + shareToken : 'binders/' + id), getSearchIndex(), getIndex()]);
     binder = bRes.binder;
+    owner = bRes.owner || null;
     cardsById = new Map(idx.cards.map((c) => [c.id, c]));
     setsById = new Map(setIdx.sets.map((x) => [x.id, x]));
-  } catch (e) { view.replaceChildren(dbErrorView('Could not load that binder.', e, () => renderBinderPage(id))); return; }
+  } catch (e) {
+    view.replaceChildren(dbErrorView(shared ? 'Could not open that binder.' : 'Could not load that binder.',
+      e, () => renderBinderPage(id, shareToken)));
+    return;
+  }
 
   // pickers & proxies show the readable set NAME, not the internal set code
   const setNameOf = (cid) => { const st = setsById.get(setIdOf(cid)); return (st && st.name) || setIdOf(cid); };
@@ -3806,6 +3822,9 @@ async function renderBinderPage(id) {
   }
 
   const save = async (extra = {}) => {
+    // nothing on a shared page offers to save, but a binder that is not yours
+    // should not be one bug away from being written to either
+    if (shared) return;
     try { await apiCall('binders/' + id, { method: 'PUT', body: JSON.stringify({ slots: binder.slots, pages: binder.pages, ...extra }) }); }
     catch (e) { toast('Save failed: ' + e.message); }
   };
@@ -4081,9 +4100,82 @@ async function renderBinderPage(id) {
     ));
   }
 
+  /* ---- handing this binder to somebody ----
+   * Private is the default and private is the whole of it: with no token
+   * there is no address the binder answers to, so there is nothing to leak.
+   * Turning it on mints one; turning it off deletes it, which retires every
+   * copy of the URL that ever left this machine at once. "New link" is the
+   * same retirement with a replacement — the answer to a link that reached
+   * somebody it should not have, without rebuilding the binder.
+   */
+  function openSharePanel() {
+    const linkOf = (t) => new URL('#/b/' + t, location.href).href;
+    const urlBox = h('input', { type: 'text', readonly: '', 'aria-label': 'Share link',
+      style: 'width:100%; user-select:all' });
+    const note = h('p', { class: 'muted small', style: 'margin:0' });
+    const linkRow = h('div', { style: 'display:flex; flex-direction:column; gap:8px' });
+    const sel = h('select', {},
+      h('option', { value: 'private' }, 'Private — only me'),
+      h('option', { value: 'public' }, 'Anyone with the link'));
+
+    const copyBtn = h('button', { class: 'btn small', onclick: async () => {
+      // clipboard access needs a secure context, which a plain-http install
+      // on a home network is not — so falling back to selecting the text is
+      // not a nicety, it is the path a lot of self-hosters are actually on
+      try { await navigator.clipboard.writeText(urlBox.value); toast('Link copied'); }
+      catch { urlBox.focus(); urlBox.select(); toast('Press Ctrl+C to copy'); }
+    } }, '📋 Copy link');
+    const rotateBtn = h('button', { class: 'btn ghost small', onclick: async () => {
+      if (!await confirmDestructive({
+        title: 'Replace the link?',
+        body: 'The address you have handed out so far stops working immediately. Anybody still on the old one sees a binder that no longer exists.',
+        confirmLabel: 'Replace it',
+      })) return;
+      await apply(true, true);
+      toast('New link — the old one is dead');
+    } }, '↻ New link');
+
+    const paint = () => {
+      sel.value = binder.share ? 'public' : 'private';
+      if (!binder.share) {
+        linkRow.replaceChildren();
+        note.textContent = 'Nobody but you can open this binder. There is no address for it to answer to.';
+        return;
+      }
+      urlBox.value = linkOf(binder.share);
+      linkRow.replaceChildren(urlBox, h('div', { class: 'row', style: 'gap:8px' }, copyBtn, rotateBtn));
+      note.textContent = 'Anyone with this address can see the binder — its pages, the cards in them, which ones you have, '
+        + 'and your username. They cannot change anything, and they do not need an account here.';
+    };
+
+    const apply = async (on, rotate) => {
+      sel.disabled = true;
+      try {
+        const r = await apiCall('binders/' + id + '/share', { method: 'POST', body: JSON.stringify({ on, rotate: !!rotate }) });
+        binder.share = r.share || null;
+        paint();
+      } catch (e) { toast(e.message); paint(); }
+      sel.disabled = false;
+    };
+    sel.addEventListener('change', () => apply(sel.value === 'public', false));
+
+    const ov = h('div', { class: 'picker-overlay', onclick: (e) => { if (e.target === ov) ov.remove(); } },
+      h('div', { class: 'picker-panel' },
+        h('h3', { style: 'margin:0' }, 'Share this binder'),
+        h('label', { class: 'ce-field' }, h('span', { class: 'muted small' }, 'Who can open it'), sel),
+        note,
+        linkRow,
+        h('div', { class: 'row', style: 'justify-content:flex-end' },
+          h('button', { class: 'btn ghost small', onclick: () => ov.remove() }, 'Close')),
+      ));
+    paint();
+    view.append(ov);
+  }
+
+
   function renderHead() {
     const total = filledCount(), got = haveCount();
-    const buttons = editMode ? [
+    const buttons = shared ? [] : editMode ? [
       h('button', { class: 'btn ghost small', onclick: async () => {
         const name = prompt('Binder name', binder.name);
         if (!name || !name.trim()) return;
@@ -4116,20 +4208,24 @@ async function renderBinderPage(id) {
       // only offered once there is something to offer — an empty binder's
       // button would do nothing and still have to be explained
       got ? h('button', { class: 'btn ghost small', onclick: () => addBinderToCollection(binder) },
-        '\ud83d\udce5 Add to collection') : null,
-      h('button', { class: 'btn ghost small', onclick: () => openProxyPrintDialog() }, '\ud83d\udda8 Print proxies'),
-      h('button', { class: 'btn ghost small', onclick: () => setPickMode(true) }, '\u2611 Select to print'),
-      h('button', { class: 'btn small', onclick: () => setEditMode(true) }, '\u270e Edit binder'),
+        '📥 Add to collection') : null,
+      h('button', { class: 'btn ghost small', onclick: () => openSharePanel() }, '🔗 Share'),
+      h('button', { class: 'btn ghost small', onclick: () => openProxyPrintDialog() }, '🖨 Print proxies'),
+      h('button', { class: 'btn ghost small', onclick: () => setPickMode(true) }, '☑ Select to print'),
+      h('button', { class: 'btn small', onclick: () => setEditMode(true) }, '✎ Edit binder'),
     ].filter(Boolean);
     head.replaceChildren(...[
-      h('a', { class: 'back-link', href: '#/binders' }, '\u2190 Binders'),
+      // a visitor has no binder list to go back to, and may have no account
+      shared ? h('a', { class: 'back-link', href: '#/' }, '← All cards')
+        : h('a', { class: 'back-link', href: '#/binders' }, '← Binders'),
       h('div', { class: 'page-head' },
         h('h1', {}, h('span', { class: 'binder-dot b-' + binder.color }), ' ' + binder.name),
-        h('div', { class: 'muted' }, `${binder.size}\u00d7${binder.size} \u00b7 ${got} / ${total} in hand`),
+        h('div', { class: 'muted' }, `${binder.size}×${binder.size} · ${got} / ${total} in hand`),
       ),
+      shared && owner ? h('p', { class: 'muted small', style: 'margin:-6px 0 10px' }, `Shared by ${owner}.`) : null,
       total ? h('div', { class: 'progress', style: 'height:8px; margin-bottom:10px' },
         h('div', { style: `width:${Math.round((got / total) * 100)}%` })) : null,
-      h('div', { class: 'row', style: 'gap:8px; flex-wrap:wrap' }, ...buttons),
+      buttons.length ? h('div', { class: 'row', style: 'gap:8px; flex-wrap:wrap' }, ...buttons) : null,
       editMode ? h('p', { class: 'muted small', style: 'margin:6px 0 0' },
         'Editing \u2014 tap an empty pocket to add a card, drag or \u2194 Move to rearrange, \u22ef for pocket options. ' +
         'Each sheet has its own bar: drag \u201cMove page\u201d to reorder it (or tap it, turn the page, and tap where it ' +
@@ -4440,7 +4536,9 @@ async function renderBinderPage(id) {
           s.have && (s.n || 1) > 1 ? h('div', { class: 'pocket-qty' }, '\u00d7' + s.n) : null,
           pickMode && picked.has(i) ? h('div', { class: 'pick-badge' }, '\ud83d\udda8') : null,
           // while picking, the whole pocket is one big checkbox \u2014 no side doors
-          pickMode ? null : h('button', { class: 'pocket-edit', onclick: (e) => { e.stopPropagation(); pocketActions(i); } }, '\u22ef'),
+          // nothing behind it on a shared page: the sheet it opens is all
+          // counts to change and layout to move, none of which is a visitor's
+          pickMode || shared ? null : h('button', { class: 'pocket-edit', onclick: (e) => { e.stopPropagation(); pocketActions(i); } }, '\u22ef'),
         ].filter(Boolean));
         if (editMode) {
           // drag & drop between pockets (desktop; mobile keeps \u2194 Move)
@@ -4484,8 +4582,16 @@ async function renderBinderPage(id) {
           if (s) pocketActions(i); else openPocketPicker(i);
           return;
         }
-        // view mode: tap = got it / not yet
         if (!s) return;
+        // a shared binder is somebody else's ledger: a tap opens the card so
+        // you can look at it (and, if you are signed in here, see whether you
+        // have one) rather than editing a tally that is not yours
+        if (shared) {
+          const card = cardsById.get(s.card);
+          if (card) openCardModal(card, { variant: s.variant });
+          return;
+        }
+        // view mode: tap = got it / not yet
         if (s.have) { s.have = 0; delete s.n; } else { s.have = 1; }
         await save();
         renderBook(); renderHead();
@@ -5093,6 +5199,8 @@ function route() {
   // links that arrive by email — they carry a one-shot token in the URL
   const verifyMatch = hash.match(/^\/verify\/(.+)$/);
   const resetMatch = hash.match(/^\/reset\/(.+)$/);
+  // a binder somebody was handed a link to — a token, never the binder's own id
+  const sharedBinder = hash.match(/^\/b\/([a-f0-9]{20})$/);
   // settings pages carry their tab in the address, so a bookmark and the back
   // button both land on the panel they were left on
   const accountMatch = hash.match(/^\/account(?:\/([a-z-]+))?$/);
@@ -5110,6 +5218,9 @@ function route() {
   else if (pokeMatch) { nav = 'pokemon'; renderPokemonPage(pokeMatch[1]); }
   else if (hash === '/binders') { nav = 'binders'; renderBindersPage(); }
   else if (hash.startsWith('/binder/')) { nav = 'binders'; renderBinderPage(hash.slice('/binder/'.length)); }
+  // a binder somebody was handed: short on purpose, because this one gets
+  // pasted into messages, and it carries a token rather than the binder's id
+  else if (sharedBinder) renderBinderPage(null, sharedBinder[1]);
   else if (hash === '/scan') { nav = 'scan'; renderScanPage(); }
   else if (accountMatch) { nav = 'account'; renderAccountPage(accountMatch[1] || 'account'); }
   else if (adminMatch) { nav = 'account'; renderAdminPage(adminMatch[1] || 'cards'); }

@@ -712,6 +712,64 @@ const { chromium } = require('playwright');
     (await page.locator('.binder-grid .pocket-edit').count()) > 0 &&
     (await page.locator('button:has-text("Select to print")').count()) === 1);
 
+  // ---- handing the binder to somebody who has no account here ----
+  await page.click('button:has-text("Share")');
+  await page.waitForSelector('.picker-panel h3:has-text("Share this binder")');
+  check('share: a binder starts private, with no address to give out',
+    (await page.locator('.picker-panel input[readonly]').count()) === 0 &&
+    (await page.textContent('.picker-panel')).includes('no address for it to answer to'));
+  await page.selectOption('.picker-panel select', 'public');
+  await page.waitForSelector('.picker-panel input[readonly]');
+  const shareUrl = await page.inputValue('.picker-panel input[readonly]');
+  check('share: turning it on produces a link back into this app',
+    /^http:\/\/localhost:3111\/#\/b\/[a-f0-9]{20}$/.test(shareUrl));
+  await page.click('.picker-panel button:has-text("Close")');
+  await page.goto('http://localhost:3111/#/binders');
+  await page.waitForSelector('.binder-cover');
+  check('share: the shelf marks a binder that is out in the world',
+    (await page.locator('.binder-cover .binder-shared').count()) === 1);
+
+  {
+    // a stranger: no account, no session, nothing on this page is theirs
+    const vctx = await browser.newContext({ serviceWorkers: 'block' });
+    const vp = await vctx.newPage();
+    await vp.goto(shareUrl);
+    await vp.waitForSelector('.binder-cover-page');
+    check('share: a signed-out stranger can open the link',
+      (await vp.textContent('#view')).includes('My Binder'));
+    check('share: and is told whose binder they are looking at',
+      /Shared by \S+\./.test(await vp.textContent('#view')));
+    check('share: with none of the owner’s controls',
+      (await vp.locator('button:has-text("Edit binder")').count()) === 0 &&
+      (await vp.locator('button:has-text("Share")').count()) === 0 &&
+      (await vp.locator('button:has-text("Add to collection")').count()) === 0 &&
+      (await vp.locator('button:has-text("Select to print")').count()) === 0);
+    await vp.click('.binder-cover-page');
+    await vp.waitForSelector('.binder-grid .pocket');
+    check('share: the pockets carry no ⋯ handle',
+      (await vp.locator('.binder-grid .pocket-edit').count()) === 0);
+    // the tally is the owner's, and a visitor tapping a card must not move it
+    await vp.click('.pocket[data-pocket="0"]');
+    await vp.waitForSelector('#card-modal[open]');
+    check('share: tapping a card opens it instead of ticking somebody else’s list',
+      (await vp.textContent('#view')).includes('1 / 10 in hand'));
+    await vp.click('#card-modal button:has-text("Close")');
+
+    // taking it back: one switch, and every copy of the address is dead
+    await page.click('.binder-cover');
+    await page.waitForSelector('button:has-text("Share")');
+    await page.click('button:has-text("Share")');
+    await page.waitForSelector('.picker-panel select');
+    await page.selectOption('.picker-panel select', 'private');
+    await page.waitForFunction(() => !document.querySelector('.picker-panel input[readonly]'));
+    await page.click('.picker-panel button:has-text("Close")');
+    await vp.reload();
+    await vp.waitForSelector('#view .center');
+    check('share: turning it private kills the address that was handed out',
+      /does not lead anywhere/.test(await vp.textContent('#view')));
+    await vctx.close();
+  }
+
   await page.goto('http://localhost:3111/#/binders');
   await page.waitForSelector('.binder-cover');
   check('binder: cover shows live progress (art not counted)', (await page.textContent('.binder-cover')).includes('1 / 10 in hand'));

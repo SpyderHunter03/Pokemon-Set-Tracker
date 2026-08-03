@@ -176,6 +176,13 @@ try { db.exec('ALTER TABLE users ADD COLUMN totp_enabled INTEGER NOT NULL DEFAUL
 try { db.exec('ALTER TABLE users ADD COLUMN oidc_iss TEXT'); } catch { /* already present */ }
 try { db.exec('ALTER TABLE users ADD COLUMN oidc_sub TEXT'); } catch { /* already present */ }
 try { db.exec('CREATE UNIQUE INDEX IF NOT EXISTS users_oidc ON users (oidc_iss, oidc_sub) WHERE oidc_sub IS NOT NULL'); } catch { /* already present */ }
+// A binder can be handed to somebody who has no account here. NULL is private
+// — the default, and what every binder that predates this is. A value is an
+// unguessable token that stands in for the binder in a public URL: the real
+// id is never published, so a shared link cannot be filed down into an API
+// path that expects its owner to be signed in.
+try { db.exec('ALTER TABLE binders ADD COLUMN share TEXT'); } catch { /* already present */ }
+try { db.exec('CREATE UNIQUE INDEX IF NOT EXISTS binders_share ON binders (share) WHERE share IS NOT NULL'); } catch { /* already present */ }
 
 /* One-shot links: verify this address, reset this password. Only the SHA-256
  * of each token is kept — the raw value exists in the email and nowhere else,
@@ -290,8 +297,14 @@ const BINDER_IMG_DIR = path.join(DATA_DIR, 'binder-images');   // user-uploaded 
 // a color it has to fight.
 const BINDER_COLORS = ['red', 'blue', 'green', 'purple', 'black', 'none'];
 const MAX_BINDER_PAGES = 60;                     // the most sheets one binder holds
-const _bindersOf = db.prepare('SELECT id, name, size, color, pages, slots, cover FROM binders WHERE user_id = ? ORDER BY created');
+const _bindersOf = db.prepare('SELECT id, name, size, color, pages, slots, cover, share FROM binders WHERE user_id = ? ORDER BY created');
 const _binderGet = db.prepare('SELECT * FROM binders WHERE user_id = ? AND id = ?');
+const _binderShare = db.prepare('UPDATE binders SET share = ?, updated = ? WHERE user_id = ? AND id = ?');
+// the only binder lookup that does not start from a signed-in account, so it
+// carries the owner's name along: the shared page says whose binder it is
+const _binderByShare = db.prepare(
+  'SELECT b.name, b.size, b.color, b.pages, b.slots, b.cover, u.display AS owner ' +
+  'FROM binders b JOIN users u ON u.id = b.user_id WHERE b.share = ?');
 const _binderPut = db.prepare(`INSERT INTO binders (user_id, id, name, size, color, pages, slots, cover, created, updated)
   VALUES (?,?,?,?,?,?,?,?,?,?)
   ON CONFLICT(user_id, id) DO UPDATE SET name=excluded.name, size=excluded.size, color=excluded.color,
@@ -2701,6 +2714,25 @@ async function handleApi(req, res, pathname, ip, url) {
     return sendJSON(res, 200, { ok: true, token, username: who.display }, { 'Set-Cookie': sessionCookie(req, token) });
   }
 
+  /* ---- a binder somebody chose to hand out ----
+   * Deliberately on this side of the sign-in gate: the whole point is that a
+   * link works for a person who has no account here. What comes back is the
+   * binder and the name of whoever shared it, and nothing else — not the
+   * binder's real id, not the owner's address, not their other binders. The
+   * token is the entire credential, so it is 80 bits of it. */
+  const sharedMatch = pathname.match(/^\/api\/shared\/([a-f0-9]{20})$/);
+  if (sharedMatch && req.method === 'GET') {
+    // guessing this is hopeless, but a wrong link should not be free either
+    if (rateLimited(ip, 'shared', 120, 10 * 60 * 1000)) return sendJSON(res, 429, { error: 'Too many requests, try again later' });
+    const row = _binderByShare.get(sharedMatch[1]);
+    if (!row) return sendJSON(res, 404, { error: 'That link does not lead anywhere — it may have been turned off, or replaced with a new one.' });
+    return sendJSON(res, 200, {
+      owner: row.owner,
+      binder: { name: row.name, size: row.size, color: row.color, pages: row.pages,
+        slots: JSON.parse(row.slots), cover: row.cover ? JSON.parse(row.cover) : null },
+    });
+  }
+
   // authenticated routes
   const user = authUser(req);
   if (!user) return sendJSON(res, 401, { error: 'Not signed in' });
@@ -3250,7 +3282,7 @@ async function handleApi(req, res, pathname, ip, url) {
       const slots = JSON.parse(b.slots);
       const entries = Object.values(slots).filter((e) => e.card);   // art spans don't track
       return { id: b.id, name: b.name, size: b.size, color: b.color, pages: b.pages,
-        cover: b.cover ? JSON.parse(b.cover) : null,
+        cover: b.cover ? JSON.parse(b.cover) : null, shared: !!b.share,
         filled: entries.length, have: entries.filter((s) => s.have).length };
     });
     return sendJSON(res, 200, { binders: rows });
@@ -3318,13 +3350,32 @@ async function handleApi(req, res, pathname, ip, url) {
     return sendJSON(res, 200, { ok: true, url: '/bimg/' + name });
   }
 
+  /* ---- turning one binder into a link, and taking it back ----
+   * Off is the default and off is instant: clearing the column is all it
+   * takes for every copy of the URL that ever left this machine to stop
+   * working. `rotate` mints a fresh token over an existing one, which is the
+   * same thing with a replacement — the only answer to a link that reached
+   * somebody it should not have. */
+  const shareToggle = pathname.match(/^\/api\/binders\/([a-f0-9-]{36})\/share$/);
+  if (shareToggle && req.method === 'POST') {
+    const row = _binderGet.get(user.id, shareToggle[1]);
+    if (!row) return sendJSON(res, 404, { error: 'Binder not found' });
+    const body = await readBody(req);
+    const share = !body.on ? null
+      : (row.share && !body.rotate) ? row.share
+        : crypto.randomBytes(10).toString('hex');
+    _binderShare.run(share, Date.now(), user.id, row.id);
+    return sendJSON(res, 200, { ok: true, share });
+  }
+
   const binderMatch = pathname.match(/^\/api\/binders\/([a-f0-9-]{36})$/);
   if (binderMatch) {
     const row = _binderGet.get(user.id, binderMatch[1]);
     if (!row) return sendJSON(res, 404, { error: 'Binder not found' });
     if (req.method === 'GET') {
       return sendJSON(res, 200, { binder: { id: row.id, name: row.name, size: row.size, color: row.color,
-        pages: row.pages, slots: JSON.parse(row.slots), cover: row.cover ? JSON.parse(row.cover) : null, updated: row.updated } });
+        pages: row.pages, slots: JSON.parse(row.slots), cover: row.cover ? JSON.parse(row.cover) : null,
+        share: row.share || null, updated: row.updated } });
     }
     if (req.method === 'PUT') {
       const body = await readBody(req);

@@ -1253,6 +1253,62 @@ function fail(msg) {
     bRm.binder.slots[rA - 9] && (bRm.binder.slots[rA - 9].cells || []).join(',') === `${rA - 9},${rB - 9}` &&
     !bRm.binder.slots[rA]);
 
+  /* ---- handing a binder to somebody who has no account here ----
+   * The token IS the credential, so what matters is that it works with no
+   * session at all, that it stops working the moment it is withdrawn, and
+   * that it never hands out anything the link-holder was not given. */
+  const fakeToken = 'f'.repeat(20);
+  const shNone = (await fetch(`http://localhost:3115/api/shared/${fakeToken}`)).status;
+  check('share: a binder is private until it is shared, and an invented token leads nowhere',
+    shNone === 404);
+  const shOff = await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { headers: buAuth });
+  check('share: the owner is told there is no link yet', shOff.binder.share === null);
+
+  const shOn = await jfetch(`http://localhost:3115/api/binders/${bd.id}/share`,
+    { method: 'POST', headers: buAuth, body: JSON.stringify({ on: true }) });
+  const tok1 = shOn.share;
+  // no Authorization header anywhere in this call: that is the whole point
+  const pub = await jfetch(`http://localhost:3115/api/shared/${tok1}`);
+  check('share: turning it on mints a token a stranger can use',
+    /^[a-f0-9]{20}$/.test(tok1 || '') && pub.binder && pub.binder.name === bd.name &&
+    Object.keys(pub.binder.slots).length === Object.keys(bRm.binder.slots).length);
+  check('share: the shared page is told whose binder it is', pub.owner === buReg.username);
+  // the real id is what the owner's own endpoints key on — publishing it would
+  // hand every link-holder something to try against /api/binders/<id>
+  check('share: the binder’s own id is not in what a link-holder receives',
+    pub.binder.id === undefined && !JSON.stringify(pub).includes(bd.id));
+
+  const shSteal = (await fetch(`http://localhost:3115/api/binders/${bd.id}/share`,
+    { method: 'POST', headers: { Authorization: 'Bearer ' + cpChange.token, 'Content-Type': 'application/json' }, body: JSON.stringify({ on: true }) })).status;
+  check('share: somebody else cannot publish your binder', shSteal === 404);
+
+  // an ordinary edit must not quietly retire a link that is out in the world
+  await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { method: 'PUT', headers: buAuth, body: JSON.stringify({ name: 'Still shared' }) });
+  const afterEdit = await jfetch(`http://localhost:3115/api/shared/${tok1}`);
+  check('share: editing the binder leaves the link alone', afterEdit.binder.name === 'Still shared');
+
+  // asking again without rotate is idempotent — pressing Share twice must not
+  // silently invalidate the address already pasted into somebody's message
+  const shAgain = await jfetch(`http://localhost:3115/api/binders/${bd.id}/share`,
+    { method: 'POST', headers: buAuth, body: JSON.stringify({ on: true }) });
+  check('share: turning on an already-shared binder keeps the same link', shAgain.share === tok1);
+
+  const shRot = await jfetch(`http://localhost:3115/api/binders/${bd.id}/share`,
+    { method: 'POST', headers: buAuth, body: JSON.stringify({ on: true, rotate: true }) });
+  const oldDead = (await fetch(`http://localhost:3115/api/shared/${tok1}`)).status;
+  const newLive = (await fetch(`http://localhost:3115/api/shared/${shRot.share}`)).status;
+  check('share: a new link works and kills the old one',
+    shRot.share !== tok1 && /^[a-f0-9]{20}$/.test(shRot.share || '') && oldDead === 404 && newLive === 200);
+
+  const shListOn = await jfetch('http://localhost:3115/api/binders', { headers: buAuth });
+  const shOffAgain = await jfetch(`http://localhost:3115/api/binders/${bd.id}/share`,
+    { method: 'POST', headers: buAuth, body: JSON.stringify({ on: false }) });
+  const nowDead = (await fetch(`http://localhost:3115/api/shared/${shRot.share}`)).status;
+  const shListOff = await jfetch('http://localhost:3115/api/binders', { headers: buAuth });
+  check('share: turning it off retires the link and the shelf stops saying it is out',
+    shListOn.binders[0].shared === true && shOffAgain.share === null &&
+    nowDead === 404 && shListOff.binders[0].shared === false);
+
   const bDel = await jfetch(`http://localhost:3115/api/binders/${bd.id}`, { method: 'DELETE', headers: buAuth });
   const bGone = (await fetch(`http://localhost:3115/api/binders/${bd.id}`, { headers: buAuth })).status;
   check('binder: delete removes it', bDel.ok === true && bGone === 404);
