@@ -56,10 +56,14 @@ const { chromium } = require('playwright');
   check('logged out: tapping a card does not track', Object.keys(guestColl).length === 0);
   check('logged out: modal offers sign-in', (await page.locator('#card-modal button', { hasText: 'Sign in' }).count()) >= 1);
   await page.click('#card-modal button:has-text("Close")');
-  check('logged out: backup section hidden', await page.evaluate(() => {
-    renderAccountModal();
-    return document.getElementById('backup-area').style.display === 'none';
-  }));
+  // signed out there is no server-side collection to back up, and two of the
+  // four tabs would have nothing in them — so the page is just the sign-in form
+  await page.goto('http://localhost:3111/#/account');
+  await page.waitForSelector('#account-page form');
+  check('logged out: account page offers no backup',
+    (await page.locator('#account-page button:has-text("Export collection")').count()) === 0);
+  check('logged out: account page offers no tabs',
+    (await page.locator('#account-page .tabs a').count()) === 0);
 
   // ---- sign in + old v1 data migration ----
   const uniq = 'smoke' + Math.floor(Math.random() * 1e6);
@@ -76,10 +80,13 @@ const { chromium } = require('playwright');
   const migrated = await coll();
   check('v1 → v2 migration', migrated && migrated['base1-58'] && migrated['base1-58'].normal === 2);
   check('signed in: stats banner shown', (await page.locator('#stats-banner').count()) === 1);
-  check('signed in: backup section shown', await page.evaluate(() => {
-    renderAccountModal();
-    return document.getElementById('backup-area').style.display !== 'none';
-  }));
+  await page.goto('http://localhost:3111/#/account/data');
+  await page.waitForSelector('#account-page button:has-text("Export collection")');
+  check('signed in: backup lives on the Data tab', true);
+  check('the tab that is showing is the one marked active',
+    (await page.textContent('#account-page .tabs a.active')) === 'Data');
+  await page.goto('http://localhost:3111/#/');
+  await page.waitForSelector('.set-card');
   check('home shows sets', (await page.locator('.set-card').count()) === 3);   // base1 + Darkness Ablaze + admin-made Test Promos
   check('set tiles show a printings tally too',
     (await page.textContent('.set-card .count >> nth=0')).includes('printings') &&
@@ -788,18 +795,17 @@ const { chromium } = require('playwright');
   await page.click('button:has-text("Done")');
 
   // ---- language switching ----
-  await page.click('#account-btn');
-  await page.waitForSelector('#language-area select');
-  await page.selectOption('#language-area select', 'fr');
-  await page.click('#account-modal .close-modal');
+  await page.goto('http://localhost:3111/#/account/data');
+  await page.waitForSelector('#account-page select');
+  await page.selectOption('#account-page select', 'fr');
   await page.click('.bottomnav a[data-nav=sets]');
   await page.waitForSelector('.set-card:has-text("Set de Base")');
   check('sets render in French', true);
   check('collection persists across languages', (await page.textContent('#stat-owned')).trim() === '2');
-  await page.click('#account-btn');
-  await page.waitForSelector('#language-area select');
-  await page.selectOption('#language-area select', 'en');
-  await page.click('#account-modal .close-modal');
+  await page.goto('http://localhost:3111/#/account/data');
+  await page.waitForSelector('#account-page select');
+  await page.selectOption('#account-page select', 'en');
+  await page.click('.bottomnav a[data-nav=sets]');
   await page.waitForSelector('.set-card:has-text("Base Set")');
   check('back to English', true);
 
@@ -852,10 +858,16 @@ const { chromium } = require('playwright');
 
   // this user is NOT the first account (bootstrap test registered the admin)
   await page.click('#account-btn');
-  await page.waitForSelector('#account-modal[open]');
-  await page.waitForTimeout(800); // admin area renders async
-  check('non-admin sees no Administration section', (await page.locator('#admin-area button').count()) === 0);
-  await page.keyboard.press('Escape');
+  await page.waitForSelector('#account-page button:has-text("Sign out")');
+  await page.waitForTimeout(800); // the admin link is added once /api/me answers
+  check('non-admin is offered no way to administration',
+    (await page.locator('#account-page a:has-text("Administration")').count()) === 0);
+  // and typing the address in gets them nothing either
+  await page.goto('http://localhost:3111/#/admin');
+  await page.waitForSelector('#admin-page .settings-card');
+  check('non-admin who guesses the address is turned away',
+    (await page.locator('#admin-page button').count()) === 0 &&
+    (await page.textContent('#admin-page')).includes('belongs to the account that set this install up'));
 
   // ---- card data comes from the server's database (not R2/static JSON) ----
   await page.goto('http://localhost:3111/#/set/base1');
@@ -947,28 +959,40 @@ const { chromium } = require('playwright');
     await gctx.close();
   }
 
-  // ---- signing in closes the modal it was asked for ----
+  // ---- signing in puts you back where you were sent from ----
+  // A dialog could close and leave the page underneath it untouched. A page
+  // cannot, so being asked to sign in from the middle of something has to
+  // remember where the middle of something was.
   {
     const actx = await browser.newContext({ serviceWorkers: 'block' });
     const ap = await actx.newPage();
-    await ap.goto('http://localhost:3111/');
-    await ap.waitForSelector('.set-card');
-    await ap.click('#account-btn');
-    await ap.waitForSelector('#account-modal[open]');
-    await ap.click('#account-modal .tabs button:has-text("Create account")');
+    await ap.goto('http://localhost:3111/#/set/base1');
+    await ap.waitForSelector('.tcg-card');
+    await ap.click('.tcg-card >> nth=0');
+    await ap.waitForSelector('#card-modal[open]');
+    await ap.click('#card-modal button:has-text("Sign in")');
+    await ap.waitForSelector('#account-page form');
+    check('a card you cannot track sends you to the account page',
+      ap.url().endsWith('#/account') && (await ap.locator('#card-modal[open]').count()) === 0);
+    await ap.click('#account-page .tabs button:has-text("Create account")');
     await ap.fill('#ptcg-username', 'smokelogin' + Math.floor(Math.random() * 1e6));
     await ap.fill('#ptcg-password', 'password123');
-    await ap.click('#account-modal form .btn');
-    await ap.waitForFunction(() => !document.getElementById('account-modal').open, null, { timeout: 8000 })
-      .catch(() => {});
-    check('sign-in closes the account modal', (await ap.locator('#account-modal[open]').count()) === 0);
+    await ap.click('#account-page form .btn');
+    await ap.waitForSelector('.tcg-card', { timeout: 8000 }).catch(() => {});
+    check('signing in returns you to the page that sent you', ap.url().endsWith('#/set/base1'));
     // route() repaints after the sync round-trip, so give the banner a moment
+    await ap.goto('http://localhost:3111/#/');
     await ap.waitForSelector('#stats-banner', { timeout: 8000 }).catch(() => {});
     check('sign-in still switches the app into tracking mode', (await ap.locator('#stats-banner').count()) === 1);
     await ap.click('#account-btn');
-    await ap.waitForSelector('#account-modal[open]');
-    check('reopening the modal shows the signed-in panel',
-      (await ap.textContent('#account-modal')).includes('Sign out'));
+    await ap.waitForSelector('#account-page button:has-text("Sign out")');
+    check('the account page shows the signed-in panel',
+      (await ap.textContent('#account-page')).includes('Sign out'));
+    await ap.click('#account-page .tabs a:has-text("Security")');
+    await ap.waitForSelector('#account-page:has-text("Two-factor")');
+    check('the Security tab holds two-factor and the password',
+      (await ap.textContent('#account-page')).includes('Change password') &&
+      ap.url().endsWith('#/account/security'));
     await actx.close();
   }
 

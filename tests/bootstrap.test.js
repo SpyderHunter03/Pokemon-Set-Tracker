@@ -64,16 +64,22 @@ const { chromium } = require('playwright');
   // the account made during setup is the administrator (fixed creds so the
   // test runner can log in later to refresh the catalog)
   await page.click('#account-btn');
-  await page.waitForSelector('#account-status button:has-text("Sign out")');
-  await page.waitForSelector('#admin-area button:has-text("Update cards from TCGdex")');
-  check('first account sees the Administration section', true);
+  await page.waitForSelector('#account-page button:has-text("Sign out")');
+  // administration is its own page now, reached from a link only an admin gets
+  await page.click('#account-page a:has-text("Administration")');
+  await page.waitForSelector('#admin-page button:has-text("Update cards from TCGdex")');
+  check('first account sees the Administration page', true);
   // A hidden child must vanish, not render as the literal text "null".
   // append() and replaceChildren() both stringify null; only h() filters it,
   // so any conditional child built outside h() is a candidate. This covered
   // only the admin panel, and the next one to get it wrong was the account
-  // panel a few centimetres above it — so check the whole dialog.
-  check('the account dialog renders no stray "null" text',
-    !/\bnull\b/.test(await page.textContent('#account-modal')));
+  // panel a few centimetres above it — so check both whole pages.
+  check('the administration page renders no stray "null" text',
+    !/\bnull\b/.test(await page.textContent('#admin-page')));
+  await page.goto('http://localhost:3111/#/account');
+  await page.waitForSelector('#account-page button:has-text("Sign out")');
+  check('the account page renders no stray "null" text',
+    !/\bnull\b/.test(await page.textContent('#account-page')));
 
   // The same check with two-factor ON, because that is the branch that had a
   // conditional child and therefore the one that printed "null" at a user.
@@ -96,11 +102,9 @@ const { chromium } = require('playwright');
     const on = await page.evaluate(async (c) =>
       (await fetch('api/totp/enable', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: c }) })).json(), code);
     check('two-factor can be turned on from the browser', on.ok === true);
-    await page.keyboard.press('Escape');
-    await page.click('#account-btn');
-    await page.waitForSelector('#account-modal[open]');
-    await page.waitForSelector('#account-status:has-text("recovery code")');
-    const withTotp = await page.textContent('#account-modal');
+    await page.goto('http://localhost:3111/#/account/security');
+    await page.waitForSelector('#account-page:has-text("recovery code")');
+    const withTotp = await page.textContent('#account-page');
     check('the two-factor panel renders no stray "null" text', !/\bnull\b/.test(withTotp));
     check('and it says how many recovery codes are left', /10 recovery codes left/.test(withTotp));
     await page.evaluate(async () =>
@@ -108,14 +112,14 @@ const { chromium } = require('playwright');
   }
 
   // admin re-run: starts, runs, completes (resume makes it quick)
-  await page.click('#admin-area button:has-text("Update cards from TCGdex")');
-  await page.waitForSelector('#admin-area .build-progress');
+  await page.goto('http://localhost:3111/#/admin/cards');
+  await page.click('#admin-page button:has-text("Update cards from TCGdex")');
+  await page.waitForSelector('#admin-page .build-progress');
   check('admin update shows progress', true);
-  await page.waitForSelector('#admin-area button:has-text("Update cards from TCGdex")', { timeout: 120000 });
+  await page.waitForSelector('#admin-page button:has-text("Update cards from TCGdex")', { timeout: 120000 });
   check('admin update completes', true);
 
   // ---- custom printings + own variant images (admin) ----
-  await page.click('#account-modal .close-modal');
   await page.goto('http://localhost:3111/#/set/base1');
   await page.waitForSelector('.tcg-card');
   const tilesBefore = await page.locator('.tcg-card').count();
@@ -345,8 +349,8 @@ const { chromium } = require('playwright');
 
   // sign the admin out so the main suite's fresh user is a clean non-admin test
   await page.click('#account-btn');
-  await page.waitForSelector('#account-status button:has-text("Sign out")');
-  await page.click('#account-status button:has-text("Sign out")');
+  await page.waitForSelector('#account-page button:has-text("Sign out")');
+  await page.click('#account-page button:has-text("Sign out")');
   await page.evaluate(() => localStorage.clear());
 
   console.log(errors.length ? 'JS ERRORS:\n' + errors.join('\n') : 'No JS errors.');

@@ -178,7 +178,7 @@ node server.js
 
 ### 2. Download the card database — from the app
 
-On first visit the main page shows a **Download card database** button: press it and a progress bar tracks the download (sets become browsable as they finish; the scanner index is built automatically at the end). Later, the **first registered account** gets an **Administration** section in the 👤 menu with an **Update card database** button that picks up newly released sets.
+On first visit the main page shows a **Download card database** button: press it and a progress bar tracks the download (sets become browsable as they finish; the scanner index is built automatically at the end). Later, the **first registered account** gets an **Administration** page (👤 → Administration) with an **Update card database** button that picks up newly released sets.
 
 Prefer the command line (needed for extra languages / high-res images)? The same downloader is scriptable:
 
@@ -282,9 +282,28 @@ Setup is also where you choose whether anyone else may sign up, and give the app
 
 ## Cloud sync
 
-With the bundled server running, the 👤 button lets people create an account — subject to the registration setting chosen at setup. Collections auto-sync (variant quantities included): local changes push after ~1.5 s; signing in on a new device pulls and merges (per-variant highest count wins, merges never delete).
+With the bundled server running, the 👤 button opens the account page, where people can create an account — subject to the registration setting chosen at setup. Collections auto-sync (variant quantities included): local changes push after ~1.5 s; signing in on a new device pulls and merges (per-variant highest count wins, merges never delete).
 
 Sign-in specifics: scrypt with the cost stored alongside each hash (old hashes keep working and are quietly re-hashed on next sign-in), sessions in an httpOnly `SameSite=Strict` cookie, failed attempts throttled per account as well as per address, and a ten-character minimum. Bearer tokens still work for scripts and API clients.
+
+### The account and administration pages
+
+These are pages rather than a dialog, and each carries its tab in the address, so the back button works and a bookmark lands where you left it.
+
+| Where | What is on it |
+| --- | --- |
+| `#/account` | Who you are signed in as, sync, and your email address |
+| `#/account/security` | Two-factor, recovery codes, and changing your password |
+| `#/account/data` | Card language, and exporting or importing your collection |
+| `#/account/about` | Version, debug info, repair & reload |
+| `#/admin` | Card database: what is installed, master updates, the jobs that rebuild it |
+| `#/admin/mail` | SMTP settings and a test message |
+| `#/admin/signon` | The optional OpenID Connect provider |
+| `#/admin/server` | What address this server sees you arriving from, and what kind of install this is |
+
+Everything under `#/admin` belongs to the administrator — the account that claimed the install at setup. Anybody else who types the address in is told so and given nothing, and the calls behind the page are refused by the server regardless of what any page shows.
+
+Being asked to sign in from the middle of something returns you to it: tapping **Sign in to track your collection** on a card takes you to `#/account`, and signing in puts you back on the set you were reading.
 
 ### Sending mail (optional)
 
@@ -299,15 +318,15 @@ PTCG_SMTP_FROM='Pokémon Tracker <cards@example.com>'
 PTCG_PUBLIC_URL=https://cards.example.com   # how links in emails should address this app
 ```
 
-The setup screen writes the same settings if you would rather not touch the unit file, and so does **Administration → Sending mail** on an install that is already running — with a **Send a test** button, because the alternative way to discover the settings are wrong is somebody failing to reset their password. The environment wins where both are set. The password is write-only: it goes in and is never handed back.
+The setup screen writes the same settings if you would rather not touch the unit file, and so does **Administration → Mail** on an install that is already running — with a **Send a test** button, because the alternative way to discover the settings are wrong is somebody failing to reset their password. The environment wins where both are set. The password is write-only: it goes in and is never handed back.
 
-Your own address lives in 👤 → Email. Adding or changing it needs your password, since the address is the recovery path, and a changed address is unconfirmed until somebody proves they can read it. Sending needs the optional `nodemailer` package (`npm install --no-save nodemailer`), in the same spirit as `sharp`.
+Your own address lives in 👤 → Account → Email. Adding or changing it needs your password, since the address is the recovery path, and a changed address is unconfirmed until somebody proves they can read it. Sending needs the optional `nodemailer` package (`npm install --no-save nodemailer`), in the same spirit as `sharp`.
 
 Confirmation links last 24 hours, reset links 45 minutes, both are single-use, and only the SHA-256 of each is stored — the usable value exists in the email and nowhere else. Setting a new password signs out every device. Asking to reset an address the server has never seen gets exactly the same answer as asking about one it has, so the endpoint cannot be used to find out who has an account here.
 
 ### Two-factor
 
-An authenticator app code on top of the password. Nothing to sign up for, nothing to pay, and it works with the phone in flight mode — the app and the server just agree on the time. Turn it on from 👤 → Two-factor: the app hands over a setup key, and only turns the second factor on once you have typed back a code made from it, so a key that never reached your authenticator cannot lock you out.
+An authenticator app code on top of the password. Nothing to sign up for, nothing to pay, and it works with the phone in flight mode — the app and the server just agree on the time. Turn it on from 👤 → Security → Two-factor: the app hands over a setup key, and only turns the second factor on once you have typed back a code made from it, so a key that never reached your authenticator cannot lock you out.
 
 Enrolment shows a QR code to scan, the same thing as an `otpauth://` link to tap on the phone you are already holding, and the key in typeable form. The QR needs the optional `qrcode-generator` package (`npm install --no-save qrcode-generator`); without it the link and the key still work.
 
@@ -322,7 +341,7 @@ Turning it off through the app needs your password, so a session someone else ha
 
 ### Single sign-on (optional)
 
-Point the app at any OpenID Connect provider — Authentik, Keycloak, Zitadel, Pocket ID, Auth0, Okta — from **Administration → Single sign-on**, or with `PTCG_OIDC_ISSUER`, `PTCG_OIDC_CLIENT_ID` and `PTCG_OIDC_CLIENT_SECRET`. Local accounts keep working exactly as before; this is an extra door, not a replacement, so a fresh install still needs nothing else running.
+Point the app at any OpenID Connect provider — Authentik, Keycloak, Zitadel, Pocket ID, Auth0, Okta — from **Administration → Sign-on**, or with `PTCG_OIDC_ISSUER`, `PTCG_OIDC_CLIENT_ID` and `PTCG_OIDC_CLIENT_SECRET`. Local accounts keep working exactly as before; this is an extra door, not a replacement, so a fresh install still needs nothing else running.
 
 Standard authorization-code flow with PKCE. No dependency: discovery is one fetch and verifying the identity token is RSA or ECDSA over a published JSON Web Key, both of which Node does natively. The token is checked all the way down — signature against the provider's key, then issuer, audience, expiry and nonce.
 

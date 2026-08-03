@@ -458,7 +458,9 @@ select.chip { appearance: none; padding-right: 22px; }
 
 .tabs { display: flex; gap: 6px; margin-bottom: 14px; }
 
-.tabs button {
+/* two kinds of tab share this strip: the sign-in form's, which switch what a
+   form is for, and the settings pages', which are links to addresses */
+.tabs button, .tabs a {
   flex: 1;
   padding: 8px;
   border-radius: 10px;
@@ -469,7 +471,41 @@ select.chip { appearance: none; padding-right: 22px; }
   font-weight: 600;
 }
 
-.tabs button.active { background: var(--surface-2); color: var(--text); border-color: var(--accent-soft); }
+.tabs a { text-align: center; text-decoration: none; font-size: 14px; }
+
+.tabs button.active, .tabs a.active { background: var(--surface-2); color: var(--text); border-color: var(--accent-soft); }
+
+/* a narrow phone cannot fit four tabs across; let them wrap rather than
+   squeeze the labels into initials */
+@media (max-width: 420px) {
+  .tabs { flex-wrap: wrap; }
+  .tabs a { flex: 1 1 40%; }
+}
+
+/* ---------- settings pages (#/account, #/admin) ---------- */
+.settings-page { max-width: 640px; margin: 0 auto; }
+
+.settings-card {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+  padding: 14px 16px;
+  margin-bottom: 12px;
+}
+
+.settings-card:empty { display: none; }
+
+.settings-card h3 { font-size: 15px; margin: 0 0 6px; }
+
+.settings-card hr { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
+
+/* every labelled field gets the same air above and below it, so a card of
+   twelve of them reads as a list rather than a wall */
+.settings-card .ce-field { margin: 10px 0 6px; }
+
+.settings-card .row { margin-top: 10px; }
+
+.settings-card .ce-field + .row { margin-top: 4px; }
 
 /* ---------- toast ---------- */
 .toast {

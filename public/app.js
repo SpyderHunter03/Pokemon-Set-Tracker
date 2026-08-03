@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.58.0';
+const APP_VERSION = '3.59.0';
 
 /* ============================================================
  * Storage helpers
@@ -666,11 +666,9 @@ async function finishTotpSignIn(ticket) {
       auth = { username: d.username };
       lsSet('ptcg.auth', auth);
       ov.remove();
-      accountModal.close();
       await pullAndMerge();
       updateAccountButton();
-      renderAccountModal();
-      route();
+      returnFromSignIn();
       toast('Signed in \u2014 collection synced');
     } catch (ex) {
       err.textContent = ex.message;
@@ -934,7 +932,7 @@ async function openCardModal(brief, { variant, onOwnershipChange, onCardChanged 
       // browse-only: offer sign-in instead of ownership controls
       counterWrap.replaceChildren(
         h('div', { class: 'row', style: 'justify-content:center; margin-top:6px' },
-          h('button', { class: 'btn small', onclick: () => { cardModal.close(); renderAccountModal(); accountModal.showModal(); } },
+          h('button', { class: 'btn small', onclick: () => { cardModal.close(); goToAccount(); } },
             serverAvailable ? '🔑 Sign in to track your collection' : 'Tracking needs the server')),
       );
       renderAdminControls();
@@ -1294,7 +1292,7 @@ async function renderHome() {
             ? 'Create a free account to mark which cards you own and sync across devices.'
             : 'Every set and card is here to explore.')),
         serverAvailable
-          ? h('button', { class: 'btn small', onclick: () => { renderAccountModal(); accountModal.showModal(); } }, 'Sign in')
+          ? h('button', { class: 'btn small', onclick: () => goToAccount() }, 'Sign in')
           : null,
       );
 
@@ -1695,7 +1693,9 @@ function openPullReview(prev) {
         `${v.name} #${v.localId} — ${v.label || VARIANT_LABELS[v.variant] || v.variant}`, v.set));
     }
   }
-  const backToAdmin = () => { renderAccountModal(); accountModal.showModal(); };
+  // the review overlay lives inside `view`, so re-rendering the page is what
+  // takes it away — and the admin page is where the pull's progress shows up
+  const backToAdmin = () => { if (location.hash.startsWith('#/admin')) route(); else location.hash = '#/admin'; };
   const overlay = h('div', { class: 'picker-overlay' },
     h('div', { class: 'picker-panel ce-panel' },
       h('h3', { style: 'margin:0' }, `Master update${prev.version ? ' (v' + prev.version + ')' : ''} — review additions`),
@@ -1976,9 +1976,9 @@ async function afterProviderSignIn(linked) {
     await pullAndMerge();
   } catch { /* fall through to the normal page either way */ }
   updateAccountButton();
-  renderAccountModal();
   toast(linked ? 'Linked \u2014 you can sign in that way now' : 'Signed in \u2014 collection synced');
-  location.hash = '#/';
+  // linking was started from the account page, so that is where it belongs back
+  location.hash = linked ? '#/account' : '#/';
 }
 
 function afterProviderFailure(hash) {
@@ -2003,7 +2003,7 @@ function providerSection() {
   const label = appConfig.oidc.label || 'single sign-on';
   const refresh = async () => { _meCache = null; try { show(await apiCall('me')); } catch { wrap.replaceChildren(); } };
   const show = (me) => {
-    const rows = [h('hr'), h('h3', { style: 'margin:0 0 6px' }, label)];
+    const rows = [h('h3', { style: 'margin:0 0 6px' }, label)];
     if (me.oidcLinked) {
       const off = h('button', { class: 'btn ghost small' }, 'Unlink');
       off.addEventListener('click', () => askPassword(`Unlink ${label}`,
@@ -2073,7 +2073,6 @@ function providerSettingsSection() {
     });
 
     wrap.replaceChildren(...[
-      h('hr'),
       h('h3', { style: 'margin:0 0 6px' }, 'Single sign-on (optional)'),
       h('p', { class: 'muted small', style: 'margin:0' },
         'Point this at any OpenID Connect provider \u2014 Authentik, Keycloak, Zitadel, Pocket ID, Auth0, Okta. Local accounts keep working either way.'),
@@ -2098,7 +2097,7 @@ function emailSection() {
   const wrap = h('div', {});
   const refresh = async () => { _meCache = null; try { show(await apiCall('me')); } catch { wrap.replaceChildren(); } };
   const show = (me) => {
-    const rows = [h('hr'), h('h3', { style: 'margin:0 0 6px' }, 'Email')];
+    const rows = [h('h3', { style: 'margin:0 0 6px' }, 'Email')];
     if (!appConfig.mailConfigured) {
       rows.push(h('p', { class: 'muted small' }, me.email
         ? `${me.email} \u2014 this server cannot send mail, so it cannot be confirmed or used to reset your password.`
@@ -2185,7 +2184,6 @@ function mailSettingsSection() {
     });
 
     wrap.replaceChildren(...[
-      h('hr'),
       h('h3', { style: 'margin:0 0 6px' }, 'Sending mail'),
       h('p', { class: 'muted small', style: 'margin:0' }, cfg.packageAvailable
         ? 'With a mail server, this install can confirm addresses and send password resets. Any provider that gives you SMTP credentials will do.'
@@ -2212,7 +2210,7 @@ function mailSettingsSection() {
 function twoFactorSection() {
   const wrap = h('div', {});
   const show = (me) => {
-    wrap.replaceChildren(h('hr'), h('h3', { style: 'margin:0 0 6px' }, 'Two-factor'));
+    wrap.replaceChildren(h('h3', { style: 'margin:0 0 6px' }, 'Two-factor'));
     if (!me.totpEnabled) {
       wrap.append(
         h('p', { class: 'muted small' }, 'A code from an authenticator app, on top of your password. Nothing to sign up for and nothing to pay \u2014 it works offline, on your phone.'),
@@ -2886,19 +2884,54 @@ async function renderDebugPage() {
 }
 
 /* ============================================================
- * Account modal + language
+ * Account & administration pages
+ *
+ * These were one dialog with fourteen unrelated things stacked inside it:
+ * who you are, how you sign in, what language the cards are in, whether the
+ * scanner index needs rebuilding, and the SMTP password. A dialog is the
+ * wrong shape for that — it has no address, no back button, and no room.
+ *
+ * So: two pages. #/account is about the person signed in. #/admin is about
+ * the server they are signed in to. Each carries its tab in the URL, which
+ * means the back button works, a bookmark lands where you left it, and a
+ * screenshot of a problem comes with the address of the screen it is on.
  * ============================================================ */
-const accountModal = document.getElementById('account-modal');
 
-async function renderLanguageArea() {
-  const area = document.getElementById('language-area');
-  const langs = await getLanguages();
-  if (langs.length <= 1) { area.replaceChildren(); return; }
-  area.replaceChildren(
-    h('hr'),
-    h('h3', {}, 'Card language'),
-    h('p', { class: 'muted small' }, 'Your collection is shared across languages — only names and images change.'),
-    h('select', { class: 'chip', 'aria-label': 'Card language', onchange: async (e) => {
+/** One bordered block. Sections that fill themselves in from the server get
+ * their card immediately and their content when the answer arrives, so the
+ * page settles rather than reflowing under the reader. */
+function settingsCard(...kids) {
+  return h('section', { class: 'settings-card' }, ...kids.filter(Boolean));
+}
+
+/** append() and replaceChildren() turn a null child into the literal text
+ * "null" — only h() filters. Everything on these pages goes through here. */
+function addTo(el, ...kids) {
+  el.append(...kids.filter(Boolean));
+  return el;
+}
+
+/** Tabs are links, not buttons: each one is an address. */
+function settingsTabs(base, tabs, active) {
+  return h('nav', { class: 'tabs' }, ...tabs.map(([id, label]) =>
+    h('a', { class: id === active ? 'active' : '', href: `#/${base}/${id}` }, label)));
+}
+
+function settingsHead(title, ...extras) {
+  return addTo(h('div', { class: 'page-head' }, h('h1', {}, title)), ...extras);
+}
+
+/* ---- pieces the account page is made of ---- */
+
+/** Card language. Removes itself where only one language is installed —
+ * a menu with one item in it is furniture, not a choice. */
+function languageCard() {
+  const card = settingsCard();
+  (async () => {
+    let langs = [];
+    try { langs = await getLanguages(); } catch { /* offline: nothing to offer */ }
+    if (langs.length <= 1) { card.remove(); return; }
+    const sel = h('select', { class: 'chip', 'aria-label': 'Card language', onchange: (e) => {
       lang = e.target.value;
       lsSet('ptcg.lang', lang);
       clearDataCaches();
@@ -2908,31 +2941,321 @@ async function renderLanguageArea() {
       const o = h('option', { value: l.code }, l.name || l.code);
       if (l.code === lang) o.setAttribute('selected', '');
       return o;
-    })),
+    }));
+    card.append(
+      h('h3', { style: 'margin:0 0 6px' }, 'Card language'),
+      h('p', { class: 'muted small', style: 'margin:0 0 10px' },
+        'Your collection is shared across languages \u2014 only names and images change.'),
+      sel,
+    );
+  })();
+  return card;
+}
+
+/** Export and import. The file input lives in index.html rather than here,
+ * because replaceChildren() on a page re-render would otherwise take it away
+ * while the file picker was still open on top of it. */
+function backupCard() {
+  return settingsCard(
+    h('h3', { style: 'margin:0 0 6px' }, 'Backup'),
+    h('p', { class: 'muted small', style: 'margin:0 0 10px' },
+      'Your collection is saved on this device, and on this server when you are signed in. Export a file any time \u2014 import it on another device, or keep it as insurance.'),
+    h('div', { class: 'row' },
+      h('button', { class: 'btn small', onclick: () => exportCollection() }, 'Export collection'),
+      h('button', { class: 'btn ghost small', onclick: () => document.getElementById('import-file').click() }, 'Import collection'),
+    ),
   );
 }
 
-/** Administration section (first registered account): update the card database. */
-async function renderAdminArea() {
-  const area = document.getElementById('admin-area');
-  area.replaceChildren();
-  if (!serverAvailable || !auth) return;
-  let me;
-  try { me = await apiCall('me'); } catch { return; }
-  if (!me.admin) return;
+function aboutCard() {
+  return settingsCard(
+    h('h3', { style: 'margin:0 0 6px' }, 'About'),
+    h('p', { class: 'muted small', style: 'margin:0 0 6px' },
+      `Version ${appConfig.release ? 'v' + appConfig.release : APP_VERSION} \u00b7 app build ${APP_VERSION}`),
+    h('p', { class: 'muted small', style: 'margin:0 0 10px' },
+      'Card data and images are self-hosted (built with the included downloader). This app is not affiliated with Nintendo or The Pok\u00e9mon Company.'),
+    h('div', { class: 'row' },
+      h('a', { class: 'btn ghost small', href: '#/debug' }, 'Debug info'),
+      h('button', { class: 'btn ghost small', onclick: () => repairApp() }, 'Repair & reload'),
+    ),
+  );
+}
 
-  const content = h('div', {});
-  area.append(h('hr'), h('h3', {}, 'Administration'), content);
+/** Change the password. The endpoint has been there all along; until now the
+ * only way to reach it was to claim you had forgotten a password you had not,
+ * and wait for an email about it. */
+function passwordSection() {
+  const min = appConfig.minPassword || 10;
+  const cur = h('input', { type: 'password', autocomplete: 'current-password', placeholder: 'Current password' });
+  const next = h('input', { type: 'password', autocomplete: 'new-password', placeholder: `New password (${min}+ characters)` });
+  const again = h('input', { type: 'password', autocomplete: 'new-password', placeholder: 'Type the new one again' });
+  const note = h('p', { class: 'muted small', style: 'margin:0' });
+  const save = h('button', { class: 'btn small' }, 'Change password');
+  const f = (label, input) => h('label', { class: 'ce-field' }, h('span', { class: 'muted small' }, label), input);
+  const bad = (msg) => { note.style.color = 'var(--accent)'; note.textContent = msg; };
 
-  if (appConfig.master) {
-    area.insertBefore(h('p', { class: 'muted small', style: 'border:1px solid var(--owned); border-radius:8px; padding:8px 10px' },
-      '🛠️ Master curation workspace — edits made here become the master database when you publish (scripts/publish-images.js). This is not a personal install.'), content);
+  const form = h('form', {
+    onsubmit: async (e) => {
+      e.preventDefault();
+      note.style.color = '';
+      note.textContent = '';
+      if (next.value !== again.value) return bad('Those two do not match.');
+      save.disabled = true;
+      try {
+        await apiCall('change-password', { method: 'POST', body: JSON.stringify({
+          currentPassword: cur.value, newPassword: next.value,
+        }) });
+        cur.value = next.value = again.value = '';
+        note.textContent = 'Changed. Every other device that was signed in has been signed out; this one stays.';
+      } catch (ex) { bad(ex.message); }
+      save.disabled = false;
+    },
+  },
+    f('Current password', cur),
+    f('New password', next),
+    f('Type it again', again),
+    h('div', { class: 'row', style: 'gap:8px; margin-top:8px' }, save),
+    note,
+  );
+  return h('div', {},
+    h('h3', { style: 'margin:0 0 6px' }, 'Password'),
+    h('p', { class: 'muted small', style: 'margin:0 0 8px' },
+      'A new password ends every other session \u2014 useful on its own, if you think somebody else has one.'),
+    form,
+  );
+}
+
+/** The signed-out card: sign in, create an account, or go through a provider. */
+function signInCard() {
+  let mode = 'login';
+  const err = h('div', { class: 'error-msg' });
+  // stable name/id + correct autocomplete tokens so password managers (Bitwarden,
+  // 1Password, browser built-ins) recognise the form cleanly instead of treating
+  // it as suspicious and disabling their autofill overlay
+  const userIn = h('input', {
+    type: 'text', name: 'username', id: 'ptcg-username', placeholder: 'Username',
+    autocomplete: 'username', autocapitalize: 'none', autocorrect: 'off', spellcheck: 'false',
+  });
+  const passIn = h('input', {
+    type: 'password', name: 'password', id: 'ptcg-password', placeholder: `Password (${appConfig.minPassword || 10}+ characters)`,
+    autocomplete: 'current-password',
+  });
+  const submit = h('button', { class: 'btn', style: 'width:100%' }, 'Sign in');
+
+  // An address is the only way back in if the password goes. Optional, because
+  // an install with no mail server configured cannot do anything with one.
+  const mailIn = h('input', {
+    type: 'email', name: 'email', id: 'ptcg-email', placeholder: 'Email (for password resets)',
+    autocomplete: 'email', autocapitalize: 'none', autocorrect: 'off', spellcheck: 'false',
+  });
+  const mailRow = h('div', { class: 'field' }, mailIn);
+  mailRow.hidden = true;
+
+  const tabs = h('div', { class: 'tabs' },
+    h('button', { type: 'button', class: 'active', onclick: (e) => switchMode('login', e.target) }, 'Sign in'),
+    h('button', { type: 'button', onclick: (e) => switchMode('register', e.target) }, 'Create account'),
+  );
+
+  const forgotRow = h('div', { style: 'text-align:right' },
+    h('button', { type: 'button', class: 'btn ghost small', onclick: () => openForgotPassword() }, 'Forgot password?'));
+  forgotRow.hidden = !appConfig.mailConfigured;
+
+  function switchMode(m, btn) {
+    mode = m;
+    tabs.querySelectorAll('button').forEach((b) => b.classList.toggle('active', b === btn));
+    submit.textContent = m === 'login' ? 'Sign in' : 'Create account';
+    // "new-password" tells the password manager this is a sign-up field (offer to
+    // generate/save), "current-password" that it's an existing login (offer to fill)
+    passIn.setAttribute('autocomplete', m === 'login' ? 'current-password' : 'new-password');
+    mailRow.hidden = !(m === 'register' && appConfig.mailConfigured);
+    forgotRow.hidden = !(m === 'login' && appConfig.mailConfigured);
+    err.textContent = '';
   }
 
-  if (appConfig.readonly) {
-    content.replaceChildren(h('p', { class: 'muted small' },
-      'This server runs in read-only mode (PTCG_READONLY): the card database is managed centrally and cannot be changed from the app.'));
+  const form = h('form', {
+    onsubmit: async (e) => {
+      e.preventDefault();
+      err.textContent = '';
+      submit.disabled = true;
+      try {
+        const r = await doAuth(mode, userIn.value.trim(), passIn.value, mode === 'register' ? mailIn.value.trim() : null);
+        if (r && r.needTotp) { submit.disabled = false; finishTotpSignIn(r.ticket); return; }
+        toast(mode === 'login' ? 'Signed in \u2014 collection synced' : 'Account created \u2014 collection synced');
+        returnFromSignIn();
+      } catch (ex) {
+        err.textContent = ex.message;
+      } finally {
+        submit.disabled = false;
+      }
+    },
+  },
+    tabs,
+    h('div', { class: 'field' }, userIn),
+    mailRow,
+    h('div', { class: 'field' }, passIn),
+    err,
+    submit,
+  );
+
+  // deliberately outside the form: it opens a panel rather than submitting
+  // anything, and inside it would be a second `.btn` for anything aiming at
+  // the submit button to trip over
+  const ssoRow = appConfig.oidc
+    ? h('div', { style: 'margin-top:10px' },
+      h('a', { class: 'btn', style: 'width:100%; display:block; text-align:center', href: 'api/oidc/start' },
+        `Sign in with ${appConfig.oidc.label}`))
+    : null;
+
+  return settingsCard(
+    h('p', { class: 'muted small', style: 'margin:0 0 12px' },
+      'Sign in to mark which cards you own and keep them in step across every device.'),
+    form, forgotRow, ssoRow,
+  );
+}
+
+/* ---- where sign-in came from ----
+ * A dialog could close and leave you where you were. A page cannot, so it
+ * remembers instead: whoever sends somebody here to sign in says where they
+ * were reading, and that is where they go back to. */
+let signInReturn = null;
+
+function goToAccount(returnTo) {
+  signInReturn = returnTo || location.hash || '#/';
+  location.hash = '#/account';
+}
+
+function returnFromSignIn() {
+  const back = signInReturn || '#/';
+  signInReturn = null;
+  // an unchanged hash fires no hashchange, so re-render by hand
+  if ((location.hash || '#/') === back) route();
+  else location.hash = back;
+}
+
+/* ---- the account page ---- */
+const ACCOUNT_TABS = [
+  ['account', 'Account'],
+  ['security', 'Security'],
+  ['data', 'Data'],
+  ['about', 'About'],
+];
+
+function renderAccountPage(tab) {
+  if (!ACCOUNT_TABS.some(([id]) => id === tab)) tab = 'account';
+  const page = h('div', { class: 'settings-page', id: 'account-page' });
+  view.replaceChildren(page);
+
+  // Standalone: no server, so no account — but the local collection is still
+  // real, and a backup of it is the one thing worth offering.
+  if (!serverAvailable) {
+    addTo(page,
+      settingsHead('Account'),
+      settingsCard(
+        h('h3', { style: 'margin:0 0 6px' }, 'No server behind this app'),
+        h('p', { class: 'muted small', style: 'margin:0' },
+          'Syncing needs the bundled server. Right now the app is running standalone, so your collection lives on this device alone \u2014 export a backup below.'),
+      ),
+      backupCard(), languageCard(), aboutCard(),
+    );
     return;
+  }
+
+  // Signed out, two of the four tabs would be empty and one would be a lie.
+  if (!auth) {
+    addTo(page, settingsHead('Sign in'), signInCard(), languageCard(), aboutCard());
+    return;
+  }
+
+  const head = settingsHead('Account');
+  addTo(page, head, settingsTabs('account', ACCOUNT_TABS, tab));
+  // administration is somewhere to go, not something to read here
+  (async () => {
+    try {
+      const me = await apiCall('me');
+      if (me.admin) head.append(h('a', { class: 'btn ghost small', href: '#/admin', style: 'margin-left:auto' }, 'Administration'));
+    } catch { /* the cards below will say what went wrong */ }
+  })();
+
+  if (tab === 'account') {
+    addTo(page,
+      settingsCard(
+        h('h3', { style: 'margin:0 0 6px' }, 'Your account'),
+        h('p', { style: 'margin:0 0 4px' }, 'Signed in as ', h('strong', {}, auth.username), '.'),
+        h('p', { class: 'muted small', style: 'margin:0' }, syncState === 'error'
+          ? 'The last sync failed \u2014 your changes are saved on this device and will be retried.'
+          : 'Your collection syncs to this server automatically.'),
+        h('div', { class: 'row' },
+          h('button', { class: 'btn small', onclick: async (e) => {
+            e.target.disabled = true;
+            try { await pullAndMerge(); toast('Synced'); route(); }
+            catch (ex) { e.target.disabled = false; toast('Sync failed: ' + ex.message); }
+          } }, 'Sync now'),
+          h('button', { class: 'btn ghost small', onclick: () => { logout(); location.hash = '#/'; } }, 'Sign out'),
+        ),
+      ),
+      settingsCard(emailSection()),
+      appConfig.oidc ? settingsCard(providerSection()) : null,
+    );
+  } else if (tab === 'security') {
+    addTo(page, settingsCard(twoFactorSection()), settingsCard(passwordSection()));
+  } else if (tab === 'data') {
+    addTo(page, languageCard(), backupCard());
+  } else {
+    addTo(page, aboutCard());
+  }
+}
+
+/* ---- the administration page ---- */
+function adminTabList() {
+  const tabs = [['cards', 'Card database']];
+  // nothing to configure on an install whose data is managed elsewhere
+  if (!appConfig.readonly) tabs.push(['mail', 'Mail'], ['signon', 'Sign-on']);
+  tabs.push(['server', 'Server']);
+  return tabs;
+}
+
+function renderAdminPage(tab) {
+  const tabs = adminTabList();
+  if (!tabs.some(([id]) => id === tab)) tab = 'cards';
+  const backLink = () => h('a', { class: 'back-link', href: '#/account' }, '\u2190 Account');
+  const page = h('div', { class: 'settings-page', id: 'admin-page' }, backLink(), settingsHead('Administration'), spinner());
+  view.replaceChildren(page);
+
+  (async () => {
+    const only = (msg) => page.replaceChildren(backLink(), settingsHead('Administration'),
+      settingsCard(h('p', { class: 'muted', style: 'margin:0' }, msg)));
+    if (!serverAvailable || !auth) return only('Sign in with the account that set this install up.');
+    let me;
+    try { me = await apiCall('me'); }
+    catch (e) { return only('Could not ask this server who you are: ' + e.message); }
+    if (!me.admin) {
+      return only('This page belongs to the account that set this install up. Yours is not it \u2014 which is exactly as it should be.');
+    }
+    page.replaceChildren(...[
+      backLink(),
+      settingsHead('Administration'),
+      appConfig.master ? h('p', { class: 'muted small', style: 'border:1px solid var(--owned); border-radius:8px; padding:8px 10px' },
+        '🛠️ Master curation workspace \u2014 edits made here become the master database when you publish (scripts/publish-images.js). This is not a personal install.') : null,
+      settingsTabs('admin', tabs, tab),
+      tab === 'mail' ? settingsCard(mailSettingsSection())
+        : tab === 'signon' ? settingsCard(providerSettingsSection())
+          : tab === 'server' ? adminServerTab()
+            : adminCardsTab(),
+    ].filter(Boolean));
+  })();
+}
+
+/** Card database: what is here, whether the master has moved on, and the
+ * jobs that rebuild the parts of it this server derives for itself. */
+function adminCardsTab() {
+  const content = h('div', {});
+  if (appConfig.readonly) {
+    content.append(settingsCard(
+      h('h3', { style: 'margin:0 0 6px' }, 'Card database'),
+      h('p', { class: 'muted small', style: 'margin:0' },
+        'This server runs in read-only mode (PTCG_READONLY): the card database is managed centrally and cannot be changed from the app.'),
+    ));
+    return content;
   }
 
   async function renderControls() {
@@ -2941,14 +3264,15 @@ async function renderAdminArea() {
       const msg = status.phase === 'images' ? 'Downloading card images to this server:'
         : status.phase === 'mirror' ? 'Copying the card database:'
           : 'Working on the card database:';
-      content.replaceChildren(
+      content.replaceChildren(settingsCard(
+        h('h3', { style: 'margin:0 0 6px' }, 'Card database'),
         h('p', { class: 'muted small' }, msg),
         buildProgressView(async () => { await loadAppConfig(); clearDataCaches(); toast('Done'); renderControls(); }),
-      );
+      ));
       return;
     }
     let stats = {};
-    try { stats = await catGet('stats'); } catch { /* ignore */ }
+    try { stats = await catGet('stats'); } catch { /* the counts are a nicety */ }
     const img = appConfig.images || {};   // { local, remote }
 
     // master update check: ping the tiny catalog.json manifest and offer a
@@ -2958,13 +3282,13 @@ async function renderAdminArea() {
     // own published output back would be circular.
     const updateArea = h('div', {});
     if (appConfig.remoteCatalog && !appConfig.master) {
-      updateArea.append(h('p', { class: 'muted small' }, 'Checking the master database for updates…'));
+      updateArea.append(h('p', { class: 'muted small' }, 'Checking the master database for updates\u2026'));
       (async () => {
         let chk = null;
         try { chk = await catGet('update-check'); } catch { /* offline */ }
         if (!chk || !chk.configured) { updateArea.replaceChildren(); return; }
         if (!chk.reachable) {
-          updateArea.replaceChildren(h('p', { class: 'muted small' }, 'Master database not reachable right now — update check skipped.'));
+          updateArea.replaceChildren(h('p', { class: 'muted small' }, 'Master database not reachable right now \u2014 update check skipped.'));
         } else if (chk.behind) {
           updateArea.replaceChildren(
             h('p', { class: 'muted small' }, `A newer master database is available (you have v${chk.localVersion}, master is v${chk.remoteVersion}).`),
@@ -2976,9 +3300,9 @@ async function renderAdminArea() {
                   // call — skipped items are stored hidden (soft-bypassed)
                   const prev = await apiCall('catalog/preview', { method: 'POST', body: '{}' });
                   if (!prev.additions) { await startCatalogPull(); renderControls(); }
-                  else { accountModal.close(); openPullReview(prev); }
+                  else openPullReview(prev);
                 } catch (err) { e.target.disabled = false; toast(err.message); }
-              } }, `⬇️ Update cards from master (v${chk.localVersion} → v${chk.remoteVersion})`),
+              } }, `⬇️ Update cards from master (v${chk.localVersion} \u2192 v${chk.remoteVersion})`),
             ),
           );
         } else {
@@ -2994,50 +3318,12 @@ async function renderAdminArea() {
       })();
     }
 
-    // Does this install know who is knocking? A wrong PTCG_TRUSTED_PROXY has
-    // no symptom until strangers start locking each other out, so the answer
-    // belongs on screen rather than in a lockout.
-    const connArea = h('div', { class: 'ce-field', style: 'margin-bottom:12px' });
-    connArea.append(h('span', { class: 'muted small' }, 'This connection'),
-      h('p', { class: 'muted small', style: 'margin:0' }, 'Checking\u2026'));
-    (async () => {
-      let c;
-      try {
-        c = await apiCall('connection');
-      } catch (e) {
-        // A block that vanishes when it fails teaches the reader nothing, and
-        // "the setting is fine" and "the question was never asked" look
-        // identical from the outside. Say which.
-        connArea.replaceChildren(h('span', { class: 'muted small' }, 'This connection'),
-          h('p', { class: 'muted small', style: 'margin:0' },
-            `Could not ask this server where you are coming from: ${e.message}. If this install was just updated, the app may still be the old one — use Repair & reload below.`));
-        return;
-      }
-      connArea.replaceChildren();
-      const priv = /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|127\.|::1$|f[cd])/i.test(c.you || '');
-      const verdict = !c.proxyConfigured
-        ? (priv
-          ? 'Nothing is trusted, and this looks like a local address \u2014 right for an app reached directly.'
-          : 'Nothing is trusted: every visitor is counted by the address they connect from.')
-        : c.proxyTrusted
-          ? (priv
-            ? 'A proxy is trusted, but you still look like a local address \u2014 the header is not arriving, so everyone behind the proxy is counted as one. Check PTCG_CLIENT_IP_HEADER or the proxy\u2019s forwarding.'
-            : 'A proxy is trusted and you are being seen as yourself. This is right.')
-          : 'A proxy list is set, but this connection did not come from one of them \u2014 its headers are being ignored.';
-      connArea.append(
-        h('span', { class: 'muted small' }, 'This connection'),
-        h('p', { class: 'muted small', style: 'margin:0' },
-          `You look like ${c.you}${c.peer !== c.you ? ` (arriving via ${c.peer})` : ''}${c.secure ? ' over HTTPS' : ' over plain HTTP'}.`),
-        h('p', { class: 'muted small', style: 'margin:0' }, verdict),
-      );
-    })();
-
     // What this install does when the master moves on. Knowing is safe, so it
     // is the default; applying is not, because a pull carries the master's
     // deletions and skips the review of its additions — so it is opt-in and
     // says so in words.
-    const autoArea = h('div', { class: 'ce-field', style: 'margin-bottom:12px' });
-    if (appConfig.remoteCatalog && !appConfig.master && !appConfig.readonly) {
+    const autoArea = h('div', { class: 'ce-field' });
+    if (appConfig.remoteCatalog && !appConfig.master) {
       const modes = [
         ['check', 'Check for updates, tell me'],
         ['apply', 'Check and update by itself'],
@@ -3063,172 +3349,111 @@ async function renderAdminArea() {
       autoArea.append(h('span', { class: 'muted small' }, 'When the master database moves on'), sel, note);
     }
 
-    // NOTE: replaceChildren stringifies null into literal "null" text (unlike
-    // h(), which filters it) — always filter the child list.
+    // Update from TCGdex: only for installs WITHOUT a master (standalone) and
+    // for the maintainer workspace — that's where new sets come from. Consumer
+    // installs update via the master button above, which appears exactly when
+    // the master version is ahead of this install's.
+    const jobs = [];
+    if (!appConfig.remoteCatalog || appConfig.master) {
+      jobs.push(h('button', { class: 'btn small', onclick: async (e) => {
+        e.target.disabled = true;
+        try { await startDatabaseBuild(); renderControls(); }
+        catch (err) { e.target.disabled = false; toast(err.message); }
+      } }, '🔄 Update cards from TCGdex'));
+    }
+    // Rebuild the scanner fingerprints from the images on this server. Cards
+    // added here are fingerprinted as their picture is uploaded, so this is
+    // for the bulk case — after a mirror, or a build that lost its index.
+    if (appConfig.localDbExists) {
+      jobs.push(h('button', { class: 'btn ghost small', onclick: async (e) => {
+        e.target.disabled = true;
+        try { await apiCall('scan-index/rebuild', { method: 'POST', body: '{}' }); toast('Rebuilding the scanner index\u2026'); renderControls(); }
+        catch (err) { e.target.disabled = false; toast(err.message); }
+      } }, '🔍 Rebuild scanner index'));
+    }
+
     content.replaceChildren(...[
-      h('p', { class: 'muted small' }, `Database: ${stats.cards || 0} cards, ${stats.sets || 0} sets, ${stats.printings || 0} custom printings.`),
-      updateArea,
-      connArea,
-      appConfig.readonly ? null : mailSettingsSection(),
-      appConfig.readonly ? null : providerSettingsSection(),
-      autoArea.children.length ? autoArea : null,
-      // Update from TCGdex: only for installs WITHOUT a master (standalone)
-      // and for the maintainer workspace — that's where new sets come from.
-      // Consumer installs update via the master button above, which appears
-      // exactly when the master version is ahead of this install's.
-      (!appConfig.remoteCatalog || appConfig.master) ? h('div', { class: 'row', style: 'margin-bottom:12px' },
-        h('button', { class: 'btn small', onclick: async (e) => {
-          e.target.disabled = true;
-          try { await startDatabaseBuild(); renderControls(); }
-          catch (err) { e.target.disabled = false; toast(err.message); }
-        } }, '🔄 Update cards from TCGdex'),
-      ) : null,
-      // Rebuild the scanner fingerprints from the images on this server. Cards
-      // added here are fingerprinted as their picture is uploaded, so this is
-      // for the bulk case — after a mirror, or a build that lost its index.
-      appConfig.localDbExists ? h('div', { class: 'row', style: 'margin-bottom:12px' },
-        h('button', { class: 'btn ghost small', onclick: async (e) => {
-          e.target.disabled = true;
-          try { await apiCall('scan-index/rebuild', { method: 'POST', body: '{}' }); toast('Rebuilding the scanner index…'); renderControls(); }
-          catch (err) { e.target.disabled = false; toast(err.message); }
-        } }, '🔍 Rebuild scanner index'),
+      settingsCard(
+        h('h3', { style: 'margin:0 0 6px' }, 'Card database'),
+        h('p', { class: 'muted small' }, `${stats.cards || 0} cards, ${stats.sets || 0} sets, ${stats.printings || 0} custom printings.`),
+        updateArea,
+        autoArea.children.length ? autoArea : null,
+      ),
+      jobs.length ? settingsCard(
+        h('h3', { style: 'margin:0 0 6px' }, 'Jobs'),
+        h('div', { class: 'row' }, ...jobs),
       ) : null,
       // download images locally + repoint rows to the local copies
-      h('hr'),
-      h('p', { class: 'muted small' }, img.remote
-        ? `${img.remote} image${img.remote === 1 ? '' : 's'} currently load from the online CDN. Download them to this server so it works fully offline — each card is repointed to its local copy.`
-        : (img.local ? 'All card images are served locally from this server.' : 'No card images yet.')),
-      img.remote ? h('div', { class: 'row' },
-        h('button', { class: 'btn small', onclick: async (e) => {
-          e.target.disabled = true;
-          try { await apiCall('catalog/download-images', { method: 'POST', body: '{}' }); renderControls(); }
-          catch (err) { e.target.disabled = false; toast(err.message); }
-        } }, '⬇️ Download all images to this server'),
-      ) : null,
+      settingsCard(
+        h('h3', { style: 'margin:0 0 6px' }, 'Images'),
+        h('p', { class: 'muted small', style: 'margin:0 0 10px' }, img.remote
+          ? `${img.remote} image${img.remote === 1 ? '' : 's'} currently load from the online CDN. Download them to this server so it works fully offline \u2014 each card is repointed to its local copy.`
+          : (img.local ? 'All card images are served locally from this server.' : 'No card images yet.')),
+        img.remote ? h('div', { class: 'row' },
+          h('button', { class: 'btn small', onclick: async (e) => {
+            e.target.disabled = true;
+            try { await apiCall('catalog/download-images', { method: 'POST', body: '{}' }); renderControls(); }
+            catch (err) { e.target.disabled = false; toast(err.message); }
+          } }, '⬇️ Download all images to this server'),
+        ) : null,
+      ),
     ].filter(Boolean));
   }
   renderControls();
+  return content;
 }
 
-function renderAccountModal() {
-  const statusEl = document.getElementById('account-status');
-  const formsEl = document.getElementById('account-forms');
-  renderLanguageArea();
-  renderAdminArea();
-  // backup (export/import) only makes sense for a signed-in collection
-  document.getElementById('backup-area').style.display = auth ? '' : 'none';
-  // show the deployed release (the GitHub tag); the internal frontend build
-  // number (APP_VERSION) lives on the Debug page, not here
-  document.getElementById('app-version').textContent =
-    appConfig.release ? `v${appConfig.release}` : APP_VERSION;
-
-  if (!serverAvailable) {
-    statusEl.replaceChildren(h('p', { class: 'muted' },
-      'Cloud sync is available when this app is hosted with its bundled server. Right now it’s running standalone, so your collection lives on this device — use Export below for backups.'));
-    formsEl.replaceChildren();
-    return;
-  }
-
-  if (auth) {
-    statusEl.replaceChildren(
-      h('p', {}, `Signed in as `, h('strong', {}, auth.username), '.'),
-      h('p', { class: 'muted small' }, syncState === 'error' ? 'Last sync failed — changes are saved locally and will retry.' : 'Your collection syncs to this server automatically.'),
-      h('div', { class: 'row' },
-        h('button', { class: 'btn small', onclick: async () => { try { await pullAndMerge(); toast('Synced'); renderAccountModal(); } catch (e) { toast('Sync failed: ' + e.message); } } }, 'Sync now'),
-        h('button', { class: 'btn ghost small', onclick: () => { logout(); renderAccountModal(); route(); } }, 'Sign out'),
-      ),
-      emailSection(),
-      twoFactorSection(),
-      providerSection(),
+/** What this server thinks it is, and who it thinks you are. */
+function adminServerTab() {
+  // Does this install know who is knocking? A wrong PTCG_TRUSTED_PROXY has no
+  // symptom until strangers start locking each other out, so the answer belongs
+  // on screen rather than in a lockout.
+  const conn = settingsCard(
+    h('h3', { style: 'margin:0 0 6px' }, 'This connection'),
+    h('p', { class: 'muted small', style: 'margin:0' }, 'Checking\u2026'));
+  (async () => {
+    let c;
+    try {
+      c = await apiCall('connection');
+    } catch (e) {
+      // A block that vanishes when it fails teaches the reader nothing, and
+      // "the setting is fine" and "the question was never asked" look
+      // identical from the outside. Say which.
+      conn.replaceChildren(h('h3', { style: 'margin:0 0 6px' }, 'This connection'),
+        h('p', { class: 'muted small', style: 'margin:0' },
+          `Could not ask this server where you are coming from: ${e.message}. If this install was just updated, the app may still be the old one \u2014 use Repair & reload on the account page.`));
+      return;
+    }
+    const priv = /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|127\.|::1$|f[cd])/i.test(c.you || '');
+    const verdict = !c.proxyConfigured
+      ? (priv
+        ? 'Nothing is trusted, and this looks like a local address \u2014 right for an app reached directly.'
+        : 'Nothing is trusted: every visitor is counted by the address they connect from.')
+      : c.proxyTrusted
+        ? (priv
+          ? 'A proxy is trusted, but you still look like a local address \u2014 the header is not arriving, so everyone behind the proxy is counted as one. Check PTCG_CLIENT_IP_HEADER or the proxy\u2019s forwarding.'
+          : 'A proxy is trusted and you are being seen as yourself. This is right.')
+        : 'A proxy list is set, but this connection did not come from one of them \u2014 its headers are being ignored.';
+    conn.replaceChildren(
+      h('h3', { style: 'margin:0 0 6px' }, 'This connection'),
+      h('p', { class: 'muted small', style: 'margin:0' },
+        `You look like ${c.you}${c.peer !== c.you ? ` (arriving via ${c.peer})` : ''}${c.secure ? ' over HTTPS' : ' over plain HTTP'}.`),
+      h('p', { class: 'muted small', style: 'margin:0' }, verdict),
     );
-    formsEl.replaceChildren();
-    return;
-  }
+  })();
 
-  statusEl.replaceChildren(h('p', { class: 'muted' }, 'Sign in to sync your collection across devices using this server.'));
+  const kind = appConfig.master ? 'Master curation workspace \u2014 what it publishes becomes everyone else\u2019s card database.'
+    : appConfig.readonly ? 'Read-only \u2014 the card database is managed centrally and cannot be changed from the app.'
+      : appConfig.remoteCatalog ? 'A normal install, following a master database.'
+        : 'Standalone \u2014 this install builds its own card database from TCGdex.';
 
-  let mode = 'login';
-  const err = h('div', { class: 'error-msg' });
-  // stable name/id + correct autocomplete tokens so password managers (Bitwarden,
-  // 1Password, browser built-ins) recognise the form cleanly instead of treating
-  // it as suspicious and disabling their autofill overlay
-  const userIn = h('input', {
-    type: 'text', name: 'username', id: 'ptcg-username', placeholder: 'Username',
-    autocomplete: 'username', autocapitalize: 'none', autocorrect: 'off', spellcheck: 'false',
-  });
-  const passIn = h('input', {
-    type: 'password', name: 'password', id: 'ptcg-password', placeholder: 'Password (10+ characters)',
-    autocomplete: 'current-password',
-  });
-  const submit = h('button', { class: 'btn', style: 'width:100%' }, 'Sign in');
-
-  // An address is the only way back in if the password goes. Optional, because
-  // an install with no mail server configured cannot do anything with one.
-  const mailIn = h('input', {
-    type: 'email', name: 'email', id: 'ptcg-email', placeholder: 'Email (for password resets)',
-    autocomplete: 'email', autocapitalize: 'none', autocorrect: 'off', spellcheck: 'false',
-  });
-  const mailRow = h('div', { class: 'field' }, mailIn);
-  mailRow.hidden = true;
-
-  const tabs = h('div', { class: 'tabs' },
-    h('button', { type: 'button', class: 'active', onclick: (e) => switchMode('login', e.target) }, 'Sign in'),
-    h('button', { type: 'button', onclick: (e) => switchMode('register', e.target) }, 'Create account'),
-  );
-
-  function switchMode(m, btn) {
-    mode = m;
-    tabs.querySelectorAll('button').forEach((b) => b.classList.toggle('active', b === btn));
-    submit.textContent = m === 'login' ? 'Sign in' : 'Create account';
-    // "new-password" tells the password manager this is a sign-up field (offer to
-    // generate/save), "current-password" that it's an existing login (offer to fill)
-    passIn.setAttribute('autocomplete', m === 'login' ? 'current-password' : 'new-password');
-    mailRow.hidden = !(m === 'register' && appConfig.mailConfigured);
-    forgotRow.hidden = !(m === 'login' && appConfig.mailConfigured);
-    err.textContent = '';
-  }
-
-  const forgotRow = h('div', { style: 'text-align:right' },
-    h('button', { type: 'button', class: 'btn ghost small', onclick: () => openForgotPassword() }, 'Forgot password?'));
-  forgotRow.hidden = !appConfig.mailConfigured;
-
-  const form = h('form', {
-    onsubmit: async (e) => {
-      e.preventDefault();
-      err.textContent = '';
-      submit.disabled = true;
-      try {
-        const r = await doAuth(mode, userIn.value.trim(), passIn.value, mode === 'register' ? mailIn.value.trim() : null);
-        if (r && r.needTotp) { submit.disabled = false; finishTotpSignIn(r.ticket); return; }
-        toast(mode === 'login' ? 'Signed in — collection synced' : 'Account created — collection synced');
-        // signing in was the whole reason this modal was open — get out of the way
-        accountModal.close();
-        renderAccountModal(); // so it shows the signed-in panel next time it opens
-        route(); // tracking UI (toggles, stats, filters) appears now that we're signed in
-      } catch (ex) {
-        err.textContent = ex.message;
-      } finally {
-        submit.disabled = false;
-      }
-    },
-  },
-    tabs,
-    h('div', { class: 'field' }, userIn),
-    mailRow,
-    h('div', { class: 'field' }, passIn),
-    err,
-    submit,
-  );
-  // deliberately outside the form: it opens a panel rather than submitting
-  // anything, and inside it would be a second `.btn` for anything aiming at
-  // the submit button to trip over
-  // the other way in, when this install has one
-  const ssoRow = appConfig.oidc
-    ? h('div', { style: 'margin-top:10px' },
-      h('a', { class: 'btn', style: 'width:100%; display:block; text-align:center', href: 'api/oidc/start' },
-        `Sign in with ${appConfig.oidc.label}`))
-    : null;
-  formsEl.replaceChildren(...[form, forgotRow, ssoRow].filter(Boolean));
+  return h('div', {}, conn, settingsCard(
+    h('h3', { style: 'margin:0 0 6px' }, 'This install'),
+    h('p', { class: 'muted small', style: 'margin:0 0 6px' }, kind),
+    appConfig.remoteCatalog ? h('p', { class: 'muted small', style: 'margin:0 0 6px' }, `Master database: ${appConfig.remoteCatalog}`) : null,
+    h('p', { class: 'muted small', style: 'margin:0' },
+      `Release ${appConfig.release ? 'v' + appConfig.release : 'unknown'} \u00b7 app build ${APP_VERSION}`),
+  ));
 }
 
 /* ============================================================
@@ -3288,7 +3513,7 @@ function binderGate() {
     h('h2', {}, 'Binders'),
     h('p', { class: 'muted' }, 'Build digital versions of your real binders — pick a pocket size and color, place cards pocket by pocket, and track which ones you have.'),
     serverAvailable
-      ? h('button', { class: 'btn', onclick: () => { renderAccountModal(); accountModal.showModal(); } }, 'Sign in to start')
+      ? h('button', { class: 'btn', onclick: () => goToAccount() }, 'Sign in to start')
       : h('p', { class: 'muted small' }, 'Binders need an account on the bundled server.'),
   ));
 }
@@ -4797,6 +5022,10 @@ function route() {
   // links that arrive by email — they carry a one-shot token in the URL
   const verifyMatch = hash.match(/^\/verify\/(.+)$/);
   const resetMatch = hash.match(/^\/reset\/(.+)$/);
+  // settings pages carry their tab in the address, so a bookmark and the back
+  // button both land on the panel they were left on
+  const accountMatch = hash.match(/^\/account(?:\/([a-z-]+))?$/);
+  const adminMatch = hash.match(/^\/admin(?:\/([a-z-]+))?$/);
   // where the identity provider hands the browser back
   if (hash.startsWith('/signed-in') || hash.startsWith('/linked')) { afterProviderSignIn(hash.startsWith('/linked')); return; }
   if (hash.startsWith('/signin-failed')) { afterProviderFailure(hash); return; }
@@ -4811,6 +5040,8 @@ function route() {
   else if (hash === '/binders') { nav = 'binders'; renderBindersPage(); }
   else if (hash.startsWith('/binder/')) { nav = 'binders'; renderBinderPage(hash.slice('/binder/'.length)); }
   else if (hash === '/scan') { nav = 'scan'; renderScanPage(); }
+  else if (accountMatch) { nav = 'account'; renderAccountPage(accountMatch[1] || 'account'); }
+  else if (adminMatch) { nav = 'account'; renderAdminPage(adminMatch[1] || 'cards'); }
   else if (hash === '/debug') renderDebugPage();
   else renderHome();
   document.querySelectorAll('.bottomnav a').forEach((a) => a.classList.toggle('active', a.dataset.nav === nav));
@@ -4826,9 +5057,12 @@ document.getElementById('global-search').addEventListener('submit', (e) => {
   document.getElementById('global-search-input').blur();
 });
 
+// reached deliberately rather than sent here mid-task, so there is nowhere
+// particular to go back to afterwards
 document.getElementById('account-btn').addEventListener('click', () => {
-  renderAccountModal();
-  accountModal.showModal();
+  signInReturn = null;
+  if (location.hash.startsWith('#/account')) route();
+  else location.hash = '#/account';
 });
 
 document.querySelectorAll('.close-modal').forEach((b) => b.addEventListener('click', (e) => e.target.closest('dialog').close()));
@@ -4837,12 +5071,8 @@ document.querySelectorAll('dialog').forEach((d) => {
   d.addEventListener('click', (e) => { if (e.target === d) d.close(); });
 });
 
-document.getElementById('app-version').textContent = APP_VERSION;
-document.getElementById('repair-link').addEventListener('click', (e) => { e.preventDefault(); repairApp(); });
-document.querySelectorAll('.close-modal-link').forEach((a) => a.addEventListener('click', () => a.closest('dialog').close()));
-
-document.getElementById('export-btn').addEventListener('click', exportCollection);
-document.getElementById('import-btn').addEventListener('click', () => document.getElementById('import-file').click());
+// the picker itself is in index.html, outside the view, so a page re-render
+// cannot pull it out from under an open file dialog
 document.getElementById('import-file').addEventListener('change', (e) => {
   if (e.target.files[0]) importCollection(e.target.files[0]);
   e.target.value = '';
