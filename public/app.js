@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.57.0';
+const APP_VERSION = '3.58.0';
 
 /* ============================================================
  * Storage helpers
@@ -1964,6 +1964,135 @@ function openForgotPassword() {
   (document.querySelector('dialog[open]') || document.body).append(ov);
 }
 
+/* ---- coming back from the identity provider ----
+ * The session is already in a cookie by the time the browser lands here; all
+ * this has to do is notice, tidy the URL, and get out of the way.
+ */
+async function afterProviderSignIn(linked) {
+  try {
+    const me = await apiCall('me');
+    auth = { username: me.username };
+    lsSet('ptcg.auth', auth);
+    await pullAndMerge();
+  } catch { /* fall through to the normal page either way */ }
+  updateAccountButton();
+  renderAccountModal();
+  toast(linked ? 'Linked \u2014 you can sign in that way now' : 'Signed in \u2014 collection synced');
+  location.hash = '#/';
+}
+
+function afterProviderFailure(hash) {
+  const why = decodeURIComponent((hash.split('why=')[1] || '').replace(/\+/g, ' ')) || 'That sign-in did not complete.';
+  view.replaceChildren(
+    h('div', { class: 'page-head' }, h('h1', {}, 'That sign-in did not work')),
+    h('p', { class: 'muted' }, why),
+    h('a', { class: 'btn', href: '#/' }, 'Back to your cards'),
+  );
+}
+
+function afterProviderTotp(hash) {
+  const ticket = decodeURIComponent((hash.split('ticket=')[1] || ''));
+  location.hash = '#/';
+  if (ticket) finishTotpSignIn(ticket);
+}
+
+/** Whether this account can also be reached through the provider. */
+function providerSection() {
+  const wrap = h('div', {});
+  if (!appConfig.oidc) return wrap;
+  const label = appConfig.oidc.label || 'single sign-on';
+  const refresh = async () => { _meCache = null; try { show(await apiCall('me')); } catch { wrap.replaceChildren(); } };
+  const show = (me) => {
+    const rows = [h('hr'), h('h3', { style: 'margin:0 0 6px' }, label)];
+    if (me.oidcLinked) {
+      const off = h('button', { class: 'btn ghost small' }, 'Unlink');
+      off.addEventListener('click', () => askPassword(`Unlink ${label}`,
+        'You will sign in with your password again.', async (pw) => {
+          await apiCall('oidc/unlink', { method: 'POST', body: JSON.stringify({ password: pw }) });
+          toast('Unlinked'); refresh();
+        }));
+      rows.push(
+        h('p', { class: 'muted small' }, `This account can be reached through ${label}.`),
+        h('div', { class: 'row', style: 'gap:8px' }, off),
+      );
+    } else {
+      rows.push(
+        h('p', { class: 'muted small' }, `Link this account to ${label} and you can sign in that way instead of typing a password.`),
+        h('a', { class: 'btn ghost small', href: 'api/oidc/start?mode=link' }, `Link ${label}`),
+      );
+    }
+    wrap.replaceChildren(...rows.filter(Boolean));
+  };
+  refresh();
+  return wrap;
+}
+
+/** Provider settings, for the administrator. */
+function providerSettingsSection() {
+  const wrap = h('div', {});
+  (async () => {
+    let cfg;
+    try { cfg = await apiCall('oidc-settings'); } catch { return; }
+    const f = (label, input, hint) => h('label', { class: 'ce-field' },
+      h('span', { class: 'muted small' }, label), input,
+      hint ? h('span', { class: 'muted small' }, hint) : null);
+    const t = (v, ph, type) => { const i = h('input', { type: type || 'text', placeholder: ph || '' }); i.value = v || ''; return i; };
+    const issuer = t(cfg.issuer, 'https://auth.example.com/application/o/cards/');
+    const clientId = t(cfg.clientId, 'client id');
+    const secret = t('', cfg.secretSet ? 'unchanged' : 'client secret (blank for a public client)', 'password');
+    const label = t(cfg.label, 'Single sign-on');
+    const unknown = h('select', {},
+      h('option', { value: 'link' }, 'Turn away anyone not already linked'),
+      h('option', { value: 'create' }, 'Give them a new account'));
+    unknown.value = cfg.unknown || 'link';
+    const note = h('p', { class: 'muted small', style: 'margin:0' });
+
+    const save = h('button', { class: 'btn small' }, 'Save');
+    save.addEventListener('click', async () => {
+      save.disabled = true;
+      try {
+        await apiCall('oidc-settings', { method: 'POST', body: JSON.stringify({
+          issuer: issuer.value.trim(), clientId: clientId.value.trim(), clientSecret: secret.value,
+          label: label.value.trim(), unknown: unknown.value,
+        }) });
+        secret.value = '';
+        await loadAppConfig();
+        note.textContent = 'Saved.';
+      } catch (e) { note.textContent = e.message; }
+      save.disabled = false;
+    });
+    const probe = h('button', { class: 'btn ghost small' }, 'Check the provider');
+    probe.addEventListener('click', async () => {
+      probe.disabled = true;
+      note.textContent = 'Asking\u2026';
+      try {
+        const d = await apiCall('oidc-settings/probe', { method: 'POST', body: '{}' });
+        note.textContent = `Answered as ${d.issuer}, publishing ${d.keys} signing key${d.keys === 1 ? '' : 's'}.`;
+      } catch (e) { note.textContent = 'Failed: ' + e.message; }
+      probe.disabled = false;
+    });
+
+    wrap.replaceChildren(...[
+      h('hr'),
+      h('h3', { style: 'margin:0 0 6px' }, 'Single sign-on (optional)'),
+      h('p', { class: 'muted small', style: 'margin:0' },
+        'Point this at any OpenID Connect provider \u2014 Authentik, Keycloak, Zitadel, Pocket ID, Auth0, Okta. Local accounts keep working either way.'),
+      cfg.fromEnvironment ? h('p', { class: 'muted small', style: 'color:var(--accent); margin:0' },
+        'Some of these come from this server\u2019s environment, which wins over anything saved here.') : null,
+      f('Issuer URL', issuer, 'The base the provider serves /.well-known/openid-configuration from.'),
+      f('Client ID', clientId),
+      f('Client secret', secret, cfg.secretSet ? 'A secret is saved. Leave blank to keep it.' : null),
+      f('Name to show on the button', label),
+      f('Somebody signs in who is not linked yet', unknown),
+      h('p', { class: 'muted small', style: 'margin:0' }, 'Give the provider this redirect URL:'),
+      h('pre', { style: 'user-select:all; white-space:pre-wrap; margin:0; font-size:13px' }, cfg.redirectUri),
+      h('div', { class: 'row', style: 'gap:8px' }, save, probe),
+      note,
+    ].filter(Boolean));
+  })();
+  return wrap;
+}
+
 /** The address on this account: add one, change it, confirm it. */
 function emailSection() {
   const wrap = h('div', {});
@@ -2941,6 +3070,7 @@ async function renderAdminArea() {
       updateArea,
       connArea,
       appConfig.readonly ? null : mailSettingsSection(),
+      appConfig.readonly ? null : providerSettingsSection(),
       autoArea.children.length ? autoArea : null,
       // Update from TCGdex: only for installs WITHOUT a master (standalone)
       // and for the maintainer workspace — that's where new sets come from.
@@ -3009,6 +3139,7 @@ function renderAccountModal() {
       ),
       emailSection(),
       twoFactorSection(),
+      providerSection(),
     );
     formsEl.replaceChildren();
     return;
@@ -3091,7 +3222,13 @@ function renderAccountModal() {
   // deliberately outside the form: it opens a panel rather than submitting
   // anything, and inside it would be a second `.btn` for anything aiming at
   // the submit button to trip over
-  formsEl.replaceChildren(form, forgotRow);
+  // the other way in, when this install has one
+  const ssoRow = appConfig.oidc
+    ? h('div', { style: 'margin-top:10px' },
+      h('a', { class: 'btn', style: 'width:100%; display:block; text-align:center', href: 'api/oidc/start' },
+        `Sign in with ${appConfig.oidc.label}`))
+    : null;
+  formsEl.replaceChildren(...[form, forgotRow, ssoRow].filter(Boolean));
 }
 
 /* ============================================================
@@ -4660,6 +4797,10 @@ function route() {
   // links that arrive by email — they carry a one-shot token in the URL
   const verifyMatch = hash.match(/^\/verify\/(.+)$/);
   const resetMatch = hash.match(/^\/reset\/(.+)$/);
+  // where the identity provider hands the browser back
+  if (hash.startsWith('/signed-in') || hash.startsWith('/linked')) { afterProviderSignIn(hash.startsWith('/linked')); return; }
+  if (hash.startsWith('/signin-failed')) { afterProviderFailure(hash); return; }
+  if (hash.startsWith('/signin-2fa')) { afterProviderTotp(hash); return; }
   let nav = 'sets';
   if (verifyMatch) renderVerifyPage(decodeURIComponent(verifyMatch[1]));
   else if (resetMatch) renderResetPage(decodeURIComponent(resetMatch[1]));

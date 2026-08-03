@@ -728,6 +728,129 @@ function fail(msg) {
       misses.length === 0 || !console.log('    installers out of step: ' + misses.join(', ')));
   }
 
+
+  // ---- signing in through somebody else's identity provider ----
+  // Its own install, deliberately: the redirect URI has to be somewhere the
+  // browser can actually come back to, and the mail fixture above pins this
+  // app's public address at a hostname that does not exist.
+  {
+    // A stale provider left listening by an earlier run would answer instead
+    // of this one, quietly ignoring every knob the negative tests turn — which
+    // reads as five mysterious failures rather than one obvious one.
+    await new Promise((resolve) => {
+      const probe = net.connect(3995, '127.0.0.1');
+      probe.on('connect', () => { probe.destroy(); fail('something is already listening on :3995 — kill it and re-run'); });
+      probe.on('error', () => { probe.destroy(); resolve(); });
+    });
+    const { startMockOidc } = require('./mock-oidc');
+    const idp = startMockOidc({ port: 3995, clientId: 'ptcg-test' });
+    const ssoDir = path.join(ROOT, '.test-data-sso');
+    fs.rmSync(ssoDir, { recursive: true, force: true });
+    const ssoChild = start('node', ['server.js'], { PORT: '3122', DATA_DIR: ssoDir }, true);
+    await waitForPort(3122).catch((e) => fail(e.message));
+    const ssoCode = await waitForLog(ssoChild, /\b([0-9a-f]{32})\b/);
+    if (!ssoCode) fail('the sso test server never printed a setup code');
+    const S = 'http://localhost:3122';
+    const jbody2 = { 'Content-Type': 'application/json' };
+    await jfetch(`${S}/api/setup`, { method: 'POST', headers: jbody2, body: JSON.stringify({
+      token: ssoCode[1], username: 'ssoadmin', password: 'correcthorsebattery',
+    }) });
+
+    // A real provider: real discovery, a real JWKS, tokens signed with a real
+    // key. Stubbing the signature check would leave a test that still passes
+    // with the signature check deleted.
+    const adminTok = (await jfetch(`${S}/api/login`, { method: 'POST', headers: jbody2, body: JSON.stringify({ username: 'ssoadmin', password: 'correcthorsebattery' }) })).token;
+      const auth = { ...jbody2, Authorization: 'Bearer ' + adminTok };
+
+      const settings = (over) => jfetch(`${S}/api/oidc-settings`, { method: 'POST', headers: auth, body: JSON.stringify({
+        issuer: idp.origin, clientId: 'ptcg-test', clientSecret: 'shh', label: 'Test SSO', unknown: 'link', ...over,
+      }) });
+      await settings();
+      const probe = await jfetch(`${S}/api/oidc-settings/probe`, { method: 'POST', headers: auth, body: '{}' });
+      check('sso: the app can find the provider and its keys',
+        probe.ok === true && probe.issuer === idp.origin && probe.keys === 1);
+      check('sso: and the app advertises it to the sign-in page',
+        (await jfetch(`${S}/api/app-config`)).oidc.label === 'Test SSO');
+
+      /* Walk the redirects by hand, carrying cookies, because that IS the
+       * flow: a cookie that does not survive the trip to the provider and
+       * back is a sign-in that never completes. */
+      const walk = async (startPath, cookies = {}) => {
+        const jar = { ...cookies };
+        const header = () => Object.entries(jar).map(([k, v]) => `${k}=${v}`).join('; ');
+        let url = `${S}${startPath}`;
+        for (let hop = 0; hop < 8; hop++) {
+          const r = await fetch(url, { headers: { Cookie: header() }, redirect: 'manual' });
+          for (const c of (r.headers.getSetCookie ? r.headers.getSetCookie() : [])) {
+            const [pair] = c.split(';');
+            const eq = pair.indexOf('=');
+            const name = pair.slice(0, eq); const value = pair.slice(eq + 1);
+            if (value === '') delete jar[name]; else jar[name] = value;
+          }
+          const next = r.headers.get('location');
+          if (!next) return { url, jar, status: r.status };
+          url = new URL(next, url).toString();
+          if (url.startsWith('http') && url.includes('#')) return { url, jar, status: r.status };
+        }
+        return { url, jar, status: 0 };
+      };
+
+      const unknown = await walk('/api/oidc/start');
+      check('sso: an identity nobody has claimed is turned away, not handed an account',
+        /signin-failed/.test(unknown.url) && /not attached to any account/.test(decodeURIComponent(unknown.url)));
+
+      // link it from an account that is already signed in
+      const sessionCookie = (await (async () => {
+        const r = await fetch(`${S}/api/login`, { method: 'POST', headers: jbody2, body: JSON.stringify({ username: 'ssoadmin', password: 'correcthorsebattery' }), redirect: 'manual' });
+        const c = (r.headers.getSetCookie ? r.headers.getSetCookie() : []).find((x) => x.startsWith('ptcg_session='));
+        return c.split(';')[0].split('=').slice(1).join('=');
+      })());
+      const linked = await walk('/api/oidc/start?mode=link', { ptcg_session: sessionCookie });
+      check('sso: linking from a signed-in account attaches it', /#\/linked/.test(linked.url));
+
+      const signedIn = await walk('/api/oidc/start');
+      check('sso: and then it signs that account in', /#\/signed-in/.test(signedIn.url));
+      const who = await jfetch(`${S}/api/me`, { headers: { Cookie: `ptcg_session=${signedIn.jar.ptcg_session}` } });
+      check('sso: as the right person, with the link recorded',
+        who.username === 'ssoadmin' && who.oidcLinked === true);
+
+      // ---- the parts that must not work ----
+      const reject = async (knob, expect) => {
+        idp.reset();
+        if (knob) idp.options[knob] = true;
+        const r = await walk('/api/oidc/start');
+        idp.reset();
+        return /signin-failed/.test(r.url) && new RegExp(expect, 'i').test(decodeURIComponent(r.url));
+      };
+      check('sso: a token signed with the wrong key is refused', await reject('badSignature', 'not signed by the provider'));
+      check('sso: a token from another issuer is refused', await reject('badIssuer', 'issued by somebody else'));
+      check('sso: a token for another application is refused', await reject('badAudience', 'different application'));
+      check('sso: an expired token is refused', await reject('expired', 'expired'));
+      check('sso: a token from a different sign-in is refused', await reject('wrongNonce', 'different sign-in'));
+
+      // arriving at the callback without having started is not a sign-in
+      const noFlow = await fetch(`${S}/api/oidc/callback?code=made-up&state=made-up`, { redirect: 'manual' });
+      check('sso: a callback that started nowhere is refused',
+        /signin-failed/.test(noFlow.headers.get('location') || ''));
+
+      // unlinking needs the password, like every other change to how you get in
+      const unlinkNoPw = await fetch(`${S}/api/oidc/unlink`, { method: 'POST', headers: auth, body: JSON.stringify({ password: 'nope' }) });
+      check('sso: unlinking needs the current password', unlinkNoPw.status === 401);
+      await jfetch(`${S}/api/oidc/unlink`, { method: 'POST', headers: auth, body: JSON.stringify({ password: 'correcthorsebattery' }) });
+      const after = await walk('/api/oidc/start');
+      check('sso: once unlinked, that identity is a stranger again', /signin-failed/.test(after.url));
+
+      // the secret is write-only, same as the mail password
+      const read = await jfetch(`${S}/api/oidc-settings`, { headers: auth });
+      check('sso: the client secret goes in but never comes back out',
+        read.secretSet === true && read.clientSecret === undefined);
+
+      // and none of this disturbed the password that was already there
+      const stillLocal = await fetch(`${S}/api/login`, { method: 'POST', headers: jbody2, body: JSON.stringify({ username: 'ssoadmin', password: 'correcthorsebattery' }) });
+      check('sso: local accounts are untouched by any of it', stillLocal.status === 200);
+      idp.close();
+  }
+
   console.log('=== 7/8 variant importer + read-only mode + offline mirror ===');
 
   // ---- shell caching: app.js must ALWAYS revalidate (a max-age here once

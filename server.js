@@ -169,6 +169,13 @@ try { db.exec('ALTER TABLE users ADD COLUMN email_verified INTEGER NOT NULL DEFA
 // could not generate the next code.
 try { db.exec('ALTER TABLE users ADD COLUMN totp_secret TEXT'); } catch { /* already present */ }
 try { db.exec('ALTER TABLE users ADD COLUMN totp_enabled INTEGER NOT NULL DEFAULT 0'); } catch { /* already present */ }
+// An account can also be reachable through somebody else's identity provider.
+// The pair is (issuer, subject): a subject is only unique within its issuer,
+// and storing the subject alone would let a second provider's user id collide
+// with a first provider's and inherit the account.
+try { db.exec('ALTER TABLE users ADD COLUMN oidc_iss TEXT'); } catch { /* already present */ }
+try { db.exec('ALTER TABLE users ADD COLUMN oidc_sub TEXT'); } catch { /* already present */ }
+try { db.exec('CREATE UNIQUE INDEX IF NOT EXISTS users_oidc ON users (oidc_iss, oidc_sub) WHERE oidc_sub IS NOT NULL'); } catch { /* already present */ }
 
 /* One-shot links: verify this address, reset this password. Only the SHA-256
  * of each token is kept — the raw value exists in the email and nowhere else,
@@ -227,11 +234,13 @@ function writeJSONAtomic(file, obj) {
 
 // ---------- user & collection queries ----------
 
-const rowToUser = (r) => (r ? { id: r.id, username: r.username, display: r.display, salt: r.salt, hash: r.hash, created: r.created, admin: !!r.admin, email: r.email || null, emailVerified: !!r.email_verified, totpSecret: r.totp_secret || null, totpEnabled: !!r.totp_enabled } : null);
+const rowToUser = (r) => (r ? { id: r.id, username: r.username, display: r.display, salt: r.salt, hash: r.hash, created: r.created, admin: !!r.admin, email: r.email || null, emailVerified: !!r.email_verified, totpSecret: r.totp_secret || null, totpEnabled: !!r.totp_enabled, oidcIss: r.oidc_iss || null, oidcSub: r.oidc_sub || null } : null);
 
 const _getUserById = db.prepare('SELECT * FROM users WHERE id = ?');
 const _getUserByName = db.prepare('SELECT * FROM users WHERE username = ?');
 const _getUserByEmail = db.prepare('SELECT * FROM users WHERE email IS NOT NULL AND lower(email) = ?');
+const _getUserByOidc = db.prepare('SELECT * FROM users WHERE oidc_iss = ? AND oidc_sub = ?');
+const _setUserOidc = db.prepare('UPDATE users SET oidc_iss = ?, oidc_sub = ? WHERE id = ?');
 const _insertUser = db.prepare('INSERT INTO users (id, username, display, salt, hash, created, admin, email, email_verified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
 const _updateUserHash = db.prepare('UPDATE users SET salt = ?, hash = ? WHERE id = ?');
 const _setUserEmail = db.prepare('UPDATE users SET email = ?, email_verified = ? WHERE id = ?');
@@ -651,7 +660,9 @@ function redeemTotpTicket(ticket) {
   return user;
 }
 
-function verifyToken(token) {
+/** Anything this server signed, still in date. Says nothing about what it is
+ * for — a half-finished sign-in is signed by us too, and is not a session. */
+function verifySigned(token) {
   if (!token || typeof token !== 'string') return null;
   const dot = token.lastIndexOf('.');
   if (dot < 0) return null;
@@ -662,11 +673,17 @@ function verifyToken(token) {
   if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
   try {
     const payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
-    if (!payload.uid || !payload.exp || Date.now() > payload.exp) return null;
+    if (!payload.exp || Date.now() > payload.exp) return null;
     return payload;
   } catch {
     return null;
   }
+}
+
+/** A signed thing that names an account. */
+function verifyToken(token) {
+  const payload = verifySigned(token);
+  return payload && payload.uid ? payload : null;
 }
 
 function authUser(req) {
@@ -856,6 +873,162 @@ function noteLoginFailure(accountKey) {
 }
 
 const clearLoginFailures = (accountKey) => loginFailures.delete(accountKey);
+
+/* ---------- signing in with somebody else's identity provider ----------
+ * Optional, and off unless configured. Local accounts remain the default so a
+ * fresh install works with nothing else running; this is for people who
+ * already run Authentik, Keycloak, Zitadel, Auth0, Okta or Pocket ID and
+ * would rather have one sign-in for everything.
+ *
+ * Standard OpenID Connect authorization code flow with PKCE, and no
+ * dependency: discovery is one fetch, and verifying the identity token is
+ * RSA/ECDSA over a JSON Web Key, both of which node:crypto does natively.
+ */
+const oidcSettings = () => {
+  const s = loadSettings().oidc || {};
+  const e = process.env;
+  return {
+    issuer: (e.PTCG_OIDC_ISSUER || s.issuer || '').replace(/\/+$/, ''),
+    clientId: e.PTCG_OIDC_CLIENT_ID || s.clientId || '',
+    clientSecret: e.PTCG_OIDC_CLIENT_SECRET || s.clientSecret || '',
+    label: e.PTCG_OIDC_LABEL || s.label || 'single sign-on',
+    // 'link'   — an identity nobody has claimed is turned away
+    // 'create' — it gets an account of its own
+    unknown: ['link', 'create'].includes(e.PTCG_OIDC_UNKNOWN || s.unknown) ? (e.PTCG_OIDC_UNKNOWN || s.unknown) : 'link',
+  };
+};
+const oidcConfigured = () => {
+  const c = oidcSettings();
+  return !!(c.issuer && c.clientId);
+};
+
+/* Discovery and the signing keys, both cached: an install that signs people in
+ * all day should not ask its provider who it is on every request, and a
+ * provider that rotates keys should not need a restart to be believed. */
+const _oidcCache = { doc: null, docAt: 0, jwks: null, jwksAt: 0, issuer: '' };
+const OIDC_CACHE_MS = 60 * 60 * 1000;
+
+async function oidcDiscover() {
+  const { issuer } = oidcSettings();
+  if (!issuer) throw new Error('No identity provider is configured');
+  const fresh = _oidcCache.doc && _oidcCache.issuer === issuer && Date.now() - _oidcCache.docAt < OIDC_CACHE_MS;
+  if (fresh) return _oidcCache.doc;
+  const r = await fetch(`${issuer}/.well-known/openid-configuration`);
+  if (!r.ok) throw new Error(`The provider did not answer discovery (${r.status})`);
+  const doc = await r.json();
+  if (doc.issuer !== issuer) {
+    // a document claiming to speak for a different issuer is not this provider
+    throw new Error(`The provider calls itself ${doc.issuer}, not ${issuer}`);
+  }
+  Object.assign(_oidcCache, { doc, docAt: Date.now(), issuer, jwks: null, jwksAt: 0 });
+  return doc;
+}
+
+async function oidcKeys(force) {
+  const doc = await oidcDiscover();
+  if (!force && _oidcCache.jwks && Date.now() - _oidcCache.jwksAt < OIDC_CACHE_MS) return _oidcCache.jwks;
+  const r = await fetch(doc.jwks_uri);
+  if (!r.ok) throw new Error(`Could not fetch the provider's signing keys (${r.status})`);
+  const jwks = await r.json();
+  Object.assign(_oidcCache, { jwks: jwks.keys || [], jwksAt: Date.now() });
+  return _oidcCache.jwks;
+}
+
+const b64urlJson = (part) => JSON.parse(Buffer.from(part, 'base64url').toString('utf8'));
+const JWT_ALGS = { RS256: 'RSA-SHA256', RS384: 'RSA-SHA384', RS512: 'RSA-SHA512', ES256: 'sha256', ES384: 'sha384', ES512: 'sha512' };
+
+/**
+ * Check an identity token the whole way down: signature against the
+ * provider's published key, then every claim that says who it is for.
+ * A token that is merely well-formed is not evidence of anything.
+ */
+async function verifyIdToken(idToken, { nonce }) {
+  const parts = String(idToken || '').split('.');
+  if (parts.length !== 3) throw new Error('That identity token is not a token');
+  const header = b64urlJson(parts[0]);
+  const claims = b64urlJson(parts[1]);
+  if (!JWT_ALGS[header.alg]) throw new Error(`Unsupported signing algorithm ${header.alg}`);
+
+  let keys = await oidcKeys(false);
+  let key = keys.find((k) => (!header.kid || k.kid === header.kid) && (!k.alg || k.alg === header.alg));
+  if (!key) {                                   // a rotated key is worth one refetch
+    keys = await oidcKeys(true);
+    key = keys.find((k) => (!header.kid || k.kid === header.kid) && (!k.alg || k.alg === header.alg));
+  }
+  if (!key) throw new Error('The provider has no published key for that token');
+
+  const pub = crypto.createPublicKey({ key, format: 'jwk' });
+  const signed = Buffer.from(`${parts[0]}.${parts[1]}`);
+  const sig = Buffer.from(parts[2], 'base64url');
+  const ok = header.alg.startsWith('ES')
+    ? crypto.verify(JWT_ALGS[header.alg], signed, { key: pub, dsaEncoding: 'ieee-p1363' }, sig)
+    : crypto.verify(JWT_ALGS[header.alg], signed, pub, sig);
+  if (!ok) throw new Error('That identity token is not signed by the provider');
+
+  const cfg = oidcSettings();
+  const now = Math.floor(Date.now() / 1000);
+  const SKEW = 120;                             // clocks are never quite the same
+  if (claims.iss !== cfg.issuer) throw new Error('That token was issued by somebody else');
+  const audience = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
+  if (!audience.includes(cfg.clientId)) throw new Error('That token was issued for a different application');
+  if (claims.azp && claims.azp !== cfg.clientId) throw new Error('That token was authorised for a different application');
+  if (!claims.exp || claims.exp + SKEW < now) throw new Error('That token has expired');
+  if (claims.iat && claims.iat - SKEW > now) throw new Error('That token is dated in the future');
+  // the nonce is what stops a token obtained elsewhere being replayed here
+  if (nonce && claims.nonce !== nonce) throw new Error('That token belongs to a different sign-in');
+  if (!claims.sub) throw new Error('That token does not say who it is for');
+  return claims;
+}
+
+/* The half-finished sign-in has to survive a trip to somebody else's website
+ * and back. It cannot live in the session cookie, which is SameSite=Strict and
+ * therefore deliberately absent on the way back from a redirect — so it gets
+ * its own, Lax, short-lived, holding only what the callback must check. */
+const OIDC_COOKIE = 'ptcg_oidc';
+const OIDC_FLOW_TTL_MS = 10 * 60 * 1000;
+
+const oidcFlowCookie = (req, payload) => {
+  const value = sign({ ...payload, exp: Date.now() + OIDC_FLOW_TTL_MS });
+  return `${OIDC_COOKIE}=${encodeURIComponent(value)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${OIDC_FLOW_TTL_MS / 1000}`
+    + (isSecureRequest(req) ? '; Secure' : '');
+};
+const clearOidcCookie = () => `${OIDC_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`;
+
+const oidcRedirectUri = (req) => `${publicBase(req)}/api/oidc/callback`;
+
+/** Exchange the one-time code for tokens. */
+async function oidcExchange(req, code, verifier) {
+  const doc = await oidcDiscover();
+  const cfg = oidcSettings();
+  const body = new URLSearchParams({
+    grant_type: 'authorization_code',
+    code,
+    redirect_uri: oidcRedirectUri(req),
+    client_id: cfg.clientId,
+    code_verifier: verifier,
+  });
+  const headers = { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' };
+  // a confidential client authenticates; a public one has only PKCE
+  if (cfg.clientSecret) {
+    headers.Authorization = 'Basic ' + Buffer.from(`${encodeURIComponent(cfg.clientId)}:${encodeURIComponent(cfg.clientSecret)}`).toString('base64');
+  }
+  const r = await fetch(doc.token_endpoint, { method: 'POST', headers, body });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error_description || data.error || `The provider refused the code (${r.status})`);
+  if (!data.id_token) throw new Error('The provider returned no identity token');
+  return data;
+}
+
+/** A page that hands the browser back to the app with a message. */
+function oidcDone(res, req, hash, extraCookie) {
+  const to = `${publicBase(req)}/${hash}`;
+  res.writeHead(302, {
+    Location: to,
+    'Cache-Control': 'no-store',
+    'Set-Cookie': extraCookie ? [clearOidcCookie(), extraCookie] : [clearOidcCookie()],
+  });
+  res.end();
+}
 
 /* ---------- sending mail ----------
  * SMTP, because it is the one thing every provider speaks: Brevo, Resend,
@@ -2001,6 +2174,7 @@ async function handleApi(req, res, pathname, ip, url) {
       masterPulledAt: s.masterPulledAt || null,
       autoUpdate: autoUpdateMode(),
       mailConfigured: mailConfigured(),
+      oidc: oidcConfigured() ? { label: oidcSettings().label } : null,
       registration: registrationMode(),
       minPassword: MIN_PASSWORD,
       updateCheckedAt: s.updateCheckedAt || null,
@@ -2375,6 +2549,106 @@ async function handleApi(req, res, pathname, ip, url) {
     return sendSession(req, res, who);
   }
 
+  /* ---- starting a sign-in with the provider ----
+   * A GET, because the browser is about to be sent somewhere. `link` means
+   * "attach this identity to the account I am already signed into" rather
+   * than "sign me in", and the difference is carried in the flow cookie so
+   * the callback cannot be talked into the wrong one.
+   */
+  if (pathname === '/api/oidc/start' && req.method === 'GET') {
+    if (!oidcConfigured()) return sendJSON(res, 400, { error: 'No identity provider is configured' });
+    let doc;
+    try { doc = await oidcDiscover(); }
+    catch (e) { return sendJSON(res, 502, { error: e.message }); }
+    const cfg = oidcSettings();
+    const linking = url.searchParams.get('mode') === 'link';
+    const me = linking ? authUser(req) : null;
+    if (linking && !me) return sendJSON(res, 401, { error: 'Sign in first, then link' });
+
+    const state = crypto.randomBytes(24).toString('base64url');
+    const nonce = crypto.randomBytes(24).toString('base64url');
+    const verifier = crypto.randomBytes(32).toString('base64url');
+    const challenge = crypto.createHash('sha256').update(verifier).digest('base64url');
+    const authUrl = new URL(doc.authorization_endpoint);
+    for (const [k, v] of Object.entries({
+      response_type: 'code',
+      client_id: cfg.clientId,
+      redirect_uri: oidcRedirectUri(req),
+      scope: 'openid profile email',
+      state,
+      nonce,
+      code_challenge: challenge,
+      code_challenge_method: 'S256',
+    })) authUrl.searchParams.set(k, v);
+
+    res.writeHead(302, {
+      Location: authUrl.toString(),
+      'Cache-Control': 'no-store',
+      'Set-Cookie': oidcFlowCookie(req, { state, nonce, verifier, link: linking ? me.id : null }),
+    });
+    return res.end();
+  }
+
+  if (pathname === '/api/oidc/callback' && req.method === 'GET') {
+    const flow = verifySigned(cookieOf(req, OIDC_COOKIE));
+    const fail = (why) => oidcDone(res, req, '#/signin-failed?why=' + encodeURIComponent(why), null);
+    if (!flow) return fail('That sign-in took too long. Try again.');
+    // state ties this answer to the request that started it
+    const given = String(url.searchParams.get('state') || '');
+    const a = Buffer.from(given), b = Buffer.from(flow.state);
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return fail('That sign-in did not start here.');
+    if (url.searchParams.get('error')) return fail(url.searchParams.get('error_description') || url.searchParams.get('error'));
+    const code = url.searchParams.get('code');
+    if (!code) return fail('The provider sent no code.');
+
+    let claims;
+    try {
+      const tokens = await oidcExchange(req, code, flow.verifier);
+      claims = await verifyIdToken(tokens.id_token, { nonce: flow.nonce });
+    } catch (e) { return fail(e.message); }
+
+    const cfg = oidcSettings();
+    const existing = rowToUser(_getUserByOidc.get(claims.iss, claims.sub));
+
+    // linking: attach this identity to the account that asked for it
+    if (flow.link) {
+      const me = getUserById(flow.link);
+      if (!me) return fail('That account is gone.');
+      if (existing && existing.id !== me.id) return fail('That identity is already attached to another account.');
+      _setUserOidc.run(claims.iss, claims.sub, me.id);
+      return oidcDone(res, req, '#/linked', sessionCookie(req, issueToken(me)));
+    }
+
+    if (existing) {
+      // a second factor is a second factor, whoever vouched for the first
+      if (existing.totpEnabled) {
+        return oidcDone(res, req, '#/signin-2fa?ticket=' + encodeURIComponent(issueTotpTicket(existing)), null);
+      }
+      return oidcDone(res, req, '#/signed-in', sessionCookie(req, issueToken(existing)));
+    }
+
+    if (cfg.unknown !== 'create') {
+      return fail('That identity is not attached to any account here. Sign in with your password first, then link it from your account.');
+    }
+
+    // making an account for somebody the provider vouches for
+    const base = String(claims.preferred_username || claims.email || claims.sub).toLowerCase().replace(/[^a-z0-9_]/g, '').slice(0, 24) || 'user';
+    let username = base.length >= 3 ? base : `user${base}`;
+    for (let i = 2; getUserByName(username); i++) username = `${base}${i}`.slice(0, 30);
+    const salt = crypto.randomBytes(16).toString('hex');
+    const fresh = {
+      id: crypto.randomUUID(), username, display: claims.name || claims.preferred_username || username, salt,
+      // no password: this account is reached through the provider
+      hash: await hashPassword(crypto.randomBytes(32).toString('hex'), salt),
+      created: new Date().toISOString(), admin: userCount() === 0,
+      email: claims.email && claims.email_verified ? claims.email : null,
+      emailVerified: !!(claims.email && claims.email_verified),
+    };
+    try { createUser(fresh); } catch { return fail('Could not create an account for that identity.'); }
+    _setUserOidc.run(claims.iss, claims.sub, fresh.id);
+    return oidcDone(res, req, '#/signed-in', sessionCookie(req, issueToken(fresh)));
+  }
+
   if (pathname === '/api/logout' && req.method === 'POST') {
     // the cookie is httpOnly, so only the server can take it away
     return sendJSON(res, 200, { ok: true }, { 'Set-Cookie': clearSessionCookie() });
@@ -2437,6 +2711,7 @@ async function handleApi(req, res, pathname, ip, url) {
       email: user.email, emailVerified: user.emailVerified,
       totpEnabled: user.totpEnabled,
       recoveryLeft: user.totpEnabled ? _countRecovery.get(user.id).n : 0,
+      oidcLinked: !!user.oidcSub,
     });
   }
 
@@ -2480,6 +2755,59 @@ async function handleApi(req, res, pathname, ip, url) {
     try { await sendVerificationMail(req, user); }
     catch (e) { return sendJSON(res, 502, { error: 'Could not send it: ' + e.message }); }
     return sendJSON(res, 200, { ok: true });
+  }
+
+  /* ---- unlinking, and what the account page shows ---- */
+  if (pathname === '/api/oidc/unlink' && req.method === 'POST') {
+    const body = await readBody(req);
+    // the password, because unlinking is a change to how the account is reached
+    if (!(await verifyPassword(body.password, user.salt, user.hash))) {
+      return sendJSON(res, 401, { error: 'Current password is incorrect' });
+    }
+    _setUserOidc.run(null, null, user.id);
+    return sendJSON(res, 200, { ok: true });
+  }
+
+  if (pathname === '/api/oidc-settings' && req.method === 'GET') {
+    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    const cfg = oidcSettings();
+    const e = process.env;
+    return sendJSON(res, 200, {
+      issuer: cfg.issuer, clientId: cfg.clientId, label: cfg.label, unknown: cfg.unknown,
+      secretSet: !!cfg.clientSecret,
+      redirectUri: oidcRedirectUri(req),
+      fromEnvironment: !!(e.PTCG_OIDC_ISSUER || e.PTCG_OIDC_CLIENT_ID || e.PTCG_OIDC_CLIENT_SECRET),
+    });
+  }
+
+  if (pathname === '/api/oidc-settings' && req.method === 'POST') {
+    if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
+    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    const body = await readBody(req);
+    const s2 = loadSettings();
+    const prev = (s2.oidc && typeof s2.oidc === 'object') ? s2.oidc : {};
+    s2.oidc = {
+      issuer: String(body.issuer || '').trim().replace(/\/+$/, ''),
+      clientId: String(body.clientId || '').trim(),
+      // blank means keep, same reasoning as the mail password
+      clientSecret: typeof body.clientSecret === 'string' && body.clientSecret ? body.clientSecret : (prev.clientSecret || ''),
+      label: String(body.label || '').trim() || 'single sign-on',
+      unknown: ['link', 'create'].includes(body.unknown) ? body.unknown : 'link',
+    };
+    saveSettings(s2);
+    Object.assign(_oidcCache, { doc: null, docAt: 0, jwks: null, jwksAt: 0, issuer: '' });
+    return sendJSON(res, 200, { ok: true, configured: oidcConfigured() });
+  }
+
+  /** Ask the provider who it says it is — a way to check a URL before trusting it. */
+  if (pathname === '/api/oidc-settings/probe' && req.method === 'POST') {
+    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    try {
+      const doc = await oidcDiscover();
+      const keys = await oidcKeys(true);
+      return sendJSON(res, 200, { ok: true, issuer: doc.issuer, keys: keys.length,
+        authorization: !!doc.authorization_endpoint, token: !!doc.token_endpoint });
+    } catch (e) { return sendJSON(res, 502, { error: e.message }); }
   }
 
   /* ---- the mail server this install sends through ----

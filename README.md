@@ -320,6 +320,16 @@ node server.js --clear-2fa yourname
 
 Turning it off through the app needs your password, so a session someone else has borrowed cannot quietly remove it.
 
+### Single sign-on (optional)
+
+Point the app at any OpenID Connect provider — Authentik, Keycloak, Zitadel, Pocket ID, Auth0, Okta — from **Administration → Single sign-on**, or with `PTCG_OIDC_ISSUER`, `PTCG_OIDC_CLIENT_ID` and `PTCG_OIDC_CLIENT_SECRET`. Local accounts keep working exactly as before; this is an extra door, not a replacement, so a fresh install still needs nothing else running.
+
+Standard authorization-code flow with PKCE. No dependency: discovery is one fetch and verifying the identity token is RSA or ECDSA over a published JSON Web Key, both of which Node does natively. The token is checked all the way down — signature against the provider's key, then issuer, audience, expiry and nonce.
+
+Give the provider the redirect URL the settings panel prints, which is `<your public address>/api/oidc/callback`.
+
+**An identity nobody has claimed is turned away by default.** You link one by signing in with your password and pressing Link, which means an account cannot be claimed by whoever reaches the provider first. Switch it to *"give them a new account"* if you want the provider to be the way people join. Unlinking needs your password, since it changes how the account is reached.
+
 ### Setting a password from the console
 
 Mail is optional, so an install without it needs a way back in that does not involve editing the database. Whoever can run commands on the machine can set a password:
