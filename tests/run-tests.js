@@ -537,6 +537,66 @@ function fail(msg) {
     check('set-password: the previous password stops working', wasReset.status === 401);
     check('set-password: and the console one works', isSet.status === 200);
 
+    // ---- configuring mail after the install is already running ----
+    // The setup screen asks once, which is no help to an install that was
+    // already up when mail arrived — the state this very repo was in.
+    {
+      const adminTok = (await jfetch(`${M}/api/login`, { method: 'POST', headers: jbody2, body: JSON.stringify({ username: 'owner', password: 'set-from-the-console' }) })).token;
+      const auth = { ...jbody2, Authorization: 'Bearer ' + adminTok };
+      const before = await jfetch(`${M}/api/mail-settings`, { headers: auth });
+      check('mail settings: an admin can read them, and the package is present',
+        before.packageAvailable === true && typeof before.host === 'string');
+      const anon = await fetch(`${M}/api/mail-settings`, { headers: jbody2 });
+      check('mail settings: a stranger cannot', anon.status === 401 || anon.status === 403);
+
+      await jfetch(`${M}/api/mail-settings`, { method: 'POST', headers: auth, body: JSON.stringify({
+        host: 'localhost', port: '3997', user: 'bob', pass: 'the-smtp-password',
+        from: 'cards@example.test', publicUrl: 'https://cards.example.test',
+      }) });
+      const after = await jfetch(`${M}/api/mail-settings`, { headers: auth });
+      check('mail settings: the password goes in but never comes back out',
+        after.passwordSet === true && after.pass === undefined);
+      // the form cannot show the old password, so blank has to mean "keep it"
+      await jfetch(`${M}/api/mail-settings`, { method: 'POST', headers: auth, body: JSON.stringify({
+        host: 'localhost', port: '3997', user: 'bob', pass: '', from: 'cards@example.test',
+      }) });
+      const kept = JSON.parse(fs.readFileSync(path.join(mailDir, 'settings.json'), 'utf8'));
+      check('mail settings: saving with a blank password keeps the saved one',
+        kept.smtp.pass === 'the-smtp-password');
+
+      await emptyInbox();
+      const test = await jfetch(`${M}/api/mail-test`, { method: 'POST', headers: auth, body: JSON.stringify({ to: 'checkme@example.test' }) });
+      for (let i = 0; i < 40 && !(await inbox()).length; i++) await new Promise((r) => setTimeout(r, 100));
+      const testBox = await inbox();
+      check('mail settings: a test message actually goes out',
+        test.ok === true && testBox.length === 1 && testBox[0].to.includes('checkme@example.test'));
+
+      // ---- putting an address on an account that never had one ----
+      const wrongPw = await fetch(`${M}/api/email`, { method: 'POST', headers: auth, body: JSON.stringify({ password: 'nope', email: 'owner2@example.test' }) });
+      check('address: changing it needs the current password', wrongPw.status === 401);
+      await emptyInbox();
+      const set = await jfetch(`${M}/api/email`, { method: 'POST', headers: auth, body: JSON.stringify({ password: 'set-from-the-console', email: 'owner2@example.test' }) });
+      check('address: a new one arrives unconfirmed and asks to be confirmed',
+        set.email === 'owner2@example.test' && set.emailVerified === false && set.sent === true);
+      for (let i = 0; i < 40 && !(await inbox()).length; i++) await new Promise((r) => setTimeout(r, 100));
+      const conf = await inbox();
+      const link = (/(https:\/\/\S+)/.exec(conf[0].text) || [])[1] || '';
+      check('address: the confirmation goes to the NEW address', conf[0].to.includes('owner2@example.test'));
+      await jfetch(`${M}/api/verify-email`, { method: 'POST', headers: jbody2, body: JSON.stringify({ token: link.split('/verify/')[1] }) });
+      const meConf = await jfetch(`${M}/api/me`, { headers: auth });
+      check('address: confirming it sticks', meConf.email === 'owner2@example.test' && meConf.emailVerified === true);
+
+      // an address that changes is an address nobody has proved they can read
+      await jfetch(`${M}/api/email`, { method: 'POST', headers: auth, body: JSON.stringify({ password: 'set-from-the-console', email: 'owner3@example.test' }) });
+      const meMoved = await jfetch(`${M}/api/me`, { headers: auth });
+      check('address: changing it drops the confirmation with it',
+        meMoved.email === 'owner3@example.test' && meMoved.emailVerified === false);
+      const noReset = await jfetch(`${M}/api/forgot-password`, { method: 'POST', headers: jbody2, body: JSON.stringify({ email: 'owner2@example.test' }) });
+      check('address: and the address it used to be stops resetting anything', noReset.ok === true);
+      // put it back the way the two-factor block expects to find it
+      await jfetch(`${M}/api/email`, { method: 'POST', headers: auth, body: JSON.stringify({ password: 'set-from-the-console', email: 'owner@example.test' }) });
+    }
+
     // ---- the second factor ----
     // The codes are generated here independently of the server, from the
     // secret it hands out — if the two implementations ever disagree, no

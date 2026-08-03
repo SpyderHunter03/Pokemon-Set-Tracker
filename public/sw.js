@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — service worker (offline support) */
 importScripts('config.js');
 
-const SHELL_CACHE = 'ptcg-shell-v72';
+const SHELL_CACHE = 'ptcg-shell-v73';
 const DATA_CACHE = 'ptcg-data-v2';
 const IMG_CACHE = 'ptcg-img-v1';
 

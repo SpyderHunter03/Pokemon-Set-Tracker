@@ -299,7 +299,9 @@ PTCG_SMTP_FROM='Pokémon Tracker <cards@example.com>'
 PTCG_PUBLIC_URL=https://cards.example.com   # how links in emails should address this app
 ```
 
-The setup screen writes the same settings if you would rather not touch the unit file; the environment wins where both are set. Sending needs the optional `nodemailer` package (`npm install --no-save nodemailer`), in the same spirit as `sharp`.
+The setup screen writes the same settings if you would rather not touch the unit file, and so does **Administration → Sending mail** on an install that is already running — with a **Send a test** button, because the alternative way to discover the settings are wrong is somebody failing to reset their password. The environment wins where both are set. The password is write-only: it goes in and is never handed back.
+
+Your own address lives in 👤 → Email. Adding or changing it needs your password, since the address is the recovery path, and a changed address is unconfirmed until somebody proves they can read it. Sending needs the optional `nodemailer` package (`npm install --no-save nodemailer`), in the same spirit as `sharp`.
 
 Confirmation links last 24 hours, reset links 45 minutes, both are single-use, and only the SHA-256 of each is stored — the usable value exists in the email and nowhere else. Setting a new password signs out every device. Asking to reset an address the server has never seen gets exactly the same answer as asking about one it has, so the endpoint cannot be used to find out who has an account here.
 

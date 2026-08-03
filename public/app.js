@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.56.0';
+const APP_VERSION = '3.57.0';
 
 /* ============================================================
  * Storage helpers
@@ -1964,6 +1964,120 @@ function openForgotPassword() {
   (document.querySelector('dialog[open]') || document.body).append(ov);
 }
 
+/** The address on this account: add one, change it, confirm it. */
+function emailSection() {
+  const wrap = h('div', {});
+  const refresh = async () => { _meCache = null; try { show(await apiCall('me')); } catch { wrap.replaceChildren(); } };
+  const show = (me) => {
+    const rows = [h('hr'), h('h3', { style: 'margin:0 0 6px' }, 'Email')];
+    if (!appConfig.mailConfigured) {
+      rows.push(h('p', { class: 'muted small' }, me.email
+        ? `${me.email} \u2014 this server cannot send mail, so it cannot be confirmed or used to reset your password.`
+        : 'This server has no mail server configured, so password resets are not available.'));
+    } else if (!me.email) {
+      rows.push(h('p', { class: 'muted small' }, 'No address on this account. Without one there is no way to reset a forgotten password.'));
+    } else if (me.emailVerified) {
+      rows.push(h('p', { class: 'muted small' }, `${me.email} \u2014 confirmed. This is where a reset link would go.`));
+    } else {
+      const resend = h('button', { class: 'btn ghost small' }, 'Send it again');
+      resend.addEventListener('click', async () => {
+        resend.disabled = true;
+        try { await apiCall('email/resend', { method: 'POST', body: '{}' }); toast('Confirmation sent'); }
+        catch (e) { toast(e.message); }
+        resend.disabled = false;
+      });
+      rows.push(
+        h('p', { class: 'muted small', style: 'color:var(--accent)' },
+          `${me.email} \u2014 not confirmed yet. Until it is, it cannot be used to reset your password.`),
+        resend,
+      );
+    }
+    const change = h('button', { class: 'btn ghost small' }, me.email ? 'Change address' : 'Add an address');
+    change.addEventListener('click', () => {
+      const addrIn = h('input', { type: 'email', placeholder: 'you@example.com', autocomplete: 'email' });
+      addrIn.value = me.email || '';
+      askPassword(me.email ? 'Change your address' : 'Add an address',
+        'A new address has to be confirmed before it can reset anything.',
+        async (pw) => {
+          const d = await apiCall('email', { method: 'POST', body: JSON.stringify({ password: pw, email: addrIn.value.trim() }) });
+          toast(d.sent ? 'Check your inbox for the confirmation' : 'Saved');
+          refresh();
+        }, addrIn);
+    });
+    rows.push(h('div', { class: 'row', style: 'gap:8px; margin-top:6px' }, change));
+    wrap.replaceChildren(...rows.filter(Boolean));
+  };
+  refresh();
+  return wrap;
+}
+
+/** Mail settings, for an install that was already running when mail arrived. */
+function mailSettingsSection() {
+  const wrap = h('div', {});
+  (async () => {
+    let cfg;
+    try { cfg = await apiCall('mail-settings'); } catch { return; }
+    const f = (label, input, hint) => h('label', { class: 'ce-field' },
+      h('span', { class: 'muted small' }, label), input,
+      hint ? h('span', { class: 'muted small' }, hint) : null);
+    const t = (v, ph, type) => { const i = h('input', { type: type || 'text', placeholder: ph || '' }); i.value = v || ''; return i; };
+    const host = t(cfg.host, 'smtp.example.com');
+    const port = t(String(cfg.port || 587), '587');
+    const userIn = t(cfg.user, 'SMTP username');
+    const pass = t('', cfg.passwordSet ? 'unchanged' : 'SMTP password', 'password');
+    const from = t(cfg.from, 'Pokemon Tracker <cards@example.com>');
+    const pub = t(cfg.publicUrl, 'https://cards.example.com');
+    const testTo = t('', 'address to send a test to');
+    const note = h('p', { class: 'muted small', style: 'margin:0' });
+
+    const save = h('button', { class: 'btn small' }, 'Save');
+    save.addEventListener('click', async () => {
+      save.disabled = true;
+      try {
+        await apiCall('mail-settings', { method: 'POST', body: JSON.stringify({
+          host: host.value.trim(), port: port.value.trim(), user: userIn.value.trim(),
+          pass: pass.value, from: from.value.trim(), publicUrl: pub.value.trim(),
+        }) });
+        pass.value = '';
+        await loadAppConfig();
+        note.textContent = 'Saved.';
+      } catch (e) { note.textContent = e.message; }
+      save.disabled = false;
+    });
+    const send = h('button', { class: 'btn ghost small' }, 'Send a test');
+    send.addEventListener('click', async () => {
+      send.disabled = true;
+      note.textContent = 'Sending\u2026';
+      try {
+        const d = await apiCall('mail-test', { method: 'POST', body: JSON.stringify({ to: testTo.value.trim() }) });
+        note.textContent = `Sent to ${d.to}. If it does not arrive, look in the spam folder before changing anything.`;
+      } catch (e) { note.textContent = 'Failed: ' + e.message; }
+      send.disabled = false;
+    });
+
+    wrap.replaceChildren(...[
+      h('hr'),
+      h('h3', { style: 'margin:0 0 6px' }, 'Sending mail'),
+      h('p', { class: 'muted small', style: 'margin:0' }, cfg.packageAvailable
+        ? 'With a mail server, this install can confirm addresses and send password resets. Any provider that gives you SMTP credentials will do.'
+        : 'The nodemailer package is not installed on this server, so nothing can be sent yet. Run npm install --omit=dev in the app folder.'),
+      cfg.fromEnvironment ? h('p', { class: 'muted small', style: 'color:var(--accent); margin:0' },
+        'Some of these come from this server\u2019s environment, which wins over anything saved here.') : null,
+      f('SMTP host', host), f('Port', port, '587 upgrades with STARTTLS; 465 is TLS from the start'),
+      f('Username', userIn),
+      f('Password', pass, cfg.passwordSet ? 'A password is saved. Leave blank to keep it.' : null),
+      f('From address', from),
+      f('Public address of this app', pub, 'Used to build the links inside emails.'),
+      h('div', { class: 'row', style: 'gap:8px' }, save),
+      h('hr'),
+      f('Send a test message to', testTo, 'Blank sends it to your own address.'),
+      h('div', { class: 'row', style: 'gap:8px' }, send),
+      note,
+    ].filter(Boolean));
+  })();
+  return wrap;
+}
+
 /** The two-factor block in the account panel: turn it on, turn it off, and
  * get a fresh set of recovery codes. */
 function twoFactorSection() {
@@ -2004,7 +2118,7 @@ function twoFactorSection() {
 }
 
 /** Ask for the current password before something that weakens the account. */
-function askPassword(title, why, andThen) {
+function askPassword(title, why, andThen, extraInput) {
   const pwIn = h('input', { type: 'password', placeholder: 'Your password', autocomplete: 'current-password' });
   const err = h('p', { class: 'muted small', style: 'color:var(--accent); margin:0' });
   const go = h('button', { class: 'btn small' }, 'Continue');
@@ -2012,6 +2126,7 @@ function askPassword(title, why, andThen) {
     h('div', { class: 'picker-panel' },
       h('h3', { style: 'margin:0' }, title),
       h('p', { class: 'muted small', style: 'margin:0' }, why),
+      extraInput ? h('div', { class: 'field' }, extraInput) : null,
       h('div', { class: 'field' }, pwIn), err,
       h('div', { class: 'row', style: 'justify-content:flex-end; gap:8px' },
         h('button', { type: 'button', class: 'btn ghost small', onclick: () => ov.remove() }, 'Cancel'), go),
@@ -2825,6 +2940,7 @@ async function renderAdminArea() {
       h('p', { class: 'muted small' }, `Database: ${stats.cards || 0} cards, ${stats.sets || 0} sets, ${stats.printings || 0} custom printings.`),
       updateArea,
       connArea,
+      appConfig.readonly ? null : mailSettingsSection(),
       autoArea.children.length ? autoArea : null,
       // Update from TCGdex: only for installs WITHOUT a master (standalone)
       // and for the maintainer workspace — that's where new sets come from.
@@ -2891,6 +3007,7 @@ function renderAccountModal() {
         h('button', { class: 'btn small', onclick: async () => { try { await pullAndMerge(); toast('Synced'); renderAccountModal(); } catch (e) { toast('Sync failed: ' + e.message); } } }, 'Sync now'),
         h('button', { class: 'btn ghost small', onclick: () => { logout(); renderAccountModal(); route(); } }, 'Sign out'),
       ),
+      emailSection(),
       twoFactorSection(),
     );
     formsEl.replaceChildren();

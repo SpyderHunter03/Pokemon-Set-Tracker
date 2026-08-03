@@ -2440,6 +2440,108 @@ async function handleApi(req, res, pathname, ip, url) {
     });
   }
 
+  /* ---- the address on this account ----
+   * Only settable at registration until now, so every account older than that
+   * feature has none and no way back in if the password goes. Changing it
+   * needs the password: the address IS the recovery path, so quietly moving
+   * it is quietly taking the account. A new address starts unconfirmed, which
+   * means the old one stops working for resets and the new one does not start
+   * until somebody proves they can read it. */
+  if (pathname === '/api/email' && req.method === 'POST') {
+    if (rateLimited(ip, 'email', 10, 15 * 60 * 1000)) return sendJSON(res, 429, { error: 'Too many attempts, try again later' });
+    const body = await readBody(req);
+    if (!(await verifyPassword(body.password, user.salt, user.hash))) {
+      return sendJSON(res, 401, { error: 'Current password is incorrect' });
+    }
+    const addr = typeof body.email === 'string' ? body.email.trim() : '';
+    if (!addr) {                                   // clearing it is allowed, and means no resets
+      _setUserEmail.run(null, 0, user.id);
+      _dropTokensOf.run(user.id, 'verify');
+      return sendJSON(res, 200, { ok: true, email: null, emailVerified: false });
+    }
+    if (!EMAIL_RE.test(addr)) return sendJSON(res, 400, { error: 'That does not look like an email address' });
+    const taken = getUserByEmail(addr);
+    if (taken && taken.id !== user.id) return sendJSON(res, 409, { error: 'That email address is already in use' });
+    const same = user.email && user.email.toLowerCase() === addr.toLowerCase();
+    _setUserEmail.run(addr, same && user.emailVerified ? 1 : 0, user.id);
+    let sent = false;
+    if (!(same && user.emailVerified) && mailConfigured()) {
+      try { await sendVerificationMail(req, { ...user, email: addr }); sent = true; }
+      catch (e) { console.error('Verification mail failed: ' + e.message); }
+    }
+    return sendJSON(res, 200, { ok: true, email: addr, emailVerified: !!(same && user.emailVerified), sent });
+  }
+
+  if (pathname === '/api/email/resend' && req.method === 'POST') {
+    if (rateLimited(ip, 'email', 10, 15 * 60 * 1000)) return sendJSON(res, 429, { error: 'Too many attempts, try again later' });
+    if (!user.email) return sendJSON(res, 400, { error: 'There is no address on this account yet' });
+    if (user.emailVerified) return sendJSON(res, 400, { error: 'That address is already confirmed' });
+    if (!mailConfigured()) return sendJSON(res, 400, { error: 'This server has no mail server configured' });
+    try { await sendVerificationMail(req, user); }
+    catch (e) { return sendJSON(res, 502, { error: 'Could not send it: ' + e.message }); }
+    return sendJSON(res, 200, { ok: true });
+  }
+
+  /* ---- the mail server this install sends through ----
+   * The setup screen asks for this once, which does nothing for an install
+   * that was already running when mail arrived. The password is write-only:
+   * it goes in and is never handed back, so a borrowed session cannot read
+   * the credentials out of the settings it is allowed to change. */
+  if (pathname === '/api/mail-settings' && req.method === 'GET') {
+    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    const cfg = mailSettings();
+    const env = process.env;
+    return sendJSON(res, 200, {
+      host: cfg.host, port: cfg.port, secure: cfg.secure, user: cfg.user, from: cfg.from,
+      passwordSet: !!cfg.pass,
+      publicUrl: publicBase(req),
+      // an install told by its environment cannot be argued with from here
+      fromEnvironment: !!(env.PTCG_SMTP_HOST || env.PTCG_SMTP_USER || env.PTCG_SMTP_PASS),
+      packageAvailable: nodemailerAvailable(),
+    });
+  }
+
+  if (pathname === '/api/mail-settings' && req.method === 'POST') {
+    if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
+    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    const body = await readBody(req);
+    const s = loadSettings();
+    const prev = (s.smtp && typeof s.smtp === 'object') ? s.smtp : {};
+    const port = parseInt(body.port, 10) || 587;
+    s.smtp = {
+      host: String(body.host || '').trim(),
+      port,
+      secure: body.secure === undefined ? port === 465 : !!body.secure,
+      user: String(body.user || '').trim(),
+      // blank means "leave it alone" — the form never had the old one to show
+      pass: typeof body.pass === 'string' && body.pass ? body.pass : (prev.pass || ''),
+      from: String(body.from || '').trim(),
+    };
+    if (typeof body.publicUrl === 'string') s.publicUrl = body.publicUrl.trim().replace(/\/+$/, '');
+    saveSettings(s);
+    return sendJSON(res, 200, { ok: true, mailConfigured: mailConfigured() });
+  }
+
+  /* Sending one on demand, because the alternative way to find out that the
+   * settings are wrong is somebody failing to reset their password. */
+  if (pathname === '/api/mail-test' && req.method === 'POST') {
+    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    if (rateLimited(ip, 'mailtest', 10, 15 * 60 * 1000)) return sendJSON(res, 429, { error: 'Too many attempts, try again later' });
+    const body = await readBody(req);
+    const to = (typeof body.to === 'string' && body.to.trim()) || user.email;
+    if (!to || !EMAIL_RE.test(to)) return sendJSON(res, 400, { error: 'Give an address to send the test to' });
+    try {
+      await sendMail({
+        to,
+        subject: 'Test message from Pokémon TCG Tracker',
+        text: 'If you are reading this, this install can send mail.\n\nThat means it can confirm addresses and send password resets.\n',
+      });
+    } catch (e) {
+      return sendJSON(res, 502, { error: e.message });
+    }
+    return sendJSON(res, 200, { ok: true, to });
+  }
+
   /* ---- turning the second factor on ----
    * Two steps on purpose. The first hands over a secret and enables nothing;
    * the second wants a code made from it, which is the only proof that the
