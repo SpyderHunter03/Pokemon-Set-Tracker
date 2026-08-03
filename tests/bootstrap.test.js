@@ -67,9 +67,45 @@ const { chromium } = require('playwright');
   await page.waitForSelector('#account-status button:has-text("Sign out")');
   await page.waitForSelector('#admin-area button:has-text("Update cards from TCGdex")');
   check('first account sees the Administration section', true);
-  // hidden buttons must vanish, not render as literal "null" text
-  check('admin panel renders no stray "null" text',
-    !/\bnull\b/.test(await page.textContent('#admin-area')));
+  // A hidden child must vanish, not render as the literal text "null".
+  // append() and replaceChildren() both stringify null; only h() filters it,
+  // so any conditional child built outside h() is a candidate. This covered
+  // only the admin panel, and the next one to get it wrong was the account
+  // panel a few centimetres above it — so check the whole dialog.
+  check('the account dialog renders no stray "null" text',
+    !/\bnull\b/.test(await page.textContent('#account-modal')));
+
+  // The same check with two-factor ON, because that is the branch that had a
+  // conditional child and therefore the one that printed "null" at a user.
+  {
+    const setup = await page.evaluate(async () =>
+      (await fetch('api/totp/setup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).json());
+    const crypto = require('crypto');
+    const b32 = (str) => {
+      const A = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+      let bits = 0, value = 0; const out = [];
+      for (const ch of str) { value = (value << 5) | A.indexOf(ch); bits += 5; if (bits >= 8) { out.push((value >>> (bits - 8)) & 255); bits -= 8; } }
+      return Buffer.from(out);
+    };
+    const counter = Buffer.alloc(8);
+    counter.writeBigUInt64BE(BigInt(Math.floor(Date.now() / 30000)));
+    const mac = crypto.createHmac('sha1', b32(setup.secret)).update(counter).digest();
+    const off = mac[mac.length - 1] & 0x0f;
+    const num = ((mac[off] & 0x7f) << 24) | (mac[off + 1] << 16) | (mac[off + 2] << 8) | mac[off + 3];
+    const code = String(num % 1e6).padStart(6, '0');
+    const on = await page.evaluate(async (c) =>
+      (await fetch('api/totp/enable', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: c }) })).json(), code);
+    check('two-factor can be turned on from the browser', on.ok === true);
+    await page.keyboard.press('Escape');
+    await page.click('#account-btn');
+    await page.waitForSelector('#account-modal[open]');
+    await page.waitForSelector('#account-status:has-text("recovery code")');
+    const withTotp = await page.textContent('#account-modal');
+    check('the two-factor panel renders no stray "null" text', !/\bnull\b/.test(withTotp));
+    check('and it says how many recovery codes are left', /10 recovery codes left/.test(withTotp));
+    await page.evaluate(async () =>
+      fetch('api/totp/disable', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: 'password123' }) }));
+  }
 
   // admin re-run: starts, runs, completes (resume makes it quick)
   await page.click('#admin-area button:has-text("Update cards from TCGdex")');

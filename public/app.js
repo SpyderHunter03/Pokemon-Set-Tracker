@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.55.0';
+const APP_VERSION = '3.55.1';
 
 /* ============================================================
  * Storage helpers
@@ -1989,12 +1989,14 @@ function twoFactorSection() {
         await apiCall('totp/disable', { method: 'POST', body: JSON.stringify({ password: pw }) });
         toast('Two-factor is off'); refresh();
       }));
-    wrap.append(
+    // append(), like replaceChildren(), stringifies a null child into the
+    // literal text "null" — only h() filters them out. Filter the list.
+    wrap.append(...[
       h('p', { class: 'muted small' }, `On. ${me.recoveryLeft} recovery code${me.recoveryLeft === 1 ? '' : 's'} left.`),
       me.recoveryLeft <= 2 ? h('p', { class: 'muted small', style: 'color:var(--accent)' },
         'Running low \u2014 make a fresh set while you can still sign in.') : null,
       h('div', { class: 'row', style: 'gap:8px' }, codesBtn, offBtn),
-    );
+    ].filter(Boolean));
   };
   const refresh = async () => { _meCache = null; try { show(await apiCall('me')); } catch { wrap.replaceChildren(); } };
   refresh();
