@@ -19,7 +19,7 @@ fetch_and_deploy_gh_release "pokemon-set-tracker" "SpyderHunter03/Pokemon-Set-Tr
 
 msg_info "Setting up Pokemon Set Tracker"
 cd /opt/pokemon-set-tracker || exit
-$STD npm install --no-save sharp || true
+$STD npm install --omit=dev --no-audit --no-fund || true
 msg_ok "Set up Pokemon Set Tracker"
 
 msg_info "Loading the card database from the master"

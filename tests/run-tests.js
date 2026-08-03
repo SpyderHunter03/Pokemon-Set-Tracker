@@ -638,6 +638,36 @@ function fail(msg) {
     mail.close();
   }
 
+  // ---- every way of installing this app installs its optional packages ----
+  // sharp, nodemailer and qrcode-generator are each the difference between a
+  // feature working and quietly not existing. They were listed in one install
+  // script and forgotten in four others and the Dockerfile, so the scanner
+  // index worked and mail and the two-factor QR silently did not. Nothing in
+  // the app can notice that, so the installers are checked instead.
+  {
+    const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+    const optional = Object.keys(pkg.optionalDependencies || {});
+    check('packaging: the optional extras are declared in one place', optional.length >= 3);
+    const installers = [
+      'Dockerfile',
+      'install/pokemonsettracker-install.sh',
+      'ct/pokemonsettracker.sh',
+      'contrib/proxmox-ved/install/pokemonsettracker-install.sh',
+      'contrib/proxmox-ved/ct/pokemonsettracker.sh',
+    ];
+    const misses = [];
+    for (const f of installers) {
+      const body = fs.readFileSync(path.join(ROOT, f), 'utf8');
+      // naming packages one by one is how they drift apart; each installer has
+      // to take the whole list from package.json
+      const takesAll = /npm install[^\n]*--omit=dev/.test(body);
+      const namesOne = optional.some((dep) => new RegExp(`npm install[^\\n]*\\b${dep}\\b`).test(body));
+      if (!takesAll || namesOne) misses.push(f);
+    }
+    check('packaging: every installer takes the whole list, none names packages by hand',
+      misses.length === 0 || !console.log('    installers out of step: ' + misses.join(', ')));
+  }
+
   console.log('=== 7/8 variant importer + read-only mode + offline mirror ===');
 
   // ---- shell caching: app.js must ALWAYS revalidate (a max-age here once

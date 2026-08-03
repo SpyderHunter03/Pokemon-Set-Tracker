@@ -22,7 +22,7 @@ NODE_VERSION="22" setup_nodejs
 msg_info "Installing Pokemon Set Tracker (${BRANCH})"
 $STD git clone --branch "$BRANCH" "https://github.com/${REPO}.git" /opt/pokemon-set-tracker
 cd /opt/pokemon-set-tracker
-$STD npm install --no-save sharp || true
+$STD npm install --omit=dev --no-audit --no-fund || true
 msg_ok "Installed Pokemon Set Tracker"
 
 msg_info "Loading the card database from the master"
@@ -64,7 +64,7 @@ LOCAL="$(git rev-parse HEAD)"; REMOTE="$(git rev-parse "origin/${BRANCH}")"
 if [[ "$LOCAL" == "$REMOTE" ]]; then echo "Up to date (${BRANCH} @ ${LOCAL:0:7})"; exit 0; fi
 echo "Deploying ${BRANCH}: ${LOCAL:0:7} → ${REMOTE:0:7}"
 git reset --hard "origin/${BRANCH}" --quiet
-npm install --no-save sharp >/dev/null 2>&1 || true
+npm install --omit=dev --no-audit --no-fund >/dev/null 2>&1 || true
 systemctl restart pokemon-set-tracker
 echo "Deployed ${REMOTE:0:7} and restarted pokemon-set-tracker."
 EOF

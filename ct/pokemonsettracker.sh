@@ -38,7 +38,7 @@ function update_script() {
   fi
   systemctl stop pokemon-set-tracker
   git reset --hard "origin/${CURRENT_BRANCH}" --quiet
-  npm install --no-save sharp >/dev/null 2>&1 || true
+  npm install --omit=dev --no-audit --no-fund >/dev/null 2>&1 || true
   systemctl start pokemon-set-tracker
   msg_ok "Updated ${APP} to ${CURRENT_BRANCH} @ $(git rev-parse --short HEAD)"
   msg_ok "Updated successfully!"

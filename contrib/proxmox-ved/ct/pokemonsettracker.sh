@@ -52,7 +52,7 @@ function update_script() {
 
     msg_info "Updating Optional Dependencies"
     cd /opt/pokemon-set-tracker || exit
-    $STD npm install --no-save sharp || true
+    $STD npm install --omit=dev --no-audit --no-fund || true
     msg_ok "Updated Optional Dependencies"
 
     msg_info "Starting Service"
