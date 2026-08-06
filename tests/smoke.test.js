@@ -195,6 +195,27 @@ const { chromium } = require('playwright');
   // the printings bar always shows the master-set tally (incl. custom)
   check('master set counts printings incl. custom', (await page.textContent('.page-head .prog-row >> nth=1')).includes('3 / 8 printings'));
 
+  // ---- the way out, repeated at the end of the page ----
+  // The fixed bottom bar offers the four top-level destinations. It does not
+  // offer the page you came FROM, and that link is at the top of a hundred
+  // cards — which is how a tester ran out of ways back within a minute.
+  check('footer: a set page says at the bottom what it says at the top',
+    (await page.locator('.page-foot .back-link').count()) === 1 &&
+    (await page.textContent('.page-foot .back-link')).includes('All sets') &&
+    (await page.getAttribute('.page-foot .back-link', 'href')) === '#/');
+  await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+  const beforeTop = page.url();
+  await page.click('.page-foot button:has-text("Top")');
+  await page.waitForFunction(() => window.scrollY === 0, null, { timeout: 5000 });
+  check('footer: ↑ Top goes up rather than anywhere', page.url() === beforeTop);
+  await page.click('.page-foot .back-link');
+  await page.waitForSelector('.set-grid .set-card');
+  check('footer: and the back link is a way out, not decoration',
+    /#\/$/.test(page.url()) && (await page.locator('.page-foot').count()) === 0);
+  // back into the set, so what follows starts where it used to
+  await page.click('.set-card:has-text("Base Set")');
+  await page.waitForSelector('.tcg-card');
+
   // ---- Pokémon view ----
   await page.click('.bottomnav a[data-nav=pokemon]');
   await page.waitForSelector('.set-card');
@@ -212,6 +233,9 @@ const { chromium } = require('playwright');
 
   await page.click('.set-card:has-text("Charizard")');
   await page.waitForSelector('.tcg-card');
+  check('footer: a species page points back at the species list',
+    (await page.textContent('.page-foot .back-link')).includes('All Pokémon') &&
+    (await page.getAttribute('.page-foot .back-link', 'href')) === '#/pokemon');
   check('charizard page: 4 printings across 2 sets, newest first',
     (await page.locator('.tcg-card').count()) === 4 &&
     (await page.locator('.tcg-card >> nth=0').getAttribute('data-card-id')) === 'swsh3-20');
@@ -669,6 +693,9 @@ const { chromium } = require('playwright');
   // ---- moving a card to a page you cannot see from where you are ----
   // Dragging reaches this spread and carrying reaches the next page you turn
   // to; neither helps when the destination is thirty sheets away.
+  check('footer: a binder points back at the shelf',
+    (await page.textContent('.page-foot .back-link')).includes('Binders') &&
+    (await page.getAttribute('.page-foot .back-link', 'href')) === '#/binders');
   await page.click('.pocket[data-pocket="3"] .pocket-edit');
   await page.waitForSelector('.pocket-actions');
   await page.click('.pocket-actions button:has-text("Move to page")');
@@ -1008,6 +1035,8 @@ const { chromium } = require('playwright');
   await page.press('#global-search-input', 'Enter');
   await page.waitForSelector('.card-grid .tcg-card');
   check('global search shows all Charizard printings', (await page.locator('.card-grid .tcg-card').count()) === 4);
+  check('footer: search results carry one too',
+    (await page.locator('.page-foot .back-link').count()) === 1);
   check('rarity dropdown from real data', (await page.locator('select >> nth=0 >> option').allTextContents()).includes('Ultra Rare'));
   // a handful of results is the whole answer — offering "Load more" here only
   // ever fetched page one a second time and stacked the same cards up again
@@ -1060,7 +1089,7 @@ const { chromium } = require('playwright');
   await page.goto('http://localhost:3111/#/admin');
   await page.waitForSelector('#admin-page .settings-card');
   check('non-admin who guesses the address is turned away',
-    (await page.locator('#admin-page button').count()) === 0 &&
+    (await page.locator('#admin-page .settings-card button').count()) === 0 &&
     (await page.textContent('#admin-page')).includes('belongs to the account that set this install up'));
 
   // ---- card data comes from the server's database (not R2/static JSON) ----

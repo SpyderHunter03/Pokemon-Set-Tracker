@@ -69,6 +69,8 @@ const { chromium } = require('playwright');
   await page.click('#account-page a:has-text("Administration")');
   await page.waitForSelector('#admin-page button:has-text("Update cards from TCGdex")');
   check('first account sees the Administration page', true);
+  check('footer: the administration page offers the way back at the bottom too',
+    (await page.textContent('#admin-page .page-foot .back-link')).includes('Account'));
   // A hidden child must vanish, not render as the literal text "null".
   // append() and replaceChildren() both stringify null; only h() filters it,
   // so any conditional child built outside h() is a candidate. This covered

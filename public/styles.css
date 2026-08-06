@@ -123,6 +123,24 @@ a { color: var(--accent-soft); text-decoration: none; }
   margin-bottom: 8px;
 }
 
+/* The way out, repeated at the end of a page. A long list scrolls its own
+   back link off the top, and the fixed bottom bar only offers the four
+   top-level destinations — not the one you actually came from. */
+.page-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 24px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+/* the top copy carries a bottom margin to sit off the heading; down here it
+   is one half of a row and wants none */
+.page-foot .back-link { margin-bottom: 0; }
+
 /* ---------- stats banner ---------- */
 .stats-banner {
   display: grid;

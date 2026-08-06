@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.62.0';
+const APP_VERSION = '3.63.0';
 
 /* ============================================================
  * Storage helpers
@@ -62,6 +62,28 @@ async function repairApp() {
 }
 
 /** Standard error view for data problems, with self-repair options. */
+/** The way out, repeated at the end of the page.
+ *
+ * The bottom bar is fixed, so Sets / Pokémon / Binders / Scan are always
+ * within reach — but the link that says where you came FROM lives at the top
+ * and scrolls away, and a hundred-card set is a long way back up to it. A
+ * tester found this in about a minute: reaching the last card of a set left
+ * them with no way back to the set they had opened it from, short of
+ * scrolling the whole list again.
+ *
+ * So every page that has a back link at the top says the same thing again at
+ * the bottom, next to a way to the top for anyone who wanted the top rather
+ * than the way out. */
+function pageFooter(href, label) {
+  return h('div', { class: 'page-foot' },
+    h('a', { class: 'back-link', href }, label),
+    h('button', {
+      class: 'btn ghost small', type: 'button',
+      onclick: () => window.scrollTo({ top: 0, behavior: 'smooth' }),
+    }, '\u2191 Top'),
+  );
+}
+
 function dbErrorView(title, err, retry) {
   return h('div', { class: 'center' },
     h('p', {}, title),
@@ -1862,6 +1884,7 @@ async function renderSetPage(setId) {
     chipsWrap,
     grid,
     hiddenWrap,
+    pageFooter('#/', '\u2190 All sets'),
   );
   renderChips();
   if (canTrack()) updateProgress();
@@ -2558,6 +2581,7 @@ async function renderPokemonPage(dexStr) {
         (v) => { pokeSort = v; lsSet('ptcg.sort.pokemon', v); renderGrid(); }),
     ),
     grid,
+    pageFooter('#/pokemon', '\u2190 All Pok\u00e9mon'),
   );
   updateProgress();
 }
@@ -2632,6 +2656,7 @@ async function renderSearchPage(rawQuery) {
     results,
     status,
     moreBtn,
+    pageFooter('#/', '\u2190 All sets'),
   );
   load(true);
 }
@@ -2837,6 +2862,7 @@ async function renderDebugPage() {
     h('div', { class: 'row', style: 'margin-top:16px' },
       h('button', { class: 'btn', onclick: repairApp }, 'Repair & reload (clear cached app + data)'),
     ),
+    pageFooter('#/', '\u2190 Back'),
   );
 
   const line = (label, value, ok) => rows.append(h('div', { class: 'kv' },
@@ -3227,7 +3253,8 @@ function renderAdminPage(tab) {
 
   (async () => {
     const only = (msg) => page.replaceChildren(backLink(), settingsHead('Administration'),
-      settingsCard(h('p', { class: 'muted', style: 'margin:0' }, msg)));
+      settingsCard(h('p', { class: 'muted', style: 'margin:0' }, msg)),
+      pageFooter('#/account', '\u2190 Account'));
     if (!serverAvailable || !auth) return only('Sign in with the account that set this install up.');
     let me;
     try { me = await apiCall('me'); }
@@ -3245,6 +3272,7 @@ function renderAdminPage(tab) {
         : tab === 'signon' ? settingsCard(providerSettingsSection())
           : tab === 'server' ? adminServerTab()
             : adminCardsTab(),
+      pageFooter('#/account', '\u2190 Account'),
     ].filter(Boolean));
   })();
 }
@@ -5295,7 +5323,8 @@ async function renderBinderPage(id, shareToken = null) {
   }
 
   renderHead(); renderNav(); renderBook(); renderPickBar();
-  view.replaceChildren(head, pickBar, nav, book, actions);
+  view.replaceChildren(head, pickBar, nav, book, actions,
+    shared ? pageFooter('#/', '\u2190 All cards') : pageFooter('#/binders', '\u2190 Binders'));
 }
 
 /* iOS keeps a zoom across in-app navigation — and it auto-zooms whenever you
