@@ -182,9 +182,9 @@ const { chromium } = require('playwright');
   await page.click('#card-modal button:has-text("Close")');
 
   // ---- sorting ----
-  await page.selectOption('.chips select', 'name');
+  await page.selectOption('.chips select >> nth=0', 'name');
   check('set page sorts by name', (await page.locator('.tcg-card >> nth=0').getAttribute('data-card-id')) === 'base1-98');
-  await page.selectOption('.chips select', 'number');
+  await page.selectOption('.chips select >> nth=0', 'number');
   check('set page sorts by number', (await page.locator('.tcg-card >> nth=0').getAttribute('data-card-id')) === 'base1-4');
 
   // in-set search shows all printings of the match
@@ -194,6 +194,62 @@ const { chromium } = require('playwright');
 
   // the printings bar always shows the master-set tally (incl. custom)
   check('master set counts printings incl. custom', (await page.textContent('.page-head .prog-row >> nth=1')).includes('3 / 8 printings'));
+
+  // ---- the same printings, without the pictures ----
+  // "Which of these am I missing" is a question about names and numbers, and
+  // a hundred pictures is the slow way to ask it.
+  const gridTiles = await page.locator('.tcg-card').count();
+  await page.selectOption('.chips select >> nth=1', 'text');
+  await page.waitForSelector('.card-list.bare .card-row');
+  check('view: Text shows one row per printing, exactly as the grid did',
+    (await page.locator('.card-row').count()) === gridTiles &&
+    (await page.locator('.tcg-card').count()) === 0);
+  check('view: a row carries the name, the printing, the set and the number',
+    /Charizard/.test(await page.textContent('.card-row >> nth=0')) &&
+    /Base Set/.test(await page.textContent('.card-row .row-meta >> nth=0')) &&
+    /#\d+/.test(await page.textContent('.card-row .row-meta >> nth=0')));
+  check('view: Text loads no card pictures at all',
+    (await page.locator('.card-row img').count()) === 0);
+  check('view: owned and missing are legible without opening anything',
+    (await page.locator('.card-row.owned').count()) === 3 &&
+    (await page.locator('.card-row.missing').count()) === gridTiles - 3 &&
+    (await page.textContent('.card-row.owned .row-mark >> nth=0')).includes('✓'));
+
+  // the filters are the other half of the answer: Missing + Text is a want-list
+  await page.click('.chip:has-text("Missing")');
+  await page.waitForFunction((n) => document.querySelectorAll('.card-row').length === n, gridTiles - 3);
+  check('view: Missing and Text together are a want-list',
+    (await page.locator('.card-row.owned').count()) === 0);
+  await page.click('.chip:has-text("All")');
+  await page.waitForFunction((n) => document.querySelectorAll('.card-row').length === n, gridTiles);
+
+  // a row is the tile in different clothes — same tap, same result
+  const beforeTap = await coll();
+  // a named printing, not "the first owned row" — the first owned row is the
+  // Holo Charizard, and tapping a printing you own two of opens the card
+  // rather than toggling it, exactly as it does in the grid
+  const firstMissing = page.locator('.card-row.missing').first();
+  const tapId = await firstMissing.getAttribute('data-card-id');
+  const tapVar = await firstMissing.getAttribute('data-variant');
+  const tapped = `.card-row[data-card-id="${tapId}"][data-variant="${tapVar}"]`;
+  await firstMissing.click();
+  await page.waitForSelector(tapped + '.owned');
+  check('view: tapping a row marks the printing owned, like tapping a tile',
+    JSON.stringify(await coll()) !== JSON.stringify(beforeTap) &&
+    (await page.locator('.card-row.owned').count()) === 4);
+  await page.click(tapped);                                // put it back
+  await page.waitForSelector(tapped + '.missing');
+
+  await page.selectOption('.chips select >> nth=1', 'list');
+  await page.waitForSelector('.card-list .row-thumb');
+  check('view: List is the same rows with a thumbnail',
+    (await page.locator('.card-row').count()) === gridTiles &&
+    (await page.locator('.row-thumb').count()) === gridTiles);
+  await page.selectOption('.chips select >> nth=1', 'grid');
+  await page.waitForSelector('.card-grid .tcg-card');
+  check('view: and back to the pictures',
+    (await page.locator('.tcg-card').count()) === gridTiles &&
+    (await page.locator('.card-row').count()) === 0);
 
   // ---- the way out, repeated at the end of the page ----
   // The fixed bottom bar offers the four top-level destinations. It does not
@@ -245,9 +301,16 @@ const { chromium } = require('playwright');
     (await page.locator('.tcg-card .card-cap').count()) === 4 &&
     new Set(await page.locator('.tcg-card .card-cap .cap-set').allTextContents()).size === 2);
   check('pokemon page shows a printings bar too', (await page.textContent('.page-head .prog-row >> nth=1')).includes('printings'));
-  await page.selectOption('.chips select', 'oldest');
+  await page.selectOption('.chips select >> nth=0', 'oldest');
   check('pokemon page sorts oldest-set first', (await page.locator('.tcg-card >> nth=0').getAttribute('data-card-id')) === 'base1-4');
-  await page.selectOption('.chips select', 'newest');
+  await page.selectOption('.chips select >> nth=0', 'newest');
+  await page.selectOption('.chips select >> nth=1', 'text');
+  await page.waitForSelector('.card-list.bare .card-row');
+  check('view: a species page lists its printings across sets too',
+    (await page.locator('.card-row').count()) === 4 &&
+    new Set(await page.locator('.card-row .row-meta').allTextContents()).size >= 2);
+  await page.selectOption('.chips select >> nth=1', 'grid');
+  await page.waitForSelector('.card-grid .tcg-card');
 
   // ---- binders: create (fill from set), checklist, picker ----
   await page.goto('http://localhost:3111/#/binders');
@@ -693,6 +756,38 @@ const { chromium } = require('playwright');
   // ---- moving a card to a page you cannot see from where you are ----
   // Dragging reaches this spread and carrying reaches the next page you turn
   // to; neither helps when the destination is thirty sheets away.
+  // ---- the binder as a checklist ----
+  // The book is what the real object looks like; the list is what you read
+  // when the question is "which of these have I actually got".
+  await page.click('button:has-text("Done")');                          // out of edit mode
+  await page.waitForSelector('button:has-text("Edit binder")');
+  await page.click('button:has-text("☰ List")');
+  await page.waitForSelector('.binder-book.as-list .card-row');
+  check('binder list: every filled pocket, grouped by page, with its pocket number',
+    (await page.locator('.binder-book.as-list .card-row').count()) === 10 &&
+    (await page.locator('.binder-page-label').count()) >= 2 &&
+    (await page.textContent('.binder-page-label >> nth=0')) === 'Page 1' &&
+    /^\d+$/.test((await page.textContent('.card-row .row-pocket >> nth=0')).trim()));
+  check('binder list: the tick is the binder’s own, not the collection’s',
+    (await page.locator('.binder-book.as-list .card-row.owned').count()) === 1 &&
+    (await page.textContent('.card-row.owned .row-mark')).includes('×2'));
+  check('binder list: turning pages is meaningless here, so the pager goes',
+    (await page.locator('.binder-nav:visible').count()) === 0);
+  // and it ticks like the pockets do
+  await page.click('.binder-book.as-list .card-row.missing >> nth=0');
+  await page.waitForFunction(() => document.querySelectorAll('.binder-book.as-list .card-row.owned').length === 2);
+  check('binder list: a row ticks the pocket it stands for',
+    (await page.textContent('#view')).includes('2 / 10 in hand'));
+  await page.click('.binder-book.as-list .card-row.owned >> nth=1');    // put it back
+  await page.waitForFunction(() => document.querySelectorAll('.binder-book.as-list .card-row.owned').length === 1);
+  await page.click('button:has-text("📖 Book")');
+  await page.waitForSelector('.binder-grid .pocket');
+  check('binder list: and the book comes back',
+    (await page.locator('.binder-book.as-list').count()) === 0 &&
+    (await page.textContent('#view')).includes('1 / 10 in hand'));
+  await page.click('button:has-text("Edit binder")');
+  await page.waitForSelector('.page-move');
+
   check('footer: a binder points back at the shelf',
     (await page.textContent('.page-foot .back-link')).includes('Binders') &&
     (await page.getAttribute('.page-foot .back-link', 'href')) === '#/binders');

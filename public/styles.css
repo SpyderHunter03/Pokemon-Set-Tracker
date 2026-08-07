@@ -298,6 +298,107 @@ select.chip { appearance: none; padding-right: 22px; }
   .card-grid { grid-template-columns: repeat(auto-fill, minmax(min(150px, 100%), 1fr)); }
 }
 
+/* ---------- the same printings, as a list ----------
+   The grid answers "what does this look like"; the list answers "what am I
+   missing", which is a question about names and numbers. One row per printing,
+   same as one tile per printing, so the two views count the same things. */
+.card-list { display: flex; flex-direction: column; }
+
+.card-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 4px 8px 8px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  min-height: 44px;               /* a thumb-sized target even with no picture */
+}
+
+.card-row:first-child { border-top: 1px solid var(--border); }
+
+.card-row:hover { background: var(--surface); }
+
+.card-row:focus-visible { outline: 2px solid var(--accent-soft); outline-offset: -2px; }
+
+/* Missing is the state worth seeing at a glance, so it is the one that is
+   marked — dimmed text and a hollow circle, against a plain owned row. */
+.card-row.missing .row-name, .card-row.missing .row-thumb { opacity: .55; }
+
+.row-thumb {
+  width: 34px;
+  aspect-ratio: 63 / 88;
+  flex-shrink: 0;
+  border-radius: 3px;
+  overflow: hidden;
+  background: var(--surface-2);
+}
+
+.row-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+.row-noimg { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; font-size: 15px; }
+
+.row-main { flex: 1; min-width: 0; }
+
+.row-name { display: flex; gap: 8px; align-items: baseline; font-size: 14.5px; font-weight: 600; }
+
+.row-name > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.row-variant { color: var(--muted); font-size: 12px; font-weight: 500; flex-shrink: 0; }
+
+.row-meta { margin-top: 1px; }
+
+/* the tick column: fixed width so the marks line up down the page rather than
+   wandering with the length of each name */
+.row-mark {
+  flex-shrink: 0;
+  min-width: 34px;
+  text-align: right;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--owned);
+}
+
+.card-row.missing .row-mark { color: var(--muted); font-weight: 400; }
+
+/* the ⓘ sits at the tile's corner; in a row it is just the last column */
+.card-row .info-btn {
+  position: static;
+  flex-shrink: 0;
+  opacity: .75;
+}
+
+/* the admin's "add a card" door, sized for a list rather than a grid cell */
+.add-card-row { align-self: flex-start; margin-top: 12px; }
+
+/* ---------- a binder read as a checklist ---------- */
+/* the book element hosts the list too, so it drops the things that only make
+   sense around a drawn page */
+.binder-book.as-list { display: block; perspective: none; max-width: 720px; }
+
+.binder-page-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  margin: 16px 0 4px;
+}
+
+.binder-page-label:first-child { margin-top: 4px; }
+
+/* which pocket on the sheet — the whole reason this list is worth more than a
+   sorted one is that it tells you where to put your hand */
+.row-pocket {
+  flex-shrink: 0;
+  width: 22px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--muted);
+  border-right: 1px solid var(--border);
+  padding-right: 8px;
+  margin-right: 2px;
+}
+
 .tcg-card {
   position: relative;
   border-radius: 10px;

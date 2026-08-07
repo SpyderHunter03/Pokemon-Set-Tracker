@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.63.0';
+const APP_VERSION = '3.64.0';
 
 /* ============================================================
  * Storage helpers
@@ -865,6 +865,106 @@ function cardTile(card, variant, { onOwnershipChange } = {}) {
   return tile;
 }
 
+/* ============================================================
+ * How a page draws its cards
+ *
+ * A set is a hundred pictures, and "which of these am I still missing" is a
+ * question about names and numbers, not artwork. Three ways to look at the
+ * same printings:
+ *
+ *   Cards  the grid — the picture is the point (browsing, spotting art)
+ *   List   rows with a thumbnail — recognisable, about three times as dense
+ *   Text   rows with no pictures at all — a checklist, and nothing to wait for
+ *
+ * Deliberately not remembered between pages. The choice belongs to the job in
+ * front of you: you browse a set in Cards and audit it in Text, often minutes
+ * apart, and a preference that followed you around would be wrong about half
+ * the time in each direction.
+ * ============================================================ */
+const CARD_VIEWS = [['grid', 'Cards'], ['list', 'List'], ['text', 'Text']];
+
+function viewSelect(current, onchange) {
+  return h('select', { class: 'chip', 'aria-label': 'How to show these cards', onchange: (e) => onchange(e.target.value) },
+    ...CARD_VIEWS.map(([v, label]) => {
+      const o = h('option', { value: v }, 'View: ' + label);
+      if (v === current) o.setAttribute('selected', '');
+      return o;
+    }));
+}
+
+/** The container wears the layout, so switching views is a class swap plus a
+ * repaint rather than two parallel trees. */
+function applyCardView(container, view) {
+  container.className = view === 'grid' ? 'card-grid' : 'card-list' + (view === 'text' ? ' bare' : '');
+}
+
+/** One printing, drawn however this page is currently set to draw them. */
+function cardEntry(view, card, variant, opts) {
+  return view === 'grid' ? cardTile(card, variant, opts)
+    : cardRow(card, variant, { ...opts, thumb: view === 'list' });
+}
+
+/** One printing as a row: everything a tile says, in a line of text.
+ * Same click contract as the tile — tap toggles, complex cards open, ⓘ always
+ * opens — so the two views are the same page in different clothes rather than
+ * two different pages. */
+function cardRow(card, variant, { onOwnershipChange, thumb } = {}) {
+  const row = h('div', {
+    class: 'card-row',
+    role: 'button',
+    tabindex: '0',
+    onclick: () => {
+      if (!canTrack()) { openCardModal(card, { variant, onOwnershipChange }); return; }
+      const result = quickToggle(card, variant);
+      if (result === 'complex') { openCardModal(card, { variant, onOwnershipChange }); return; }
+      decorateRow(row, card);
+      if (onOwnershipChange) onOwnershipChange();
+    },
+    onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); row.click(); } },
+  });
+  row.dataset.cardId = card.id;
+  row.dataset.variant = variant;
+
+  if (thumb) {
+    const holder = h('div', { class: 'row-thumb' });
+    const im = cardImageEl(card, variant, { host: holder, alt: '',
+      fallback: () => h('div', { class: 'row-noimg' }, '🃏') });
+    holder.append(im || h('div', { class: 'row-noimg' }, '🃏'));
+    row.append(holder);
+  }
+  row.append(h('div', { class: 'row-main' },
+    h('div', { class: 'row-name' },
+      h('span', {}, card.name || card.id),
+      h('span', { class: 'row-variant' }, variantLabel(card, variant)),
+    ),
+    h('div', { class: 'row-meta muted small' }, `${setNameOf(card.id)} · #${card.localId || localIdOf(card.id)}`),
+  ));
+  row.append(h('div', { class: 'row-mark' }));
+  row.append(h('button', {
+    class: 'info-btn', title: 'Card details', 'aria-label': 'Card details',
+    onclick: (e) => { e.stopPropagation(); openCardModal(card, { variant, onOwnershipChange }); },
+  }, 'ⓘ'));
+  decorateRow(row, card);
+  return row;
+}
+
+/** The tick, the count, and the dimming — the row's half of decorateTile. */
+function decorateRow(row, card) {
+  const mark = row.querySelector('.row-mark');
+  if (!canTrack()) {
+    row.classList.remove('missing', 'owned');
+    if (mark) mark.textContent = '';
+    row.setAttribute('aria-label', (card && card.name) || row.dataset.cardId);
+    return;
+  }
+  const qty = variantQty(row.dataset.cardId, row.dataset.variant);
+  row.classList.toggle('missing', qty === 0);
+  row.classList.toggle('owned', qty > 0);
+  if (mark) mark.textContent = qty ? (qty > 1 ? `\u2713\u00d7${qty}` : '\u2713') : '\u25cb';
+  row.setAttribute('aria-label',
+    `${(card && card.name) || row.dataset.cardId} \u2014 ${qty ? `owned, ${qty}` : 'not owned'}`);
+}
+
 function decorateTile(tile, card) {
   tile.querySelectorAll('.badge, .qty-badge').forEach((n) => n.remove());
   // browse-only until signed in: no ownership styling or badges
@@ -886,6 +986,10 @@ function decorateTile(tile, card) {
 function rerenderCards() {
   document.querySelectorAll('.tcg-card').forEach((tile) => {
     if (tile.dataset.cardId) decorateTile(tile, { id: tile.dataset.cardId });
+  });
+  // the same job for the same printings in their other clothes
+  document.querySelectorAll('.card-row').forEach((row) => {
+    if (row.dataset.cardId) decorateRow(row, { id: row.dataset.cardId });
   });
 }
 
@@ -1769,6 +1873,8 @@ async function renderSetPage(setId) {
   let filter = 'all';
   let query = '';
   let cardSort = lsGet('ptcg.sort.cards') || 'number';
+  // pictures or text — a per-visit choice, not a saved preference
+  let cardView = 'grid';
 
   const progressLabel = h('span', { class: 'muted' });
   const progressBar = h('div', {});
@@ -1800,6 +1906,7 @@ async function renderSetPage(setId) {
   const grid = h('div', { class: 'card-grid' });
 
   function renderGrid() {
+    applyCardView(grid, cardView);
     grid.replaceChildren();
     const q = query.toLowerCase();
     const sorted = sortCards(cards, cardSort, (c) => c.id, (c) => c.name);
@@ -1809,7 +1916,7 @@ async function renderSetPage(setId) {
         const owned = variantQty(c.id, vk) > 0;
         if (filter === 'owned' && !owned) continue;
         if (filter === 'missing' && owned) continue;
-        grid.append(cardTile(c, vk, { onOwnershipChange: updateProgress }));
+        grid.append(cardEntry(cardView, c, vk, { onOwnershipChange: updateProgress }));
       }
     }
     if (!grid.children.length) grid.append(h('div', { class: 'center' }, 'No cards match.'));
@@ -1817,10 +1924,13 @@ async function renderSetPage(setId) {
     if (isAdmin && filter === 'all' && !q) {
       const nums = cards.map((c) => parseInt(c.localId, 10)).filter(Number.isFinite);
       const next = nums.length ? String(Math.max(...nums) + 1) : '1';
-      grid.append(h('button', {
-        class: 'add-card-tile',
-        onclick: () => openCardEditor({ set: setId, nextNumber: next, onSaved: () => renderSetPage(setId) }),
-      }, h('div', { class: 'act-plus' }, '＋'), h('div', { class: 'muted small' }, 'Add card')));
+      const addCard = () => openCardEditor({ set: setId, nextNumber: next, onSaved: () => renderSetPage(setId) });
+      // a card-shaped tile among rows is a card-shaped hole: in the list views
+      // the same door is a button the size of the thing it opens
+      grid.append(cardView === 'grid'
+        ? h('button', { class: 'add-card-tile', onclick: addCard },
+          h('div', { class: 'act-plus' }, '＋'), h('div', { class: 'muted small' }, 'Add card'))
+        : h('button', { class: 'btn ghost small add-card-row', onclick: addCard }, '＋ Add card'));
     }
   }
 
@@ -1841,6 +1951,7 @@ async function renderSetPage(setId) {
       ...trackChips,
       sortSelect([['number', 'Card number'], ['name', 'Name A–Z']], cardSort,
         (v) => { cardSort = v; lsSet('ptcg.sort.cards', v); renderGrid(); }),
+      viewSelect(cardView, (v) => { cardView = v; renderGrid(); }),
     );
   }
 
@@ -2556,12 +2667,14 @@ async function renderPokemonPage(dexStr) {
   const grid = h('div', { class: 'card-grid' });
   let pokeSort = lsGet('ptcg.sort.pokemon') || 'newest';
 
+  let cardView = 'grid';
   function renderGrid() {
+    applyCardView(grid, cardView);
     grid.replaceChildren();
     const cards = sortCards(sp.cards, pokeSort, (c) => c.id, (c) => c.name);
     for (const c of cards) {
       for (const vk of realVariants(c)) {
-        grid.append(cardTile(c, vk, { onOwnershipChange: updateProgress }));
+        grid.append(cardEntry(cardView, c, vk, { onOwnershipChange: updateProgress }));
       }
     }
   }
@@ -2579,6 +2692,7 @@ async function renderPokemonPage(dexStr) {
     h('div', { class: 'chips' },
       sortSelect([['newest', 'Newest set'], ['oldest', 'Oldest set'], ['name', 'Name A–Z'], ['number', 'Card number']], pokeSort,
         (v) => { pokeSort = v; lsSet('ptcg.sort.pokemon', v); renderGrid(); }),
+      viewSelect(cardView, (v) => { cardView = v; renderGrid(); }),
     ),
     grid,
     pageFooter('#/pokemon', '\u2190 All Pok\u00e9mon'),
@@ -2600,6 +2714,7 @@ async function renderSearchPage(rawQuery) {
     return;
   }
   let rarity = '', type = '', page = 1;
+  let cardView = 'grid';
   let searchSort = lsGet('ptcg.sort.search') || 'newest';
   const shown = new Set();   // card ids already on the page — a card belongs here once
   let loadSeq = 0;           // only the newest request may touch the grid
@@ -2614,7 +2729,7 @@ async function renderSearchPage(rawQuery) {
 
   async function load(reset) {
     const seq = ++loadSeq;   // a filter changed mid-flight belongs to the newer request
-    if (reset) { page = 1; results.replaceChildren(); shown.clear(); }
+    if (reset) { page = 1; applyCardView(results, cardView); results.replaceChildren(); shown.clear(); }
     status.replaceChildren(spinner());
     moreBtn.hidden = true;
     try {
@@ -2630,7 +2745,7 @@ async function renderSearchPage(rawQuery) {
         for (const c of res.cards) {
           if (shown.has(c.id)) continue;   // never the same card twice
           shown.add(c.id);
-          for (const vk of realVariants(c)) results.append(cardTile(c, vk));
+          for (const vk of realVariants(c)) results.append(cardEntry(cardView, c, vk));
           added++;
         }
       }
@@ -2652,6 +2767,7 @@ async function renderSearchPage(rawQuery) {
       select('Type', idx.types, (v) => { type = v; load(true); }),
       sortSelect([['newest', 'Newest set'], ['oldest', 'Oldest set'], ['name', 'Name A–Z'], ['number', 'Card number']], searchSort,
         (v) => { searchSort = v; lsSet('ptcg.sort.search', v); load(true); }),
+      viewSelect(cardView, (v) => { cardView = v; load(true); }),
     ),
     results,
     status,
@@ -3796,6 +3912,10 @@ async function renderBinderPage(id, shareToken = null) {
   // Keys are pocket indexes; a placed picture is keyed by its anchor pocket.
   let pickMode = false;
   const picked = new Set();
+  // the book, or the same pockets as a checklist. Not remembered: you open a
+  // binder to look at it and open it again to audit it, and those want
+  // different answers ten minutes apart.
+  let bookView = 'book';
 
   // ---- art entries: your own picture across an arbitrary set of pockets ----
   const GAP_MM = 4, CARD_W = 63, CARD_H = 88;   // physical card + pocket spacing
@@ -3991,7 +4111,75 @@ async function renderBinderPage(id, shareToken = null) {
     });
     return wrap;
   }
+  /* ---- the binder as a checklist ----
+   * The book is the point of a binder: it is what the real object looks like.
+   * But "which of these have I actually got" is a question the pictures make
+   * slower, not faster, and a page you have to turn to thirty times is a poor
+   * way to read a list. So: the same pockets, in the same order, as text —
+   * with the page and pocket on every row, because the answer is only useful
+   * if you can find the card it is about in the physical binder.
+   */
+  function renderBinderList() {
+    const rows = [];
+    for (let p = 0; p < binder.pages; p++) {
+      const onThisPage = [];
+      for (let q = 0; q < per; q++) {
+        const idx = p * per + q;
+        const slot = binder.slots[idx];
+        if (!slot || !slot.card) continue;      // blanks and pictures are layout, not checklist
+        onThisPage.push(binderRow(idx, slot));
+      }
+      if (!onThisPage.length) continue;         // an empty sheet is not worth a heading
+      rows.push(h('div', { class: 'binder-page-label' }, `Page ${p + 1}`), ...onThisPage);
+    }
+    book.classList.remove('spread');
+    book.classList.add('as-list');
+    book.replaceChildren(...(rows.length ? rows
+      : [h('p', { class: 'muted', style: 'padding:14px' }, 'Nothing has been placed in this binder yet.')]));
+  }
+
+  /** One pocket as a line. The tick is the BINDER's have/need list, not the
+   * collection's — a binder tracks the cards in that binder. */
+  function binderRow(idx, slot) {
+    const card = cardsById.get(slot.card);
+    const mark = h('div', { class: 'row-mark' });
+    const row = h('div', { class: 'card-row binder-row', role: 'button', tabindex: '0' });
+    const paint = () => {
+      row.classList.toggle('missing', !slot.have);
+      row.classList.toggle('owned', !!slot.have);
+      mark.textContent = slot.have ? ((slot.n || 1) > 1 ? `\u2713\u00d7${slot.n}` : '\u2713') : '\u25cb';
+    };
+    row.addEventListener('click', async () => {
+      // somebody else's binder is theirs to tick; a tap opens the card instead
+      if (shared) { if (card) openCardModal(card, { variant: slot.variant }); return; }
+      if (slot.have) { slot.have = 0; delete slot.n; } else { slot.have = 1; }
+      await save();
+      paint(); renderHead();
+    });
+    row.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); row.click(); } });
+    row.append(...[
+      h('div', { class: 'row-pocket' }, String((idx % per) + 1)),
+      h('div', { class: 'row-main' },
+        h('div', { class: 'row-name' },
+          h('span', {}, (card && card.name) || slot.card),
+          h('span', { class: 'row-variant' }, card ? variantLabel(card, slot.variant) : slot.variant)),
+        h('div', { class: 'row-meta muted small' }, `${setNameOf(slot.card)} \u00b7 #${(card && card.localId) || localIdOf(slot.card)}`),
+      ),
+      mark,
+      card ? h('button', {
+        class: 'info-btn', title: 'Card details', 'aria-label': 'Card details',
+        onclick: (e) => { e.stopPropagation(); openCardModal(card, shared ? { variant: slot.variant } : cardModalOpts(slot)); },
+      }, '\u24d8') : null,
+    ].filter(Boolean));
+    paint();
+    return row;
+  }
+
   function renderBook() {
+    // layout work needs the book: you cannot drag a card into a pocket that is
+    // not drawn, and picking pockets to print is a thing you do to a page
+    if (bookView === 'list' && !editMode && !pickMode) { renderBinderList(); return; }
+    book.classList.remove('as-list');
     book.classList.toggle('spread', isSpread() && viewIdx !== 0);
     book.replaceChildren();
     if (viewIdx === 0) { book.append(coverFace()); return; }
@@ -4054,6 +4242,8 @@ async function renderBinderPage(id, shareToken = null) {
         onclick: () => navTo(idx, dir),
       }, label);
     };
+    // no pages to turn when they are all on screen at once
+    nav.hidden = bookView === 'list';
     nav.replaceChildren(
       jump(0, -1, '\u00ab', 'First page'),
       jump(viewIdx - 1, -1, '\u2039', 'Previous page'),
@@ -4094,6 +4284,7 @@ async function renderBinderPage(id, shareToken = null) {
 
   const setEditMode = (on) => {
     editMode = on;
+    if (on) bookView = 'book';   // you cannot drag a card into a pocket nobody drew
     moveFrom = null; movePageFrom = null;
     // layout editing and print-picking are different jobs — never both at once
     pickMode = false; picked.clear();
@@ -4103,6 +4294,7 @@ async function renderBinderPage(id, shareToken = null) {
 
   const setPickMode = (on) => {
     pickMode = on;
+    if (on) bookView = 'book';   // picking pockets to print is a thing you do to a page
     if (!on) picked.clear();
     actions.replaceChildren();
     renderHead(); renderPickBar(); renderBook();
@@ -4228,7 +4420,14 @@ async function renderBinderPage(id, shareToken = null) {
 
   function renderHead() {
     const total = filledCount(), got = haveCount();
-    const buttons = shared ? [] : editMode ? [
+    const asList = bookView === 'list';
+    // the one control a visitor gets: their reason for opening the link is
+    // often exactly "what have they got", which is the list's question
+    const viewBtn = h('button', {
+      class: 'btn ghost small',
+      onclick: () => { bookView = asList ? 'book' : 'list'; renderHead(); renderNav(); renderBook(); },
+    }, asList ? '\ud83d\udcd6 Book' : '\u2630 List');
+    const buttons = shared ? [viewBtn] : editMode ? [
       h('button', { class: 'btn ghost small', onclick: async () => {
         const name = prompt('Binder name', binder.name);
         if (!name || !name.trim()) return;
@@ -4260,6 +4459,7 @@ async function renderBinderPage(id, shareToken = null) {
     ] : [
       // only offered once there is something to offer — an empty binder's
       // button would do nothing and still have to be explained
+      viewBtn,
       got ? h('button', { class: 'btn ghost small', onclick: () => addBinderToCollection(binder) },
         '📥 Add to collection') : null,
       h('button', { class: 'btn ghost small', onclick: () => openSharePanel() }, '🔗 Share'),
