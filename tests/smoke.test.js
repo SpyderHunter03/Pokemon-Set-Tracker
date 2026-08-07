@@ -1317,6 +1317,56 @@ const { chromium } = require('playwright');
     await gctx.close();
   }
 
+  // ---- the main menu turns ninety degrees on a wide window ----
+  // A bar across the bottom is right where a thumb is. On a laptop the bottom
+  // of the window is the furthest point from what you are reading.
+  {
+    const wctx = await browser.newContext({ serviceWorkers: 'block', viewport: { width: 1280, height: 800 } });
+    const wp = await wctx.newPage();
+    await wp.goto('http://localhost:3111/');
+    await wp.waitForSelector('.set-card');
+    const box = async () => wp.evaluate(() => {
+      const r = document.querySelector('.bottomnav').getBoundingClientRect();
+      return { left: Math.round(r.left), top: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) };
+    });
+    const wide = await box();
+    check('sidebar: a wide window puts the menu down the left, not across the bottom',
+      wide.left === 0 && wide.top === 0 && wide.h > wide.w && wide.w === 200);
+    check('sidebar: and the page starts to the right of it, not underneath',
+      (await wp.evaluate(() => Math.round(document.querySelector('.topbar').getBoundingClientRect().left))) === 200);
+    check('sidebar: every destination still spells itself out', await wp.isVisible('.bottomnav a[data-nav=binders] .nav-label'));
+
+    await wp.click('#nav-toggle');
+    await wp.waitForFunction(() => document.body.classList.contains('nav-rail'));
+    const rail = await box();
+    check('sidebar: collapsing folds it to an icon rail, giving the page the width back',
+      rail.w === 64 && rail.left === 0 &&
+      !(await wp.isVisible('.bottomnav a[data-nav=binders] .nav-label')) &&
+      await wp.isVisible('.bottomnav a[data-nav=binders] .nav-icon'));
+    check('sidebar: anywhere is still one click from the rail',
+      (await wp.locator('.bottomnav a').count()) === 4);
+
+    // unlike the card view, this one is about the window rather than the job
+    await wp.reload();
+    await wp.waitForSelector('.set-card');
+    check('sidebar: and it stays collapsed next time', await wp.evaluate(() => document.body.classList.contains('nav-rail')));
+    await wp.click('#nav-toggle');
+    await wp.waitForFunction(() => !document.body.classList.contains('nav-rail'));
+    check('sidebar: expanding puts it back', (await box()).w === 200);
+
+    // a half-screen window keeps the bar it had
+    await wp.setViewportSize({ width: 820, height: 800 });
+    await wp.waitForFunction(() => {
+      const r = document.querySelector('.bottomnav').getBoundingClientRect();
+      return r.width > r.height;
+    });
+    const narrow = await box();
+    check('sidebar: a narrower window keeps the bottom bar, and hides the collapse control',
+      narrow.left === 0 && narrow.w === 820 && narrow.top > 400 &&
+      !(await wp.isVisible('#nav-toggle')));
+    await wctx.close();
+  }
+
   // ---- the header folds down once you are past the top ----
   // Needs a short window: the fixture set is eight cards, which does not
   // scroll on a desktop viewport, and a condense that never triggers is a

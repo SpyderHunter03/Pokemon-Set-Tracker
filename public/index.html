@@ -28,11 +28,15 @@
 
   <main id="view" class="view"></main>
 
+  <!-- A bar across the bottom on a phone; a column down the left on a wide
+       window, where the bottom of the screen is a long way from the content
+       and there is width to spare. Same markup either way. -->
   <nav class="bottomnav" aria-label="Main">
-    <a href="#/" data-nav="sets"><span class="nav-icon">🗂️</span>Sets</a>
-    <a href="#/pokemon" data-nav="pokemon"><span class="nav-icon">🔴</span>Pokémon</a>
-    <a href="#/binders" data-nav="binders"><span class="nav-icon">📒</span>Binders</a>
-    <a href="#/scan" data-nav="scan"><span class="nav-icon">📷</span>Scan</a>
+    <button id="nav-toggle" class="nav-toggle" type="button" aria-expanded="true"><span class="nav-icon">«</span><span class="nav-label">Collapse</span></button>
+    <a href="#/" data-nav="sets"><span class="nav-icon">🗂️</span><span class="nav-label">Sets</span></a>
+    <a href="#/pokemon" data-nav="pokemon"><span class="nav-icon">🔴</span><span class="nav-label">Pokémon</span></a>
+    <a href="#/binders" data-nav="binders"><span class="nav-icon">📒</span><span class="nav-label">Binders</span></a>
+    <a href="#/scan" data-nav="scan"><span class="nav-icon">📷</span><span class="nav-label">Scan</span></a>
   </nav>
 
   <div id="toast" class="toast" hidden></div>

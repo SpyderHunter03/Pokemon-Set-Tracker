@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.66.0';
+const APP_VERSION = '3.67.0';
 
 /* ============================================================
  * Storage helpers
@@ -5735,6 +5735,35 @@ document.getElementById('import-file').addEventListener('change', (e) => {
   e.target.value = '';
 });
 
+/* ---- the main menu, as a column ----
+ * Wide enough and the bottom bar becomes a left sidebar; the toggle folds it
+ * to an icon rail. Remembered, unlike the card view: this one is about the
+ * window you are working in, not the job you are doing, and it does not change
+ * from one page to the next.
+ *
+ * The class lives on <body> rather than the nav, because what changes is the
+ * page's left gutter as much as the nav's width — one custom property, read
+ * by both.
+ */
+function initSideNav() {
+  const btn = document.getElementById('nav-toggle');
+  if (!btn) return;
+  const label = btn.querySelector('.nav-label');
+  const icon = btn.querySelector('.nav-icon');
+  const apply = () => {
+    const rail = lsGet('ptcg.navRail') === true;
+    document.body.classList.toggle('nav-rail', rail);
+    if (icon) icon.textContent = rail ? '\u00bb' : '\u00ab';
+    if (label) label.textContent = 'Collapse';
+    btn.setAttribute('aria-expanded', rail ? 'false' : 'true');
+    btn.title = rail ? 'Expand the menu' : 'Collapse the menu';
+    btn.setAttribute('aria-label', rail ? 'Expand the menu' : 'Collapse the menu');
+  };
+  btn.addEventListener('click', () => { lsSet('ptcg.navRail', lsGet('ptcg.navRail') !== true); apply(); });
+  apply();
+}
+
+initSideNav();
 trackTopbarHeight();
 
 if ('serviceWorker' in navigator) {

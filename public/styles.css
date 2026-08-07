@@ -772,6 +772,82 @@ select.chip { appearance: none; padding-right: 22px; }
 
 body { padding-bottom: calc(64px + env(safe-area-inset-bottom)); }
 
+/* the collapse control belongs to the sidebar; across the bottom there is
+   nothing to collapse and no room to say so */
+.nav-toggle { display: none; }
+
+/* ---------- …and as a left sidebar, on a window wide enough to spare it ----------
+   A bar across the bottom is right where a thumb is: on a phone. On a laptop
+   the bottom of the window is the furthest point from what you are reading,
+   and there is width going spare at the sides. Same markup, turned ninety
+   degrees. 1000px, because the app's other breakpoint (700px) also covers
+   half-screen windows and tablets, where 200px of chrome is a big fraction of
+   what is left. */
+@media (min-width: 1000px) {
+  :root { --sidenav-w: 200px; }
+
+  body {
+    padding-bottom: 0;
+    /* the sidebar is fixed, so the page has to be told to stop short of it */
+    padding-left: var(--sidenav-w);
+  }
+
+  .bottomnav {
+    top: 0;
+    bottom: 0;
+    right: auto;
+    width: var(--sidenav-w);
+    flex-direction: column;
+    align-items: stretch;
+    gap: 2px;
+    border-top: none;
+    border-right: 1px solid var(--border);
+    padding: calc(10px + env(safe-area-inset-top)) 8px 12px;
+  }
+
+  .bottomnav a, .nav-toggle {
+    flex: 0 0 auto;
+    flex-direction: row;
+    justify-content: flex-start;
+    align-items: center;
+    gap: 12px;
+    padding: 11px 12px;
+    border-radius: 10px;
+    font-size: 14px;
+    white-space: nowrap;
+  }
+
+  .bottomnav a:hover { background: var(--surface); color: var(--text); }
+
+  .bottomnav a.active { background: var(--surface-2); }
+
+  .bottomnav .nav-icon { font-size: 19px; width: 22px; text-align: center; flex-shrink: 0; }
+
+  .nav-toggle {
+    display: flex;
+    border: none;
+    background: transparent;
+    color: var(--muted);
+    font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+    margin-bottom: 6px;
+  }
+
+  .nav-toggle:hover { background: var(--surface); color: var(--text); }
+
+  /* collapsed: the four ways to anywhere are still one click, they just stop
+     spelling themselves out */
+  body.nav-rail { --sidenav-w: 64px; }
+
+  body.nav-rail .nav-label { display: none; }
+
+  body.nav-rail .bottomnav a, body.nav-rail .nav-toggle { justify-content: center; padding: 11px 0; gap: 0; }
+
+  /* a toast centred on the viewport reads as off-centre against the page */
+  .toast { left: calc(50% + var(--sidenav-w) / 2); }
+}
+
 /* ---------- variant tracking ---------- */
 .variant-list { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
 
@@ -1078,7 +1154,9 @@ body.printing-proxies #print-area {
 }
 @media print {
   body.printing-proxies > :not(#print-area) { display: none !important; }
-  body.printing-proxies { background: #fff !important; margin: 0; }
+  /* padding, not just margin: on a wide window the body carries the sidebar's
+     gutter, and a proxy sheet indented by 200mm-worth of nothing wastes paper */
+  body.printing-proxies { background: #fff !important; margin: 0; padding: 0 !important; }
   body.printing-proxies #print-area { padding: 0; }
 }
 .print-cell {
