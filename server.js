@@ -1602,6 +1602,42 @@ function configCdnBase() {
   } catch { return null; }
 }
 
+/** The card API this install is a client of, if PTCG_API_BASE is set. The
+ * base is accepted with or without its /v1 suffix — both spell the same
+ * intent, so both work. PTCG_API_TOKEN rides along as a Bearer header; the
+ * API decides whether the token is good, and apiRefusal() below translates
+ * its refusals into sentences. */
+function catalogApi() {
+  let base = (process.env.PTCG_API_BASE || '').trim();
+  if (!/^https?:\/\//.test(base)) return null;
+  base = base.replace(/\/+$/, '');
+  if (!/\/v1$/.test(base)) base += '/v1';
+  const token = (process.env.PTCG_API_TOKEN || '').trim();
+  return { base, headers: token ? { authorization: 'Bearer ' + token } : {} };
+}
+
+/** Where catalog PULLS come from: the card API when configured, else the
+ * bucket (cdnBase) exactly as before. This choice moves card DATA only —
+ * the master rows carry absolute image URLs, so pictures keep hotlinking
+ * the public bucket no matter which door the data came through. */
+function catalogSource() {
+  const api = catalogApi();
+  if (api) return { ...api, api: true };
+  const cdn = configCdnBase();
+  return cdn ? { base: cdn, headers: {}, api: false } : null;
+}
+
+/** The card API's refusal statuses, as sentences an admin can act on. A
+ * refusal never touches the cards already here — an install that has its
+ * catalog keeps serving it; only UPDATES stop. */
+function apiRefusal(status) {
+  if (status === 401) return 'the card API requires a token and this install did not send a valid one — set PTCG_API_TOKEN';
+  if (status === 403) return 'this install’s card-API token has been revoked — issue a new one and update PTCG_API_TOKEN';
+  if (status === 402) return 'this install’s card-API monthly allowance is spent — the cards already here keep working, and updates resume when the period resets';
+  if (status === 429) return 'the card API is rate-limiting this install — wait a minute and try again';
+  return null;
+}
+
 // shared upsert helpers so local and remote imports build rows identically
 function _upsertCatSet(lang, s, pos, imageBase) {
   const official = (s.cardCount && (s.cardCount.official || s.cardCount.total)) || null;
@@ -1674,13 +1710,13 @@ function importCatalogToDb() {
  *     touched, so the master can't override local changes.
  * Records the master's version (meta table) in settings for update checks.
  * progressCb({ setsDone, setTotal, lang, setName }) drives the UI. */
-async function importCatalogFromRemote(base, progressCb) {
-  base = base.replace(/\/+$/, '');
+async function importCatalogFromRemote(source, progressCb) {
+  const base = source.base.replace(/\/+$/, '');
   const { DatabaseSync } = require('node:sqlite');
 
   // 1) download the master catalog.db to a temp file next to our own DB
-  const res = await fetch(base + '/catalog.db');
-  if (!res.ok) { const e = new Error('HTTP ' + res.status + ' for catalog.db'); e.status = res.status; throw e; }
+  const res = await fetch(base + '/catalog.db', { headers: source.headers || {} });
+  if (!res.ok) { const e = new Error(apiRefusal(res.status) || ('HTTP ' + res.status + ' for catalog.db')); e.status = res.status; throw e; }
   const tmp = path.join(DATA_DIR, `.catalog-pull-${process.pid}.db`);
   fs.writeFileSync(tmp, Buffer.from(await res.arrayBuffer()));
 
@@ -1772,11 +1808,11 @@ function applyBypass(bp) {
 /** What would a master pull ADD to this install? New sets, new cards in
  * existing sets, and new printings of existing cards — for the admin's
  * review step. Reads only; nothing here mutates the database. */
-async function previewRemoteAdditions(base) {
-  base = base.replace(/\/+$/, '');
+async function previewRemoteAdditions(source) {
+  const base = source.base.replace(/\/+$/, '');
   const { DatabaseSync } = require('node:sqlite');
-  const res = await fetch(base + '/catalog.db');
-  if (!res.ok) { const e = new Error('HTTP ' + res.status + ' for catalog.db'); e.status = res.status; throw e; }
+  const res = await fetch(base + '/catalog.db', { headers: source.headers || {} });
+  if (!res.ok) { const e = new Error(apiRefusal(res.status) || ('HTTP ' + res.status + ' for catalog.db')); e.status = res.status; throw e; }
   const tmp = path.join(DATA_DIR, `.catalog-preview-${process.pid}.db`);
   fs.writeFileSync(tmp, Buffer.from(await res.arrayBuffer()));
   let src;
@@ -1846,13 +1882,13 @@ async function previewRemoteAdditions(base) {
 }
 
 /** Background job: pull the catalog from a remote database into this DB. */
-function startCatalogPull(base, bypass) {
+function startCatalogPull(source, bypass) {
   build = { running: true, phase: 'import', startedAt: Date.now(), error: null, hashesOk: null, log: [] };
-  pushLog('Loading the card database from ' + base);
+  pushLog('Loading the card database from ' + source.base + (source.api ? ' (card API)' : ''));
   const progress = { startedAt: new Date().toISOString(), catalogPull: true, setsDone: 0, setTotal: 0, setName: null, done: false, error: null };
   const write = (extra) => { Object.assign(progress, extra); try { writeJSONAtomic(PROGRESS_FILE, progress); } catch { /* cosmetic */ } };
   write({});
-  importCatalogFromRemote(base, (p) => write(p))
+  importCatalogFromRemote(source, (p) => write(p))
     .then((r) => {
       let skipped = 0;
       if (bypass) { try { skipped = applyBypass(bypass); } catch (e) { pushLog('Review step failed: ' + e.message); } }
@@ -1928,12 +1964,15 @@ const registrationMode = () => {
 
 /** Is the master ahead of us? One fetch of catalog.json, no card data moved. */
 async function masterUpdateStatus() {
-  const base = configCdnBase();
-  if (!base) return { configured: false };
+  const source = catalogSource();
+  if (!source) return { configured: false };
   const local = loadSettings().masterVersion || 0;
   try {
-    const r = await fetch(base + '/catalog.json');
-    if (!r.ok) return { configured: true, reachable: false, localVersion: local };
+    // through the card API this manifest ping costs 0 against the allowance,
+    // so even a spent token still learns whether it is behind — it just can't
+    // PULL until the period resets (and the refusal below says exactly that)
+    const r = await fetch(source.base + '/catalog.json', { headers: source.headers });
+    if (!r.ok) return { configured: true, reachable: false, localVersion: local, refusal: apiRefusal(r.status) };
     const m = await r.json();
     const remote = Number(m.version) || 0;
     return {
@@ -1951,7 +1990,7 @@ async function masterUpdateStatus() {
 async function runScheduledUpdateCheck() {
   // an install with no cards at all is tryMasterPull's problem, not this one;
   // the workspace PRODUCES the master, so it never follows one
-  if (READONLY || MASTER_MODE || build.running || !configCdnBase()) return;
+  if (READONLY || MASTER_MODE || build.running || !catalogSource()) return;
   if (catalogStats().cards === 0) return;
   const mode = autoUpdateMode();
   if (mode === 'off') return;
@@ -1965,7 +2004,7 @@ async function runScheduledUpdateCheck() {
   if (mode !== 'apply' || !st.behind || build.running) return;
   // unattended, so nothing is bypassed — every addition is accepted, which is
   // exactly why this is not the default
-  try { startCatalogPull(configCdnBase()); }
+  try { startCatalogPull(catalogSource()); }
   catch (e) { console.error('Scheduled master update failed to start: ' + e.message); }
 }
 
@@ -2187,7 +2226,8 @@ async function handleApi(req, res, pathname, ip, url) {
       mirroredAt: s.mirroredAt || null,
       images: imageCounts(),
       catalogCards: catalogStats().cards,
-      remoteCatalog: configCdnBase() || null,
+      remoteCatalog: (catalogSource() || {}).base || null,
+      catalogViaApi: !!catalogApi(),
       masterVersion: s.masterVersion || null,
       masterPulledAt: s.masterPulledAt || null,
       autoUpdate: autoUpdateMode(),
@@ -2251,12 +2291,16 @@ async function handleApi(req, res, pathname, ip, url) {
     const localFile = path.join(CDN_DIR, lang, 'scan-index.json');
     if (fs.existsSync(localFile)) return sendJSON(res, 200, withScanExtras(lang, readJSON(localFile, { cards: [] })));
     // No local scanner index (this install pulled the master rather than
-    // building locally) — fetch the published one from the bucket and cache
-    // it to disk so the scanner works on pulled-only installs too.
-    const base = configCdnBase();
-    if (base) {
+    // building locally) — fetch the published one and cache it to disk so
+    // the scanner works on pulled-only installs too. Through the card API
+    // when configured (/v1/scan-index), straight off the bucket otherwise.
+    const api = catalogApi();
+    const base = api ? null : configCdnBase();
+    if (api || base) {
       try {
-        const r = await fetch(`${base}/${lang}/scan-index.json`);
+        const r = api
+          ? await fetch(`${api.base}/scan-index?lang=${encodeURIComponent(lang)}`, { headers: api.headers })
+          : await fetch(`${base}/${lang}/scan-index.json`);
         if (r.ok) {
           const data = await r.json();
           try { fs.mkdirSync(path.dirname(localFile), { recursive: true }); writeJSONAtomic(localFile, data); } catch { /* cache is best-effort */ }
@@ -2352,8 +2396,8 @@ async function handleApi(req, res, pathname, ip, url) {
     const admin = authUser(req);
     if (!admin || !isAdminUser(admin)) return sendJSON(res, 403, { error: 'Administrator account required' });
     if (build.running) return sendJSON(res, 409, { error: 'Another job is already running' });
-    const base = configCdnBase();
-    if (!base) return sendJSON(res, 400, { error: 'No remote database is configured (set cdnBase in public/config.js)' });
+    const source = catalogSource();
+    if (!source) return sendJSON(res, 400, { error: 'No card source is configured — set PTCG_API_BASE (+ PTCG_API_TOKEN), or cdnBase in public/config.js' });
     // optional reviewed additions to bypass (from /api/catalog/preview):
     // bypassed items still land in the table, just hidden + source='local'
     const body = await readBody(req);
@@ -2363,8 +2407,8 @@ async function handleApi(req, res, pathname, ip, url) {
       cards: (Array.isArray(bp.cards) ? bp.cards : []).filter((x) => x && LANG_RE.test(x.lang || '') && CARD_ID_RE.test(x.id || '')).map((x) => ({ lang: x.lang, id: x.id })).slice(0, 20000),
       variants: (Array.isArray(bp.variants) ? bp.variants : []).filter((x) => x && LANG_RE.test(x.lang || '') && CARD_ID_RE.test(x.card || '') && VARIANT_KEY_RE.test(x.variant || '')).map((x) => ({ lang: x.lang, card: x.card, variant: x.variant })).slice(0, 20000),
     } : null;
-    startCatalogPull(base, bypass);
-    return sendJSON(res, 200, { ok: true, started: true, source: base });
+    startCatalogPull(source, bypass);
+    return sendJSON(res, 200, { ok: true, started: true, source: source.base });
   }
 
   // what a master update would ADD — the admin reviews this before pulling
@@ -2373,9 +2417,9 @@ async function handleApi(req, res, pathname, ip, url) {
     const admin = authUser(req);
     if (!admin || !isAdminUser(admin)) return sendJSON(res, 403, { error: 'Administrator account required' });
     if (build.running) return sendJSON(res, 409, { error: 'Another job is already running' });
-    const base = configCdnBase();
-    if (!base) return sendJSON(res, 400, { error: 'No remote database is configured (set cdnBase in public/config.js)' });
-    try { return sendJSON(res, 200, await previewRemoteAdditions(base)); }
+    const source = catalogSource();
+    if (!source) return sendJSON(res, 400, { error: 'No card source is configured — set PTCG_API_BASE (+ PTCG_API_TOKEN), or cdnBase in public/config.js' });
+    try { return sendJSON(res, 200, await previewRemoteAdditions(source)); }
     catch (e) { return sendJSON(res, 502, { error: 'Could not read the master database: ' + e.message }); }
   }
 
@@ -3570,14 +3614,14 @@ if (process.argv.includes('--set-password')) {
   // up with every card already in place; safe to re-run any time (same
   // merge as the in-app update — local edits survive).
   (async () => {
-    const base = configCdnBase();
-    if (!base) {
-      console.error('No master database configured — set cdnBase in public/config.js (or PTCG_CDN_BASE) to the bucket URL.');
+    const source = catalogSource();
+    if (!source) {
+      console.error('No card source configured — set PTCG_API_BASE (+ PTCG_API_TOKEN), or cdnBase in public/config.js / PTCG_CDN_BASE.');
       process.exit(2);
     }
-    console.log(`Loading the card database from ${base} …`);
+    console.log(`Loading the card database from ${source.base}${source.api ? ' (card API)' : ''} …`);
     try {
-      const r = await importCatalogFromRemote(base, (p) => {
+      const r = await importCatalogFromRemote(source, (p) => {
         if (p.setsDone === 1 || p.setsDone % 25 === 0 || p.setsDone === p.setTotal) {
           console.log(`  sets ${p.setsDone}/${p.setTotal}${p.setName ? ' — ' + p.setName : ''}`);
         }
@@ -3621,8 +3665,8 @@ if (process.argv.includes('--set-password')) {
     // (or before it has been published) heals itself.
     const tryMasterPull = () => {
       if (READONLY || build.running) return;
-      if (catalogStats().cards > 0 || dbExists() || !configCdnBase()) return;
-      try { startCatalogPull(configCdnBase()); }
+      if (catalogStats().cards > 0 || dbExists() || !catalogSource()) return;
+      try { startCatalogPull(catalogSource()); }
       catch (e) { console.error('Auto-load from remote database failed to start: ' + e.message); }
     };
     tryMasterPull();

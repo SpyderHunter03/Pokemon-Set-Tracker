@@ -1,5 +1,7 @@
 # Deployment & CI/CD
 
+> **Maintainer notes.** This documents how the hosted deployment runs. Local installs of the tracker are not currently offered or supported — the sections below that describe Proxmox/Docker installs are kept for the maintainer's own use and for whenever local installs return.
+
 How this repo goes from your keyboard to your servers.
 
 ## The flow at a glance

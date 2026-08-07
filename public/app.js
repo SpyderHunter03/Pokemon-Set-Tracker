@@ -3558,7 +3558,10 @@ function adminCardsTab() {
         try { chk = await catGet('update-check'); } catch { /* offline */ }
         if (!chk || !chk.configured) { updateArea.replaceChildren(); return; }
         if (!chk.reachable) {
-          updateArea.replaceChildren(h('p', { class: 'muted small' }, 'Master database not reachable right now \u2014 update check skipped.'));
+          // an auth refusal from the card API names itself; plain unreachable stays vague on purpose
+          updateArea.replaceChildren(h('p', { class: 'muted small' }, chk.refusal
+            ? 'Update check refused: ' + chk.refusal + '.'
+            : 'Master database not reachable right now \u2014 update check skipped.'));
         } else if (chk.behind) {
           updateArea.replaceChildren(
             h('p', { class: 'muted small' }, `A newer master database is available (you have v${chk.localVersion}, master is v${chk.remoteVersion}).`),

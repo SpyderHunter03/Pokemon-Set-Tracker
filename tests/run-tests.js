@@ -1441,6 +1441,32 @@ function fail(msg) {
   check('installer CLI: --pull-master loads the database and exits cleanly',
     cliPull.status === 0 && /Card database loaded: \d+ cards/.test((cliPull.stdout || '') + (cliPull.stderr || '')));
 
+  // ---- the same pull, as a CLIENT OF THE CARD API (token-gated) ----
+  // The mock API fronts the mock bucket: 401 without a token, 403 revoked,
+  // 402 when the allowance is spent (catalog.db only — the manifest is free).
+  // PTCG_CDN_BASE points at a dead port on purpose: if the API config did not
+  // take precedence, every one of these would fail loudly.
+  start('node', ['tests/mock-card-api.js']);
+  await waitForPort(3996).catch((e) => fail(e.message));
+  const apiPull = (extraEnv, dir) => spawnSync('node', ['server.js', '--pull-master'], {
+    cwd: pullRoot, encoding: 'utf8',
+    env: { ...process.env, DATA_DIR: path.join(pullRoot, dir), PTCG_CDN_BASE: 'http://localhost:3990/nowhere',
+      PTCG_API_BASE: 'http://localhost:3996', ...extraEnv },   // no /v1 — normalisation adds it
+  });
+  const gag = (r) => (r.stdout || '') + (r.stderr || '');
+  const apiOk = apiPull({ PTCG_API_TOKEN: 'ptcg_live_' + 'a'.repeat(40) }, 'data-api');
+  check('API client: a valid token pulls the catalog through the API (base given without /v1)',
+    apiOk.status === 0 && /card API/.test(gag(apiOk)) && /Card database loaded: \d+ cards/.test(gag(apiOk)));
+  const apiNone = apiPull({}, 'data-api-none');
+  check('API client: no token is refused with a sentence that names PTCG_API_TOKEN',
+    apiNone.status === 1 && /PTCG_API_TOKEN/.test(gag(apiNone)));
+  const apiRev = apiPull({ PTCG_API_TOKEN: 'ptcg_live_' + 'b'.repeat(40) }, 'data-api-rev');
+  check('API client: a revoked token is refused as revoked, not as a mystery HTTP code',
+    apiRev.status === 1 && /revoked/.test(gag(apiRev)));
+  const apiSpent = apiPull({ PTCG_API_TOKEN: 'ptcg_live_' + 'c'.repeat(40) }, 'data-api-spent');
+  check('API client: a spent allowance says existing cards keep working and updates wait',
+    apiSpent.status === 1 && /allowance is spent/.test(gag(apiSpent)) && /keep working/.test(gag(apiSpent)));
+
   // The boot server reads its master location from config.js — written here
   // the way the REAL committed file looks, comment examples included. (An
   // unanchored regex once matched `cdnBase: 'cdn'` inside the comment and

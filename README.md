@@ -1,12 +1,10 @@
 # Pokémon TCG Tracker
 
-> **Deploying / developing?** See **[DEPLOYMENT.md](DEPLOYMENT.md)** for the dev/main branch workflow, GitHub Actions CI, and the Proxmox LXC one-liner (Helper-Scripts style) with git auto-deploy.
+> **This app is used at its hosted site — local installs are not currently offered.** The self-host machinery (Docker, systemd, Proxmox scripts) still lives in this repository and in the git history, but it is unsupported and undocumented for now while the hosting model is reworked. **[DEPLOYMENT.md](DEPLOYMENT.md)** is maintainer notes for the hosted deployment.
 
-A lightweight, self-hostable web app (PWA) for tracking which Pokémon cards you own — with card images, per-variant tracking (holo, reverse, 1st edition…), a Pokémon-by-Pokémon view, multi-language card data, set-completion progress, and an offline card scanner.
+A lightweight web app (PWA) for tracking which Pokémon cards you own — with card images, per-variant tracking (holo, reverse, 1st edition…), a Pokémon-by-Pokémon view, multi-language card data, set-completion progress, and an offline card scanner. Make an account at the hosted site and everything below just works.
 
-**Everything is self-hosted.** At runtime the app talks only to *your* server — no third-party APIs, ever. Each install keeps its cards in a local SQLite database and the app reads from that.
-
-**How new installs get their cards — the master database.** You host one **master card database** (a single `catalog.db` SQLite file, plus the card images) on cheap object storage such as Cloudflare R2. Every install — your public site, a friend's Proxmox box, anyone's own server — pulls that master on first boot and ends up with an identical copy of all the cards, image locations, and any edits you've published. Nobody has to run the slow TCGdex download; they just pull your master. See [How the card database works](#how-the-card-database-works) below.
+**Where the cards come from.** The server keeps its card catalog in its own SQLite database, loaded and updated from a separate **TCG Card API** (its own repository and service) — the tracker is one client of that API among several. Card *images* are served from a public bucket and never pass through either server. See [How the card database works](#how-the-card-database-works) below.
 
 ## Features
 
@@ -33,7 +31,7 @@ A lightweight, self-hostable web app (PWA) for tracking which Pokémon cards you
 There are two roles, and they are deliberately kept apart:
 
 - **The maintainer workspace** manages the one authoritative copy of the card data. It is *not* a personal install — it's a dedicated workbench (see [The maintainer workspace](#the-maintainer-workspace) below) where the TCGdex download runs, edits are made (add printings, upload images, repoint pictures), and from which the master is **published** to object storage (Cloudflare R2 or any S3-compatible bucket). The master is a single file, `catalog.db`, holding only card information and the R2 locations of the images, plus a tiny `catalog.json` manifest carrying the **master version number**.
-- **Every install** (public site, Proxmox box, anyone's own server) is a **consumer**: on first boot it downloads `catalog.db` and loads it into its own local SQLite database, ending up an exact duplicate of the master — cards, image locations, and all published edits.
+- **Every install** (today: the hosted site) is a **consumer**: on first boot it downloads `catalog.db` and loads it into its own local SQLite database, ending up an exact duplicate of the master — cards, image locations, and all published edits.
 
 **Versioning and updates.** Every publish that actually changes the data bumps the master version automatically. Installs check the version with one tiny request (`catalog.json`) — the admin panel shows whether you're up to date, and when you're behind, an **Update card database (vX → vY)** button pulls just the card data. Updating never re-downloads images: image files stay wherever they already are (on the bucket, or on your server if you used "Download all images"). Those are two independent things — keeping card *data* current, and choosing where *images* are served from.
 
@@ -44,79 +42,20 @@ There are two roles, and they are deliberately kept apart:
 
 Deletions propagate too: if a card or set is removed from the master, installs drop it on their next update (their own local additions are exempt).
 
-You point an install at a master by setting `cdnBase` in `public/config.js` (or the `PTCG_CDN_BASE` environment variable) to the bucket's public URL:
-
-```js
-self.PTCG_CONFIG = { cdnBase: 'https://pub-xxxx.r2.dev', defaultLanguage: 'en' };
-```
-
-The repository already ships with `cdnBase` pointing at the project's hosted master, so a fresh install pulls a full, ready-to-use card database with no configuration. Change it to your own bucket if you host your own master.
-
-## Installing
-
-### 1. Self-hosting on Proxmox (Helper-Scripts)
-
-Run the community Helper-Scripts one-liner (see **[DEPLOYMENT.md](DEPLOYMENT.md)**). It creates an LXC, installs the app as a service, and **loads the card database from the master as part of the install** (`node server.js --pull-master`) — so the container comes up already showing every card. If the master isn't reachable during install, the app retries automatically after boot. Nothing else to do.
-
-### 2. Installing on any other server (Docker)
-
-For a public site or any non-Proxmox server, Docker is the simplest path. Requires Docker + Docker Compose.
-
-```bash
-git clone https://github.com/SpyderHunter03/Pokemon-Set-Tracker.git
-cd Pokemon-Set-Tracker
-docker compose up -d
-# the app is now on http://<server>:3000
-```
-
-On first boot it pulls the master database from the `cdnBase` in `public/config.js` and loads every card. To point at *your own* master instead of the default, edit `public/config.js` before `up`, or set the environment variable in `docker-compose.yml`:
-
-```yaml
-    environment:
-      - PTCG_CDN_BASE=https://pub-xxxx.r2.dev   # your bucket's public URL
-```
-
-The SQLite database, accounts and synced collections live in a mounted `./data` volume — back that folder up and you've backed up everything user-specific (the cards themselves always come from the master).
-
-### 3. Installing on any other server (bare Node)
-
-No Docker? The server has zero dependencies and needs only Node.js 22+.
-
-```bash
-git clone https://github.com/SpyderHunter03/Pokemon-Set-Tracker.git
-cd Pokemon-Set-Tracker
-node server.js          # http://localhost:3000
-```
-
-On first boot it pulls the master from `cdnBase`. To run it as a background service, a minimal systemd unit:
+**Where an install points.** Catalog pulls go through the **TCG Card API** when these two environment variables are set — this is how the hosted site runs:
 
 ```ini
-# /etc/systemd/system/ptcg.service
-[Unit]
-Description=Pokemon TCG Tracker
-After=network.target
-
-[Service]
-WorkingDirectory=/opt/Pokemon-Set-Tracker
-ExecStart=/usr/bin/node server.js
-Environment=PORT=3000
-Environment=DATA_DIR=/opt/Pokemon-Set-Tracker/data
-# optional: point at your own master instead of the committed default
-# Environment=PTCG_CDN_BASE=https://pub-xxxx.r2.dev
-Restart=on-failure
-User=www-data
-
-[Install]
-WantedBy=multi-user.target
+PTCG_API_BASE=https://api.example.com        # /v1 is implied; spelling it out also works
+PTCG_API_TOKEN=ptcg_live_…                   # issued by the API's operator
 ```
 
-```bash
-sudo systemctl enable --now ptcg
-```
+The API meters data pulls by token; a refused pull (missing/revoked token, spent allowance) never touches the cards already loaded — the install keeps serving what it has, only *updates* wait, and the Administration panel says exactly which refusal it hit. Card images are untouched by all of this: the master rows carry absolute image URLs on the public bucket, so pictures keep hotlinking the bucket no matter how the data arrived.
 
-> **Phones need HTTPS** for install, offline mode, and live camera scanning (`localhost` is exempt). Put a reverse proxy with automatic HTTPS (Caddy is the easiest) in front of `node server.js`.
+Without those variables, pulls fall back to reading `catalog.db` straight off a public bucket, configured as `cdnBase` in `public/config.js` (or `PTCG_CDN_BASE`).
 
-If an install ever comes up with no cards (for example the master wasn't reachable at first boot), it retries on its own every 10 minutes, the welcome screen has a **Load cards from the database** button, and `node server.js --pull-master` does the same from the command line — any of the three pulls the master on demand. Once cards are loaded, the admin **Administration** panel checks the master version automatically and offers **Update card database** whenever a newer master has been published.
+## Running your own copy
+
+Not currently offered. The pieces that used to make self-hosting a one-liner (the Docker files, the systemd unit, the Proxmox Helper-Script) are still in the repository and its history, but they are **unsupported and undocumented for now** — the hosting model is being reworked, and local installs will come back in some form once that settles. Use the hosted site in the meantime.
 
 ## The maintainer workspace
 
