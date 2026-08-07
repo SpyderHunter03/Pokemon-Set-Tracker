@@ -304,6 +304,25 @@ const { chromium } = require('playwright');
   await page.selectOption('.chips select >> nth=0', 'oldest');
   check('pokemon page sorts oldest-set first', (await page.locator('.tcg-card >> nth=0').getAttribute('data-card-id')) === 'base1-4');
   await page.selectOption('.chips select >> nth=0', 'newest');
+
+  // the same three words the set page has had all along.
+  // Waiting on the chip rather than on a count: Charizard happens to be two
+  // owned and two missing, so "the number changed" is not a signal here.
+  const pickChip = async (label) => {
+    await page.click(`.chips button.chip:has-text("${label}")`);
+    await page.waitForSelector(`.chips button.chip.active:has-text("${label}")`);
+  };
+  const spAll = await page.locator('.tcg-card').count();
+  await pickChip('Missing');
+  const spMissing = await page.locator('.tcg-card').count();
+  await pickChip('Owned');
+  const spOwned = await page.locator('.tcg-card').count();
+  check('pokemon page: Owned and Missing split every printing between them',
+    spOwned > 0 && spMissing > 0 && spOwned + spMissing === spAll);
+  await pickChip('All');
+  check('pokemon page: All puts them back',
+    (await page.locator('.tcg-card').count()) === spAll);
+
   await page.selectOption('.chips select >> nth=1', 'text');
   await page.waitForSelector('.card-list.bare .card-row');
   check('view: a species page lists its printings across sets too',
@@ -1132,6 +1151,26 @@ const { chromium } = require('playwright');
   check('global search shows all Charizard printings', (await page.locator('.card-grid .tcg-card').count()) === 4);
   check('footer: search results carry one too',
     (await page.locator('.page-foot .back-link').count()) === 1);
+  // here a chip re-runs the query, so wait for the results to land as well
+  const searchChip = async (label) => {
+    await page.click(`.chips button.chip:has-text("${label}")`);
+    await page.waitForSelector(`.chips button.chip.active:has-text("${label}")`);
+    await page.waitForFunction(() => !document.querySelector('.spinner'));
+  };
+  const seAll = await page.locator('.card-grid .tcg-card').count();
+  await searchChip('Missing');
+  const seMissing = await page.locator('.card-grid .tcg-card').count();
+  await searchChip('Owned');
+  const seOwned = await page.locator('.card-grid .tcg-card').count();
+  check('search: the filters reach the results here too',
+    seOwned > 0 && seMissing > 0 && seOwned + seMissing === seAll);
+  // rebuilding the chip row must not make the other controls forget themselves
+  check('search: changing a filter leaves the rarity and type dropdowns alone',
+    (await page.inputValue('.chips select >> nth=0')) === '' &&
+    (await page.inputValue('.chips select >> nth=1')) === '');
+  await searchChip('All');
+  check('search: All brings the whole result set back',
+    (await page.locator('.card-grid .tcg-card').count()) === seAll);
   check('rarity dropdown from real data', (await page.locator('select >> nth=0 >> option').allTextContents()).includes('Ultra Rare'));
   // a handful of results is the whole answer — offering "Load more" here only
   // ever fetched page one a second time and stacked the same cards up again

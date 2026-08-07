@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.64.0';
+const APP_VERSION = '3.65.0';
 
 /* ============================================================
  * Storage helpers
@@ -425,6 +425,31 @@ function sortCards(rows, mode, getId, getName) {
     oldest: (a, b) => bySet(a, b, 1),
   }[mode];
   return cmp ? [...rows].sort(cmp) : rows;
+}
+
+/** A filter chip. Was local to the set page until the same three words —
+ * All, Owned, Missing — turned out to be wanted everywhere cards are listed. */
+function chip(label, isActive, onClick) {
+  return h('button', { class: 'chip' + (isActive ? ' active' : ''), onclick: onClick }, label);
+}
+
+/** Owned/missing filtering, in the one place that decides what those mean.
+ * Signed out there is no ownership to filter on, so everything passes. */
+function passesOwnFilter(filter, cardId, variant) {
+  if (filter === 'all' || !canTrack()) return true;
+  const owned = variantQty(cardId, variant) > 0;
+  return filter === 'owned' ? owned : !owned;
+}
+
+/** The All / Owned / Missing row, wherever printings are listed. Only shown
+ * when signed in: the words mean nothing about a collection nobody has. */
+function ownFilterChips(filter, onPick) {
+  if (!canTrack()) return [];
+  return [
+    chip('All', filter === 'all', () => onPick('all')),
+    chip('Owned', filter === 'owned', () => onPick('owned')),
+    chip('Missing', filter === 'missing', () => onPick('missing')),
+  ];
 }
 
 function sortSelect(options, current, onchange) {
@@ -1913,9 +1938,7 @@ async function renderSetPage(setId) {
     for (const c of sorted) {
       if (q && !c.name.toLowerCase().includes(q) && String(c.localId) !== q) continue;
       for (const vk of realVariants(c)) { // each printing is its own tile
-        const owned = variantQty(c.id, vk) > 0;
-        if (filter === 'owned' && !owned) continue;
-        if (filter === 'missing' && owned) continue;
+        if (!passesOwnFilter(filter, c.id, vk)) continue;
         grid.append(cardEntry(cardView, c, vk, { onOwnershipChange: updateProgress }));
       }
     }
@@ -1934,21 +1957,10 @@ async function renderSetPage(setId) {
     }
   }
 
-  const chip = (label, isActive, onClick) => h('button', {
-    class: 'chip' + (isActive ? ' active' : ''),
-    onclick: onClick,
-  }, label);
-
   const chipsWrap = h('div', { class: 'chips' });
   function renderChips() {
-    // owned/missing filters only make sense when signed in and tracking
-    const trackChips = canTrack()
-      ? [chip('Owned', filter === 'owned', () => { filter = 'owned'; renderChips(); renderGrid(); }),
-         chip('Missing', filter === 'missing', () => { filter = 'missing'; renderChips(); renderGrid(); })]
-      : [];
     chipsWrap.replaceChildren(
-      chip('All', filter === 'all', () => { filter = 'all'; renderChips(); renderGrid(); }),
-      ...trackChips,
+      ...ownFilterChips(filter, (f) => { filter = f; renderChips(); renderGrid(); }),
       sortSelect([['number', 'Card number'], ['name', 'Name A–Z']], cardSort,
         (v) => { cardSort = v; lsSet('ptcg.sort.cards', v); renderGrid(); }),
       viewSelect(cardView, (v) => { cardView = v; renderGrid(); }),
@@ -2668,16 +2680,35 @@ async function renderPokemonPage(dexStr) {
   let pokeSort = lsGet('ptcg.sort.pokemon') || 'newest';
 
   let cardView = 'grid';
+  let filter = 'all';
+  const chipsWrap = h('div', { class: 'chips' });
   function renderGrid() {
     applyCardView(grid, cardView);
     grid.replaceChildren();
     const cards = sortCards(sp.cards, pokeSort, (c) => c.id, (c) => c.name);
     for (const c of cards) {
       for (const vk of realVariants(c)) {
+        if (!passesOwnFilter(filter, c.id, vk)) continue;
         grid.append(cardEntry(cardView, c, vk, { onOwnershipChange: updateProgress }));
       }
     }
+    // a species you have finished, filtered to Missing, is an empty page that
+    // should say why rather than looking broken
+    if (!grid.children.length) {
+      grid.append(h('div', { class: 'center' }, filter === 'missing'
+        ? 'Nothing missing — you have every printing of this Pokémon.'
+        : filter === 'owned' ? 'None of these yet.' : 'No cards.'));
+    }
   }
+  function renderChips() {
+    chipsWrap.replaceChildren(
+      ...ownFilterChips(filter, (f) => { filter = f; renderChips(); renderGrid(); }),
+      sortSelect([['newest', 'Newest set'], ['oldest', 'Oldest set'], ['name', 'Name A–Z'], ['number', 'Card number']], pokeSort,
+        (v) => { pokeSort = v; lsSet('ptcg.sort.pokemon', v); renderGrid(); }),
+      viewSelect(cardView, (v) => { cardView = v; renderGrid(); }),
+    );
+  }
+  renderChips();
   renderGrid();
 
   view.replaceChildren(
@@ -2689,11 +2720,7 @@ async function renderPokemonPage(dexStr) {
         h('div', { class: 'prog-row' }, vLabel, vWrap),
       )] : []),
     ),
-    h('div', { class: 'chips' },
-      sortSelect([['newest', 'Newest set'], ['oldest', 'Oldest set'], ['name', 'Name A–Z'], ['number', 'Card number']], pokeSort,
-        (v) => { pokeSort = v; lsSet('ptcg.sort.pokemon', v); renderGrid(); }),
-      viewSelect(cardView, (v) => { cardView = v; renderGrid(); }),
-    ),
+    chipsWrap,
     grid,
     pageFooter('#/pokemon', '\u2190 All Pok\u00e9mon'),
   );
@@ -2715,6 +2742,7 @@ async function renderSearchPage(rawQuery) {
   }
   let rarity = '', type = '', page = 1;
   let cardView = 'grid';
+  let filter = 'all';
   let searchSort = lsGet('ptcg.sort.search') || 'newest';
   const shown = new Set();   // card ids already on the page — a card belongs here once
   let loadSeq = 0;           // only the newest request may touch the grid
@@ -2723,9 +2751,27 @@ async function renderSearchPage(rawQuery) {
   const moreBtn = h('button', { class: 'btn ghost load-more', onclick: () => load(false) }, 'Load more');
   moreBtn.hidden = true;
 
-  const select = (label, options, onchange) => h('select', { class: 'chip', 'aria-label': label, onchange: (e) => onchange(e.target.value) },
-    h('option', { value: '' }, label),
-    ...options.map((o) => h('option', { value: o }, o)));
+  // rebuilt whenever a chip changes, so it has to be told what it is currently
+  // showing — a control that silently forgets its own value is worse than none
+  const select = (label, options, current, onchange) => {
+    const el = h('select', { class: 'chip', 'aria-label': label, onchange: (e) => onchange(e.target.value) },
+      h('option', { value: '' }, label),
+      ...options.map((o) => h('option', { value: o }, o)));
+    el.value = current || '';
+    return el;
+  };
+
+  const chipsWrap = h('div', { class: 'chips' });
+  function renderChips() {
+    chipsWrap.replaceChildren(
+      ...ownFilterChips(filter, (f) => { filter = f; renderChips(); load(true); }),
+      select('Rarity', idx.rarities, rarity, (v) => { rarity = v; load(true); }),
+      select('Type', idx.types, type, (v) => { type = v; load(true); }),
+      sortSelect([['newest', 'Newest set'], ['oldest', 'Oldest set'], ['name', 'Name A–Z'], ['number', 'Card number']], searchSort,
+        (v) => { searchSort = v; lsSet('ptcg.sort.search', v); load(true); }),
+      viewSelect(cardView, (v) => { cardView = v; load(true); }),
+    );
+  }
 
   async function load(reset) {
     const seq = ++loadSeq;   // a filter changed mid-flight belongs to the newer request
@@ -2745,12 +2791,19 @@ async function renderSearchPage(rawQuery) {
         for (const c of res.cards) {
           if (shown.has(c.id)) continue;   // never the same card twice
           shown.add(c.id);
-          for (const vk of realVariants(c)) results.append(cardEntry(cardView, c, vk));
-          added++;
+          for (const vk of realVariants(c)) {
+            if (!passesOwnFilter(filter, c.id, vk)) continue;
+            results.append(cardEntry(cardView, c, vk));
+            added++;                       // count what landed, not what was read
+          }
         }
       }
       status.replaceChildren();
-      if (!shown.size) status.textContent = 'No cards found.';
+      if (!results.children.length) {
+        status.textContent = filter === 'missing' ? 'Nothing missing in these results.'
+          : filter === 'owned' ? 'None of these are in your collection yet.'
+            : 'No cards found.';
+      }
       moreBtn.hidden = !more;
     } catch (e) {
       if (seq !== loadSeq) return;
@@ -2762,18 +2815,13 @@ async function renderSearchPage(rawQuery) {
   view.replaceChildren(
     h('a', { class: 'back-link', href: '#/' }, '← All sets'),
     h('div', { class: 'page-head' }, h('h1', {}, query ? `Search: “${query}”` : 'Browse cards')),
-    h('div', { class: 'chips' },
-      select('Rarity', idx.rarities, (v) => { rarity = v; load(true); }),
-      select('Type', idx.types, (v) => { type = v; load(true); }),
-      sortSelect([['newest', 'Newest set'], ['oldest', 'Oldest set'], ['name', 'Name A–Z'], ['number', 'Card number']], searchSort,
-        (v) => { searchSort = v; lsSet('ptcg.sort.search', v); load(true); }),
-      viewSelect(cardView, (v) => { cardView = v; load(true); }),
-    ),
+    chipsWrap,
     results,
     status,
     moreBtn,
     pageFooter('#/', '\u2190 All sets'),
   );
+  renderChips();
   load(true);
 }
 
