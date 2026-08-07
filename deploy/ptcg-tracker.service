@@ -1,0 +1,29 @@
+# systemd unit for the hosted Pokémon TCG Tracker. Install per DEPLOYMENT.md
+# ("Hosting on the API's Vultr box"):
+#   cp deploy/ptcg-tracker.service /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now ptcg-tracker
+[Unit]
+Description=Pokemon TCG Tracker (hosted)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ptcg
+Group=ptcg
+WorkingDirectory=/opt/ptcg-tracker
+EnvironmentFile=/etc/ptcg-tracker/env
+ExecStart=/usr/bin/node /opt/ptcg-tracker/server.js
+Restart=always
+RestartSec=3
+# The service owns its data directory, plus public/cdn inside the repo —
+# that is where admin-uploaded card images, the pull progress file, and the
+# cached scanner index live. Everything else in /opt stays read-only to it.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/ptcg-tracker /opt/ptcg-tracker/public/cdn
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

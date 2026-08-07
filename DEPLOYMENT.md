@@ -138,6 +138,101 @@ cdnBase: 'https://pub-xxxxxxxx.r2.dev',
 
 The master keeps `cdnBase: 'cdn'`? No — the master can use the remote URL too (it falls back to its local copy if the bucket's empty), but the simplest mental model: master = the one machine where you run database updates + `publish-images.js`; its own `config.js` may stay `'cdn'` so its admin tools remain active. Instances pointed at R2 hide the download/update UI automatically.
 
+## Hosting on the API's Vultr box (the current production home)
+
+The hosted tracker lives on the **same Vultr instance as the TCG Card API's
+east node** — two small Node processes, one 1GB box, one bill. The API's
+runbook (`deploy/DEPLOY.md` in the Pkmn-Card-Api repo) stands the box up;
+these steps add the tracker beside it.
+
+Two architecture rules, decided up front:
+
+- **The tracker runs on east ONLY, never replicated.** The API was built to
+  cluster — tokens and counts sync between peers. The tracker was not:
+  accounts, collections and binders are one SQLite database with no
+  replication story. When the API grows a west node, the tracker stays where
+  its database is.
+- **The tracker gets its OWN Cloudflare tunnel.** Every connector on a
+  tunnel serves all of that tunnel's hostnames, so parking the tracker's
+  hostname on the API's tunnel would break the day west joins it (tracker
+  traffic would round-robin to a box not running the tracker). A second
+  tunnel with a single connector on east keeps both stories clean.
+
+### 1. User + code + dependencies
+
+```bash
+useradd --system --home /var/lib/ptcg-tracker --create-home --shell /usr/sbin/nologin ptcg
+
+git clone https://github.com/SpyderHunter03/Pokemon-Set-Tracker /opt/ptcg-tracker
+cd /opt/ptcg-tracker && npm install --omit=dev   # sharp (image uploads), nodemailer (mail), qrcode
+# the service writes uploads + the scanner-index cache into public/cdn:
+chown -R ptcg:ptcg /opt/ptcg-tracker/public/cdn
+```
+
+### 2. The env file
+
+```bash
+mkdir -p /etc/ptcg-tracker && touch /etc/ptcg-tracker/env && chmod 600 /etc/ptcg-tracker/env
+```
+
+`/etc/ptcg-tracker/env`:
+
+```ini
+PORT=3000
+HOST=127.0.0.1                    # only the tunnel talks to it, and the tunnel is local
+                                  # (the API can't do this — its cluster peers dial in — but the tracker has no peers)
+DATA_DIR=/var/lib/ptcg-tracker
+# the card API is on the SAME box — talk to it over localhost, not the
+# public hostname (no Cloudflare round-trip for catalog pulls)
+PTCG_API_BASE=http://localhost:3400
+PTCG_API_TOKEN=ptcg_live_…        # mint on this box: cd /opt/card-api &&
+                                  #   sudo -u cardapi DATA_DIR=/var/lib/card-api \
+                                  #   node scripts/tokens.js issue --name "Set Tracker (hosted)" --plan app
+# behind the tunnel every visitor looks like localhost without this —
+# rate limiting and lockouts would count everyone as one person
+PTCG_CLIENT_IP_HEADER=cf-connecting-ip
+```
+
+### 3. The service
+
+```bash
+cp /opt/ptcg-tracker/deploy/ptcg-tracker.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now ptcg-tracker
+journalctl -u ptcg-tracker -n 20    # first boot prints the setup code — claim the admin account soon
+```
+
+No firewall change: the tunnel reaches :3000 from inside the box, and ufw
+keeps strangers out exactly as before.
+
+### 4. The tunnel (its own, not the API's)
+
+Cloudflare Zero Trust → Networks → Tunnels → **Create tunnel** (call it
+`ptcg-tracker`). Public hostname: `tracker.yourdomain.com` → service
+`http://localhost:3000`. Run its connector install command on east. Both
+connectors (API's and tracker's) coexist happily on one box.
+
+### 5. Prove it
+
+```bash
+curl -s http://localhost:3000/api/app-config | grep -o '"remoteCatalog":"[^"]*"\|"catalogViaApi":[a-z]*'
+#   → "remoteCatalog":"http://localhost:3400/v1"  "catalogViaApi":true
+curl -sI https://tracker.yourdomain.com/ | head -1
+# in the browser: claim the setup code from the journal, then Administration →
+# the update check should say it is up to date (through the API), and on the
+# API side the token's spend is visible:
+#   cd /opt/card-api && sudo -u cardapi DATA_DIR=/var/lib/card-api node scripts/tokens.js list
+```
+
+### What to back up on this box
+
+`/var/lib/ptcg-tracker` (accounts, collections, binders — the state that
+cannot rebuild itself) and `/opt/ptcg-tracker/public/cdn` **if** admin
+image uploads happen on the hosted box rather than in the maintainer
+workspace. The API's ledger (`/var/lib/card-api`) is worth a copy while
+east is the only node; once a peer exists it replicates and retires from
+the backup list. The catalog, as ever, re-pulls itself.
+
 ## Also built: container images
 
 Every push to dev/main also publishes a Docker image to GitHub's registry (`ghcr.io/spyderhunter03/pokemon-set-tracker:dev` / `:latest`) via `.github/workflows/docker.yml`. The LXC route doesn't use them — they're there if you ever want to run the app on anything that speaks Docker instead.
