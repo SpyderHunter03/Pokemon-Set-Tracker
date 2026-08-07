@@ -1329,11 +1329,18 @@ const { chromium } = require('playwright');
       const r = document.querySelector('.bottomnav').getBoundingClientRect();
       return { left: Math.round(r.left), top: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) };
     });
+    const bar = async () => wp.evaluate(() => {
+      const r = document.querySelector('.topbar').getBoundingClientRect();
+      return { left: Math.round(r.left), right: Math.round(r.right), bottom: Math.round(r.bottom) };
+    });
     const wide = await box();
+    const top = await bar();
     check('sidebar: a wide window puts the menu down the left, not across the bottom',
-      wide.left === 0 && wide.top === 0 && wide.h > wide.w && wide.w === 200);
-    check('sidebar: and the page starts to the right of it, not underneath',
-      (await wp.evaluate(() => Math.round(document.querySelector('.topbar').getBoundingClientRect().left))) === 200);
+      wide.left === 0 && wide.h > wide.w && wide.w === 200);
+    check('sidebar: the top bar still owns the whole width, and the menu hangs under it',
+      top.left === 0 && top.right === 1280 && wide.top === top.bottom);
+    check('sidebar: and the page starts to the right of the menu, not underneath it',
+      (await wp.evaluate(() => Math.round(document.querySelector('.view').getBoundingClientRect().left))) >= 200);
     check('sidebar: every destination still spells itself out', await wp.isVisible('.bottomnav a[data-nav=binders] .nav-label'));
 
     await wp.click('#nav-toggle');

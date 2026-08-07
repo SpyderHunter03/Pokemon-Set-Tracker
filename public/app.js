@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.67.0';
+const APP_VERSION = '3.68.0';
 
 /* ============================================================
  * Storage helpers

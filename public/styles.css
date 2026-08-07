@@ -792,8 +792,15 @@ body { padding-bottom: calc(64px + env(safe-area-inset-bottom)); }
     padding-left: var(--sidenav-w);
   }
 
+  /* …except the top bar, which owns the full width of the window and the
+     sidebar hangs below it. Search and the account button belong to the whole
+     app, not to the part of it right of the menu. The negative margin cancels
+     the body's gutter; the width then follows from being a block. */
+  .topbar { margin-left: calc(-1 * var(--sidenav-w)); }
+
   .bottomnav {
-    top: 0;
+    /* parked under the bar above, exactly like the page header is */
+    top: var(--topbar-h, 61px);
     bottom: 0;
     right: auto;
     width: var(--sidenav-w);
@@ -802,7 +809,7 @@ body { padding-bottom: calc(64px + env(safe-area-inset-bottom)); }
     gap: 2px;
     border-top: none;
     border-right: 1px solid var(--border);
-    padding: calc(10px + env(safe-area-inset-top)) 8px 12px;
+    padding: 10px 8px 12px;
   }
 
   .bottomnav a, .nav-toggle {
