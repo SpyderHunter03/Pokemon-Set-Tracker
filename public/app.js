@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.65.0';
+const APP_VERSION = '3.66.0';
 
 /* ============================================================
  * Storage helpers
@@ -62,6 +62,69 @@ async function repairApp() {
 }
 
 /** Standard error view for data problems, with self-repair options. */
+/* ============================================================
+ * The header that stays
+ *
+ * On a listing page the useful furniture all lives above the cards: where you
+ * came from, what you are looking at, how far through it you are, and the
+ * controls that change what is shown. Scrolling used to take all of it away
+ * at once — which is how somebody reached the bottom of a set with no way
+ * back and no way to switch to Missing without travelling to the top first.
+ *
+ * So it sticks, under the search bar. And because that whole block is most of
+ * a phone screen, it condenses once you are past the top: the title, the
+ * progress bars and the in-page search fold away, leaving the way out and the
+ * filters — the two things you reach for while reading a list. The name of
+ * what you are looking at moves up next to the back link so it is still on
+ * screen, just smaller.
+ * ============================================================ */
+
+/** The top bar is sticky and its height moves with the phone's safe-area
+ * inset, so the block below it cannot hard-code where to stop. */
+function trackTopbarHeight() {
+  const bar = document.querySelector('.topbar');
+  if (!bar) return;
+  const set = () => document.documentElement.style.setProperty('--topbar-h', bar.offsetHeight + 'px');
+  set();
+  if (window.ResizeObserver) new ResizeObserver(set).observe(bar);
+  else window.addEventListener('resize', set);
+}
+
+let _stickyHeads = [];
+
+/* Hysteresis, not a single threshold. Condensing removes ~120px from above
+ * the reader, so the page shifts up under them; with one threshold a scroll
+ * that lands near it can shrink the header, get clamped back below the line,
+ * expand, and flap. Condense late, expand early, and there is no value the
+ * page can settle at where it disagrees with itself. */
+function updateStickyHeads() {
+  const y = window.scrollY;
+  for (const el of _stickyHeads) {
+    if (!el.isConnected) continue;
+    const on = el.classList.contains('condensed');
+    if (!on && y > 80) el.classList.add('condensed');
+    else if (on && y < 24) el.classList.remove('condensed');
+  }
+}
+window.addEventListener('scroll', updateStickyHeads, { passive: true });
+
+/** Everything from the filters up, kept on screen. One per page. */
+function stickyHead(...kids) {
+  const el = h('div', { class: 'page-sticky' }, ...kids.filter(Boolean));
+  _stickyHeads = [el];          // a page replaces the whole view, so one at a time
+  updateStickyHeads();
+  return el;
+}
+
+/** The first row of it: the way out, and — once condensed — the name of the
+ * thing whose title has just folded away. */
+function stickyTop(href, label, title) {
+  return h('div', { class: 'sticky-top' },
+    href ? h('a', { class: 'back-link', href }, label) : null,
+    title ? h('span', { class: 'sticky-title' }, title) : null,
+  );
+}
+
 /** The way out, repeated at the end of the page.
  *
  * The bottom bar is fixed, so Sets / Pokémon / Binders / Scan are always
@@ -1519,9 +1582,12 @@ async function renderHome() {
     })();
   }
 
-  view.replaceChildren(...(runningBanner ? [runningBanner] : []), banner,
-    h('div', { class: 'set-filter' }, filterInput),
-    h('div', { class: 'chips' }, ...[sortCtl, newSetBtn].filter(Boolean)),
+  view.replaceChildren(...(runningBanner ? [runningBanner] : []),
+    stickyHead(
+      banner,
+      h('div', { class: 'set-filter' }, filterInput),
+      h('div', { class: 'chips' }, ...[sortCtl, newSetBtn].filter(Boolean)),
+    ),
     grid,
     hiddenSetsWrap);
 }
@@ -1995,19 +2061,20 @@ async function renderSetPage(setId) {
   }
 
   view.replaceChildren(
-    h('a', { class: 'back-link', href: '#/' }, '← All sets'),
-    h('div', { class: 'page-head' },
-      h('h1', {}, set.name),
-      ...(canTrack() ? [h('div', { class: 'prog-stack' },
-        h('div', { class: 'prog-row' }, progressLabel, progressWrap),
-        h('div', { class: 'prog-row' }, printLabel, printWrap),
-      )] : []),
+    stickyHead(
+      stickyTop('#/', '\u2190 All sets', set.name),
+      h('div', { class: 'page-head' },
+        h('h1', {}, set.name),
+        ...(canTrack() ? [h('div', { class: 'prog-stack' },
+          h('div', { class: 'prog-row' }, progressLabel, progressWrap),
+          h('div', { class: 'prog-row' }, printLabel, printWrap),
+        )] : []),
+      ),
+      h('div', { class: 'set-filter' }, searchInput),
+      chipsWrap,
     ),
-    h('div', { class: 'set-filter' }, searchInput),
-    chipsWrap,
     grid,
     hiddenWrap,
-    pageFooter('#/', '\u2190 All sets'),
   );
   renderChips();
   if (canTrack()) updateProgress();
@@ -2625,12 +2692,15 @@ async function renderPokemonList() {
   renderList('');
 
   view.replaceChildren(
-    h('div', { class: 'page-head' }, h('h1', {}, 'Pokémon')),
-    h('p', { class: 'muted', style: 'margin-top:0' }, 'Every printing of each Pokémon, across all sets.'),
-    h('div', { class: 'set-filter' }, filterInput),
-    h('div', { class: 'chips' },
-      sortSelect([['dex', 'Dex number'], ['most-owned', 'Most owned'], ['least-owned', 'Least owned']], spSort,
-        (v) => { spSort = v; lsSet('ptcg.sort.species', v); renderList(filterInput.value.trim().toLowerCase()); }),
+    stickyHead(
+      stickyTop(null, null, 'Pok\u00e9mon'),
+      h('div', { class: 'page-head' }, h('h1', {}, 'Pok\u00e9mon')),
+      h('p', { class: 'muted', style: 'margin-top:0' }, 'Every printing of each Pok\u00e9mon, across all sets.'),
+      h('div', { class: 'set-filter' }, filterInput),
+      h('div', { class: 'chips' },
+        sortSelect([['dex', 'Dex number'], ['most-owned', 'Most owned'], ['least-owned', 'Least owned']], spSort,
+          (v) => { spSort = v; lsSet('ptcg.sort.species', v); renderList(filterInput.value.trim().toLowerCase()); }),
+      ),
     ),
     list,
   );
@@ -2711,18 +2781,20 @@ async function renderPokemonPage(dexStr) {
   renderChips();
   renderGrid();
 
+  const spTitle = `#${String(sp.dex).padStart(3, '0')} ${sp.name}`;
   view.replaceChildren(
-    h('a', { class: 'back-link', href: '#/pokemon' }, '← All Pokémon'),
-    h('div', { class: 'page-head' },
-      h('h1', {}, `#${String(sp.dex).padStart(3, '0')} ${sp.name}`),
-      ...(canTrack() ? [h('div', { class: 'prog-stack' },
-        h('div', { class: 'prog-row' }, progressLabel, pWrap),
-        h('div', { class: 'prog-row' }, vLabel, vWrap),
-      )] : []),
+    stickyHead(
+      stickyTop('#/pokemon', '\u2190 All Pok\u00e9mon', spTitle),
+      h('div', { class: 'page-head' },
+        h('h1', {}, spTitle),
+        ...(canTrack() ? [h('div', { class: 'prog-stack' },
+          h('div', { class: 'prog-row' }, progressLabel, pWrap),
+          h('div', { class: 'prog-row' }, vLabel, vWrap),
+        )] : []),
+      ),
+      chipsWrap,
     ),
-    chipsWrap,
     grid,
-    pageFooter('#/pokemon', '\u2190 All Pok\u00e9mon'),
   );
   updateProgress();
 }
@@ -2812,14 +2884,16 @@ async function renderSearchPage(rawQuery) {
     }
   }
 
+  const seTitle = query ? `Search: \u201c${query}\u201d` : 'Browse cards';
   view.replaceChildren(
-    h('a', { class: 'back-link', href: '#/' }, '← All sets'),
-    h('div', { class: 'page-head' }, h('h1', {}, query ? `Search: “${query}”` : 'Browse cards')),
-    chipsWrap,
+    stickyHead(
+      stickyTop('#/', '\u2190 All sets', seTitle),
+      h('div', { class: 'page-head' }, h('h1', {}, seTitle)),
+      chipsWrap,
+    ),
     results,
     status,
     moreBtn,
-    pageFooter('#/', '\u2190 All sets'),
   );
   renderChips();
   load(true);
@@ -5660,6 +5734,8 @@ document.getElementById('import-file').addEventListener('change', (e) => {
   if (e.target.files[0]) importCollection(e.target.files[0]);
   e.target.value = '';
 });
+
+trackTopbarHeight();
 
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));

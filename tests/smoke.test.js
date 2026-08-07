@@ -251,26 +251,24 @@ const { chromium } = require('playwright');
     (await page.locator('.tcg-card').count()) === gridTiles &&
     (await page.locator('.card-row').count()) === 0);
 
-  // ---- the way out, repeated at the end of the page ----
+  // ---- the header that stays ----
   // The fixed bottom bar offers the four top-level destinations. It does not
-  // offer the page you came FROM, and that link is at the top of a hundred
-  // cards — which is how a tester ran out of ways back within a minute.
-  check('footer: a set page says at the bottom what it says at the top',
-    (await page.locator('.page-foot .back-link').count()) === 1 &&
-    (await page.textContent('.page-foot .back-link')).includes('All sets') &&
-    (await page.getAttribute('.page-foot .back-link', 'href')) === '#/');
-  await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
-  const beforeTop = page.url();
-  await page.click('.page-foot button:has-text("Top")');
-  await page.waitForFunction(() => window.scrollY === 0, null, { timeout: 5000 });
-  check('footer: ↑ Top goes up rather than anywhere', page.url() === beforeTop);
-  await page.click('.page-foot .back-link');
-  await page.waitForSelector('.set-grid .set-card');
-  check('footer: and the back link is a way out, not decoration',
-    /#\/$/.test(page.url()) && (await page.locator('.page-foot').count()) === 0);
-  // back into the set, so what follows starts where it used to
-  await page.click('.set-card:has-text("Base Set")');
-  await page.waitForSelector('.tcg-card');
+  // offer the page you came FROM, nor the filter you want to switch to, and
+  // both used to scroll away together — which is how a tester ran out of ways
+  // back within a minute.
+  check('sticky: the way out, the title, the search and the filters are one block',
+    (await page.locator('.page-sticky').count()) === 1 &&
+    (await page.locator('.page-sticky .back-link').count()) === 1 &&
+    (await page.locator('.page-sticky .page-head h1').count()) === 1 &&
+    (await page.locator('.page-sticky .set-filter input').count()) === 1 &&
+    (await page.locator('.page-sticky .chips').count()) === 1);
+  check('sticky: the grid is outside it, so it scrolls under the header',
+    (await page.locator('.page-sticky .tcg-card').count()) === 0);
+  check('sticky: and it replaces the footer that used to carry the back link',
+    (await page.locator('.page-foot').count()) === 0);
+  check('sticky: it starts unfolded, with the set name in the heading',
+    (await page.locator('.page-sticky.condensed').count()) === 0 &&
+    (await page.textContent('.page-sticky .page-head h1')) === 'Base Set');
 
   // ---- Pokémon view ----
   await page.click('.bottomnav a[data-nav=pokemon]');
@@ -289,9 +287,10 @@ const { chromium } = require('playwright');
 
   await page.click('.set-card:has-text("Charizard")');
   await page.waitForSelector('.tcg-card');
-  check('footer: a species page points back at the species list',
-    (await page.textContent('.page-foot .back-link')).includes('All Pokémon') &&
-    (await page.getAttribute('.page-foot .back-link', 'href')) === '#/pokemon');
+  check('sticky: a species page keeps its way out and its filters up top',
+    (await page.locator('.page-foot').count()) === 0 &&
+    (await page.getAttribute('.page-sticky .back-link', 'href')) === '#/pokemon' &&
+    (await page.locator('.page-sticky .chips').count()) === 1);
   check('charizard page: 4 printings across 2 sets, newest first',
     (await page.locator('.tcg-card').count()) === 4 &&
     (await page.locator('.tcg-card >> nth=0').getAttribute('data-card-id')) === 'swsh3-20');
@@ -1149,8 +1148,10 @@ const { chromium } = require('playwright');
   await page.press('#global-search-input', 'Enter');
   await page.waitForSelector('.card-grid .tcg-card');
   check('global search shows all Charizard printings', (await page.locator('.card-grid .tcg-card').count()) === 4);
-  check('footer: search results carry one too',
-    (await page.locator('.page-foot .back-link').count()) === 1);
+  check('sticky: search keeps its filters up top too',
+    (await page.locator('.page-foot').count()) === 0 &&
+    (await page.locator('.page-sticky .chips').count()) === 1 &&
+    (await page.locator('.page-sticky .back-link').count()) === 1);
   // here a chip re-runs the query, so wait for the results to land as well
   const searchChip = async (label) => {
     await page.click(`.chips button.chip:has-text("${label}")`);
@@ -1314,6 +1315,46 @@ const { chromium } = require('playwright');
     await gp.waitForSelector('h2:has-text("Server required")');
     check('no-server copy is gated (server required)', (await gp.locator('.set-card').count()) === 0);
     await gctx.close();
+  }
+
+  // ---- the header folds down once you are past the top ----
+  // Needs a short window: the fixture set is eight cards, which does not
+  // scroll on a desktop viewport, and a condense that never triggers is a
+  // condense that was never tested.
+  {
+    const sctx = await browser.newContext({ serviceWorkers: 'block', viewport: { width: 420, height: 380 } });
+    const sp = await sctx.newPage();
+    await sp.goto('http://localhost:3111/#/set/base1');
+    await sp.waitForSelector('.tcg-card');
+    check('sticky: at the top it is unfolded, showing everything',
+      (await sp.locator('.page-sticky.condensed').count()) === 0 &&
+      await sp.isVisible('.page-sticky .page-head') &&
+      await sp.isVisible('.page-sticky .set-filter'));
+    await sp.evaluate(() => window.scrollTo(0, 300));
+    await sp.waitForSelector('.page-sticky.condensed');
+    check('sticky: scrolling folds the title, progress and in-set search away',
+      !(await sp.isVisible('.page-sticky .page-head')) &&
+      !(await sp.isVisible('.page-sticky .set-filter')));
+    check('sticky: and keeps the two things you reach for while reading',
+      await sp.isVisible('.page-sticky .back-link') &&
+      await sp.isVisible('.page-sticky .chips'));
+    check('sticky: the set name moves up beside the back link',
+      await sp.isVisible('.page-sticky .sticky-title') &&
+      (await sp.textContent('.page-sticky .sticky-title')) === 'Base Set');
+    // it has to stay put, not merely exist
+    const headTop = await sp.evaluate(() => Math.round(document.querySelector('.page-sticky').getBoundingClientRect().top));
+    const barBottom = await sp.evaluate(() => Math.round(document.querySelector('.topbar').getBoundingClientRect().bottom));
+    check('sticky: it is parked directly under the search bar, not scrolled off',
+      Math.abs(headTop - barBottom) <= 2 && headTop > 0);
+    // expands early and condenses late, so a page cannot settle between the two
+    await sp.evaluate(() => window.scrollTo(0, 40));
+    await sp.waitForTimeout(200);
+    check('sticky: a nudge back up does not immediately unfold it (hysteresis)',
+      (await sp.locator('.page-sticky.condensed').count()) === 1);
+    await sp.evaluate(() => window.scrollTo(0, 0));
+    await sp.waitForFunction(() => !document.querySelector('.page-sticky.condensed'));
+    check('sticky: back at the top it unfolds again', true);
+    await sctx.close();
   }
 
   // ---- signing in puts you back where you were sent from ----

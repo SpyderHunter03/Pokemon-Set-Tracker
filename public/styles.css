@@ -123,6 +123,56 @@ a { color: var(--accent-soft); text-decoration: none; }
   margin-bottom: 8px;
 }
 
+/* ---------- the header that stays ----------
+   Everything above the cards is furniture you reach for WHILE reading the
+   list: the way out, what you are looking at, and the controls. It used to
+   scroll away as a block. Now it sticks under the search bar, and folds down
+   to the two things worth the room once you are past the top. */
+.page-sticky {
+  position: sticky;
+  /* measured in JS: the bar above is sticky too, and its height moves with
+     the phone's safe-area inset */
+  top: var(--topbar-h, 61px);
+  z-index: 15;
+  background: var(--bg);
+  /* bleed through the view's own padding so cards pass behind it, not beside it */
+  margin: 0 -14px;
+  padding: 12px 14px 0;
+}
+
+/* swallow the view's top padding only when nothing is above it — home can put
+   a build-progress banner first, and pulling up over that would overlap it */
+.page-sticky:first-child { margin-top: -16px; }
+
+.sticky-top { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+
+/* the name of the thing, for when its heading has just folded away */
+.sticky-title {
+  display: none;
+  font-weight: 700;
+  font-size: 15px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.page-sticky .chips { margin-bottom: 0; padding-bottom: 12px; }
+
+/* condensed: keep the way out and the controls, fold the rest */
+.page-sticky.condensed { border-bottom: 1px solid var(--border); }
+
+.page-sticky.condensed .page-head,
+.page-sticky.condensed .set-filter,
+.page-sticky.condensed .stats-banner,
+.page-sticky.condensed .signin-banner,
+.page-sticky.condensed > p { display: none; }
+
+.page-sticky.condensed .sticky-title { display: block; }
+
+.page-sticky.condensed .back-link { margin-bottom: 0; }
+
+.page-sticky.condensed .sticky-top { padding-bottom: 8px; }
+
 /* The way out, repeated at the end of a page. A long list scrolls its own
    back link off the top, and the fixed bottom bar only offers the four
    top-level destinations — not the one you actually came from. */
