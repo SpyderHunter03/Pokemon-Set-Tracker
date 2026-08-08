@@ -2991,6 +2991,27 @@ function stopScanner() {
 
 async function renderScanPage() {
   stopScanner();
+  // The scanner is a Premium feature (and still baking — "coming soon" is
+  // the honest label). Admins see the working page for testing; everyone
+  // else gets told what it will be, not a half-broken tool.
+  if (serverAvailable) {
+    let m = null;
+    if (auth) { try { m = await ensureMe(); } catch { /* offline — fall through to the pitch */ } }
+    if (!m || m.plan !== 'premium') {
+      view.replaceChildren(h('div', { class: 'center', style: 'padding:40px 16px; max-width:420px; margin:0 auto' },
+        h('div', { style: 'font-size:42px' }, '📷'),
+        h('h1', { style: 'margin:10px 0 6px' }, 'Card scanner'),
+        h('p', { class: 'muted', style: 'margin:0 0 14px' },
+          'Point your camera at a card and find out on the spot whether you already have it. Coming soon, as part of Premium.'),
+        auth
+          ? (m && m.upgradeUrl
+            ? h('a', { class: 'btn', href: m.upgradeUrl, target: '_blank', rel: 'noopener' }, '⭐ Get Premium — $2.99/mo')
+            : h('p', { class: 'muted small', style: 'margin:0' }, 'Premium sign-ups open soon.'))
+          : h('button', { class: 'btn', onclick: () => goToAccount() }, 'Sign in first'),
+      ));
+      return;
+    }
+  }
   const resultsEl = h('div', {});
   const statusEl = h('p', { class: 'muted', style: 'text-align:center' }, 'Point your camera at a card, line it up with the frame, and capture.');
 
@@ -3445,7 +3466,30 @@ function renderAccountPage(tab) {
   })();
 
   if (tab === 'account') {
+    // Which tier, and the door to the other one. Filled in async — the plan
+    // lives server-side and only the server may say it.
+    const planCard = settingsCard(
+      h('h3', { style: 'margin:0 0 6px' }, 'Plan'),
+      h('p', { class: 'muted small', style: 'margin:0' }, 'Checking…'));
+    (async () => {
+      let m = null;
+      try { m = await ensureMe(); } catch { /* leave the checking line */ }
+      if (!m) return;
+      planCard.replaceChildren(
+        h('h3', { style: 'margin:0 0 6px' }, 'Plan'),
+        m.plan === 'premium'
+          ? h('p', { style: 'margin:0' }, '⭐ ', h('strong', {}, 'Premium'),
+            m.admin ? ' (administrator accounts are always Premium).' : ' — unlimited binders, and the card scanner when it ships.')
+          : h('div', {},
+            h('p', { style: 'margin:0 0 4px' }, h('strong', {}, 'Free'), ' — full collection tracking and one binder.'),
+            h('p', { class: 'muted small', style: 'margin:0 0 10px' }, 'Premium adds unlimited binders, and the card scanner when it ships.'),
+            m.upgradeUrl
+              ? h('a', { class: 'btn small', href: m.upgradeUrl, target: '_blank', rel: 'noopener' }, '⭐ Upgrade — $2.99/mo')
+              : h('p', { class: 'muted small', style: 'margin:0' }, 'Premium sign-ups open soon.')),
+      );
+    })();
     addTo(page,
+      planCard,
       settingsCard(
         h('h3', { style: 'margin:0 0 6px' }, 'Your account'),
         h('p', { style: 'margin:0 0 4px' }, 'Signed in as ', h('strong', {}, auth.username), '.'),

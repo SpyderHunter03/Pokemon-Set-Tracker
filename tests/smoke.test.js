@@ -77,6 +77,29 @@ const { chromium } = require('playwright');
   await page.reload();
   await page.waitForSelector('.set-card');
 
+  // ---- plans: the scanner page pitches Premium to a free account ----
+  await page.goto('http://localhost:3111/#/scan');
+  await page.waitForSelector('#view:has-text("Coming soon")');
+  check('free plan: the scan page is a coming-soon pitch, not the scanner', true);
+  // Flip this user to Premium through the real billing webhook — everything
+  // later in the suite (the scanner itself, a second binder) is the paid side.
+  {
+    const tok = await page.evaluate(() => JSON.parse(localStorage.getItem('ptcg.auth')).token);
+    const meRes = await (await fetch('http://localhost:3111/api/me', { headers: { Authorization: 'Bearer ' + tok } })).json();
+    const uid = decodeURIComponent(meRes.upgradeUrl.split('checkout[custom][user_id]=')[1]);
+    const body = JSON.stringify({ meta: { event_name: 'subscription_created', custom_data: { user_id: uid } }, data: { attributes: { status: 'active' } } });
+    const sig = require('crypto').createHmac('sha256', 'test-ls-secret').update(body).digest('hex');
+    const flip = await (await fetch('http://localhost:3111/api/billing/lemonsqueezy', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Signature': sig }, body,
+    })).json();
+    if (!flip.ok) throw new Error('billing webhook refused the test upgrade');
+  }
+  // the app caches /api/me per page load, so the new plan shows after a real
+  // reload — the same thing a paying user's post-checkout redirect gives them
+  await page.goto('http://localhost:3111/#/');
+  await page.reload();
+  await page.waitForSelector('.set-card');
+
   const migrated = await coll();
   check('v1 → v2 migration', migrated && migrated['base1-58'] && migrated['base1-58'].normal === 2);
   check('signed in: stats banner shown', (await page.locator('#stats-banner').count()) === 1);

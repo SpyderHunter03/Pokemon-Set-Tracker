@@ -183,6 +183,11 @@ try { db.exec('CREATE UNIQUE INDEX IF NOT EXISTS users_oidc ON users (oidc_iss, 
 // path that expects its owner to be signed in.
 try { db.exec('ALTER TABLE binders ADD COLUMN share TEXT'); } catch { /* already present */ }
 try { db.exec('CREATE UNIQUE INDEX IF NOT EXISTS binders_share ON binders (share) WHERE share IS NOT NULL'); } catch { /* already present */ }
+// Which tier an account is on. 'free' or 'premium' — set by the billing
+// webhook, never by the user. Admins count as premium without the column
+// saying so (planOf below), so flipping this by hand is only ever needed
+// for comps.
+try { db.exec("ALTER TABLE users ADD COLUMN plan TEXT NOT NULL DEFAULT 'free'"); } catch { /* already present */ }
 // Whether a shared binder admits which cards its owner actually holds. On by
 // default, because "here is my binder" is what sharing one usually means —
 // but a link is also a partial inventory of somebody's house, so it should be
@@ -246,7 +251,7 @@ function writeJSONAtomic(file, obj) {
 
 // ---------- user & collection queries ----------
 
-const rowToUser = (r) => (r ? { id: r.id, username: r.username, display: r.display, salt: r.salt, hash: r.hash, created: r.created, admin: !!r.admin, email: r.email || null, emailVerified: !!r.email_verified, totpSecret: r.totp_secret || null, totpEnabled: !!r.totp_enabled, oidcIss: r.oidc_iss || null, oidcSub: r.oidc_sub || null } : null);
+const rowToUser = (r) => (r ? { id: r.id, username: r.username, display: r.display, salt: r.salt, hash: r.hash, created: r.created, admin: !!r.admin, email: r.email || null, emailVerified: !!r.email_verified, totpSecret: r.totp_secret || null, totpEnabled: !!r.totp_enabled, oidcIss: r.oidc_iss || null, oidcSub: r.oidc_sub || null, plan: r.plan === 'premium' ? 'premium' : 'free' } : null);
 
 const _getUserById = db.prepare('SELECT * FROM users WHERE id = ?');
 const _getUserByName = db.prepare('SELECT * FROM users WHERE username = ?');
@@ -1296,6 +1301,14 @@ function isAdminUser(user) {
   // accounts created before the admin flag existed: earliest registration wins
   const earliest = rowToUser(_earliestUser.get());
   return !!earliest && earliest.id === user.id;
+}
+
+/** Which tier this account gets treated as. Admins are premium without the
+ * column saying so; everyone else is what the billing webhook last wrote.
+ * Null (not signed in) is free, so callers can pass whatever they hold. */
+function planOf(user) {
+  if (!user) return 'free';
+  return (isAdminUser(user) || user.plan === 'premium') ? 'premium' : 'free';
 }
 
 function pushLog(line) {
@@ -2792,13 +2805,60 @@ async function handleApi(req, res, pathname, ip, url) {
     });
   }
 
+  /* ---- billing: the Lemon Squeezy webhook ----
+   * Public by necessity (Lemon Squeezy is the caller, not a user), guarded by
+   * an HMAC signature over the RAW body with the shared webhook secret
+   * (PTCG_LS_WEBHOOK_SECRET, set when creating the webhook in their
+   * dashboard). The checkout link carries the account id as custom data;
+   * every subscription event echoes it back, and the only thing this
+   * endpoint can do is set that account's plan column. Idempotent by
+   * construction — Lemon Squeezy retries are harmless. */
+  if (pathname === '/api/billing/lemonsqueezy' && req.method === 'POST') {
+    const secret = (process.env.PTCG_LS_WEBHOOK_SECRET || '').trim();
+    if (!secret) return sendJSON(res, 503, { error: 'Billing is not configured on this server' });
+    const raw = await readRawBody(req, 1024 * 1024).catch(() => null);
+    if (!raw) return sendJSON(res, 400, { error: 'Empty body' });
+    const theirs = String(req.headers['x-signature'] || '');
+    const ours = crypto.createHmac('sha256', secret).update(raw).digest('hex');
+    const a = Buffer.from(theirs, 'utf8'), b = Buffer.from(ours, 'utf8');
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+      return sendJSON(res, 401, { error: 'Bad signature' });
+    }
+    let evt;
+    try { evt = JSON.parse(raw.toString('utf8')); } catch { return sendJSON(res, 400, { error: 'Not JSON' }); }
+    const eventName = evt && evt.meta && evt.meta.event_name;
+    if (!/^subscription_/.test(String(eventName || ''))) {
+      return sendJSON(res, 200, { ok: true, ignored: eventName || null });   // orders etc. — not ours
+    }
+    const uid = evt.meta && evt.meta.custom_data && evt.meta.custom_data.user_id;
+    const target = typeof uid === 'string' ? getUserById(uid) : null;
+    if (!target) return sendJSON(res, 200, { ok: true, ignored: 'no such account' });   // 200: retrying won't help
+    const status = String((evt.data && evt.data.attributes && evt.data.attributes.status) || '');
+    // Premium for every living status — including 'cancelled', which in Lemon
+    // Squeezy means "not renewing but paid through the period". The end of the
+    // road is subscription_expired / status 'expired': back to free, keeping
+    // everything ever made (the binder gate above is creation-only).
+    const premium = eventName !== 'subscription_expired' && status !== 'expired' && status !== 'refunded';
+    db.prepare('UPDATE users SET plan = ? WHERE id = ?').run(premium ? 'premium' : 'free', target.id);
+    console.log(`Billing: ${eventName} (${status}) → ${target.username} is ${premium ? 'premium' : 'free'}`);
+    return sendJSON(res, 200, { ok: true, plan: premium ? 'premium' : 'free' });
+  }
+
   // authenticated routes
   const user = authUser(req);
   if (!user) return sendJSON(res, 401, { error: 'Not signed in' });
 
   if (pathname === '/api/me' && req.method === 'GET') {
+    // upgradeUrl: the Lemon Squeezy checkout link with this account's id
+    // riding along as custom data, so the webhook knows whose plan to flip.
+    // Built here, not client-side: the user id never needs to be public.
+    const lsBase = (process.env.PTCG_LS_CHECKOUT_URL || '').trim();
+    const upgradeUrl = lsBase && planOf(user) !== 'premium'
+      ? lsBase + (lsBase.includes('?') ? '&' : '?') + 'checkout[custom][user_id]=' + encodeURIComponent(user.id)
+      : null;
     return sendJSON(res, 200, {
       username: user.display, admin: isAdminUser(user),
+      plan: planOf(user), upgradeUrl,
       email: user.email, emailVerified: user.emailVerified,
       totpEnabled: user.totpEnabled,
       recoveryLeft: user.totpEnabled ? _countRecovery.get(user.id).n : 0,
@@ -3353,6 +3413,14 @@ async function handleApi(req, res, pathname, ip, url) {
     const size = BINDER_SIZES.includes(body.size) ? body.size : null;
     const color = BINDER_COLORS.includes(body.color) ? body.color : BINDER_COLORS[0];
     if (!name || !size) return sendJSON(res, 400, { error: 'A name and a pocket size (2–5) are required' });
+    // The free tier includes ONE binder; Premium removes the wall (admins are
+    // premium by definition). Enforced here and only here — a lapsed Premium
+    // account keeps every binder it made, can read and edit them all, and
+    // simply can't create MORE until it upgrades again. Nothing is ever
+    // deleted or locked over money.
+    if (planOf(user) !== 'premium' && _bindersOf.all(user.id).length >= 1) {
+      return sendJSON(res, 402, { error: 'Free accounts include one binder — Premium unlocks unlimited binders', premiumRequired: true });
+    }
     if (_bindersOf.all(user.id).length >= 100) return sendJSON(res, 400, { error: 'Binder limit reached (100)' });
     const perPage = size * size;
     let slots = {}, pages = 1, skipped = 0;
