@@ -65,7 +65,11 @@ useradd --system --home /var/lib/ptcg-tracker --create-home --shell /usr/sbin/no
 
 git clone https://github.com/SpyderHunter03/Pokemon-Set-Tracker /opt/ptcg-tracker
 cd /opt/ptcg-tracker && npm install --omit=dev   # sharp (image uploads), nodemailer (mail), qrcode
-# the service writes uploads + the scanner-index cache into public/cdn:
+# public/cdn is gitignored, so a fresh clone doesn't have it — and it must
+# exist BEFORE the service starts (the unit lists it in ReadWritePaths, and
+# systemd refuses to start if a listed path is missing). The service writes
+# uploads + the scanner-index cache there.
+mkdir -p /opt/ptcg-tracker/public/cdn
 chown -R ptcg:ptcg /opt/ptcg-tracker/public/cdn
 ```
 
