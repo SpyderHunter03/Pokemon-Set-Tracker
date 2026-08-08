@@ -119,8 +119,45 @@ keeps strangers out exactly as before.
 
 Cloudflare Zero Trust → Networks → Tunnels → **Create tunnel** (call it
 `ptcg-tracker`). Public hostname: `tracker.yourdomain.com` → service
-`http://localhost:3000`. Run its connector install command on east. Both
-connectors (API's and tracker's) coexist happily on one box.
+`http://localhost:3000`.
+
+**Do NOT run the dashboard's connector install command** — it hardcodes
+the service name `cloudflared.service`, which the API's connector already
+owns on this box, so a second install refuses. The binary is already
+installed; the second tunnel just needs its own unit. Copy the **token**
+out of the dashboard's install command (the long `eyJ…` string) and:
+
+```bash
+mkdir -p /etc/cloudflared-tracker
+printf 'TUNNEL_TOKEN=eyJ…\n' > /etc/cloudflared-tracker/env
+chmod 600 /etc/cloudflared-tracker/env
+
+cat > /etc/systemd/system/cloudflared-tracker.service <<'EOF'
+[Unit]
+Description=cloudflared connector (ptcg-tracker tunnel)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+TimeoutStartSec=0
+EnvironmentFile=/etc/cloudflared-tracker/env
+ExecStart=/usr/bin/cloudflared --no-autoupdate tunnel run
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now cloudflared-tracker
+```
+
+(`cloudflared tunnel run` reads `TUNNEL_TOKEN` from the environment —
+same effect as the installer's `--token`, without a secret in the unit
+file.) The dashboard shows the tunnel's connector HEALTHY within seconds;
+the API's original `cloudflared.service` is untouched.
 
 ### 5. Prove it
 
