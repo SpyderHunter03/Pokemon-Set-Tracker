@@ -3690,6 +3690,11 @@ function shutdown() {
   closing = true;
   try { db.close(); } catch { /* already closed */ }
   server.close(() => process.exit(0));
+  // server.close() politely waits for idle keep-alive sockets (every browser
+  // tab holds one), which turns a 10ms shutdown into the 2s failsafe below —
+  // and during a deploy that whole wait is downtime. Idle connections can be
+  // dropped instantly; requests actually in flight still get to finish.
+  try { server.closeIdleConnections(); } catch { /* older Node */ }
   setTimeout(() => process.exit(0), 2000).unref();
 }
 process.on('SIGTERM', shutdown);
