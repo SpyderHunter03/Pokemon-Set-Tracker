@@ -32,6 +32,9 @@ self.PTCG_CONFIG = {
    *   cdnBase: 'https://pub-xxxxxxxx.r2.dev'    (your own R2 bucket)
    */
   cdnBase: 'https://pub-828f8f41b9f543f88ccae1f6ff84c2c5.r2.dev',
+  /* Where brand-new visitors are sent to learn what this is (the marketing
+   * site). null/absent = the app's own /home page. */
+  homeUrl: 'https://www.pkmnmasterset.com',
   /* Language shown on first launch (user can switch in-app if more
    * languages were downloaded with --langs). */
   defaultLanguage: 'en',

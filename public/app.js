@@ -21,7 +21,7 @@ function lsSet(key, val) { localStorage.setItem(key, JSON.stringify(val)); }
     const seen = lsGet('ptcg.visited') || lsGet('ptcg.auth')
       || Object.keys(lsGet('ptcg.collection.v2') || {}).length > 0;
     lsSet('ptcg.visited', true);
-    if (!deepLink && !seen) location.replace('/home');
+    if (!deepLink && !seen) location.replace((self.PTCG_CONFIG && self.PTCG_CONFIG.homeUrl) || '/home');
   } catch { /* storage blocked — just show the app */ }
 })();
 

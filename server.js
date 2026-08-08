@@ -1237,10 +1237,18 @@ const MIME = {
   '.woff2': 'font/woff2',
 };
 
+/* Hostnames whose ROOT is the marketing page instead of the app —
+ * PTCG_HOME_HOSTS=www.pkmnmasterset.com,pkmnmasterset.com. Same service,
+ * same tunnel; the Host header decides which front the visitor sees. */
+const HOME_HOSTS = (process.env.PTCG_HOME_HOSTS || '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+
 function serveStatic(req, res, urlPath) {
   let rel = decodeURIComponent(urlPath);
-  if (rel === '/' || rel === '') rel = '/index.html';
-  if (rel === '/home') rel = '/home.html';   // the marketing front door, at a pretty URL
+  if (rel === '/' || rel === '') {
+    const host = String(req.headers.host || '').toLowerCase().split(':')[0];
+    rel = HOME_HOSTS.includes(host) ? '/home.html' : '/index.html';
+  }
+  if (rel === '/home') rel = '/home.html';   // the marketing front door, at a pretty URL on the app host too
   const file = path.normalize(path.join(PUBLIC_DIR, rel));
   if (!file.startsWith(PUBLIC_DIR)) { res.writeHead(403); res.end('Forbidden'); return; }
   fs.stat(file, (err, stat) => {

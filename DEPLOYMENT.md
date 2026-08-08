@@ -23,7 +23,7 @@ GitHub Actions (deploy)          ← fires ONLY on a green CI run on main
    ▼
 east (Vultr)                     ← deploy/deploy-node.sh: update, restart,
    ptcg-tracker.service            verify the running process reports the
-   tracker.yourdomain.com          deployed commit — or roll back
+   mstr.pkmnmasterset.com          deployed commit — or roll back
 ```
 
 Branches: **`dev`** is where you work; **`main`** is production and every
@@ -101,6 +101,8 @@ PTCG_API_TOKEN=ptcg_live_…
 # behind the tunnel every visitor looks like localhost without this —
 # rate limiting and lockouts would count everyone as one person
 PTCG_CLIENT_IP_HEADER=cf-connecting-ip
+# hostnames whose ROOT serves the marketing page instead of the app
+PTCG_HOME_HOSTS=www.pkmnmasterset.com,pkmnmasterset.com
 ```
 
 ### 3. The service
@@ -118,8 +120,18 @@ keeps strangers out exactly as before.
 ### 4. The tunnel (its own, not the API's)
 
 Cloudflare Zero Trust → Networks → Tunnels → **Create tunnel** (call it
-`ptcg-tracker`). Public hostname: `tracker.yourdomain.com` → service
-`http://localhost:3000`.
+`ptcg-tracker`). Public hostnames, all pointing at `http://localhost:3000`
+(one tunnel, one connector, one service — the Host header decides which
+face the visitor gets):
+
+| Hostname | What it serves |
+|---|---|
+| `mstr.pkmnmasterset.com` | the tracker app |
+| `www.pkmnmasterset.com` | the marketing page (needs `PTCG_HOME_HOSTS`, step 2) |
+| `pkmnmasterset.com` | same — the apex is just www without the www |
+
+(The card API's own tunnel carries `api.pkmnmasterset.com` →
+`http://localhost:3400`; that's configured on ITS tunnel, not this one.)
 
 **Do NOT run the dashboard's connector install command** — it hardcodes
 the service name `cloudflared.service`, which the API's connector already
@@ -164,7 +176,9 @@ the API's original `cloudflared.service` is untouched.
 ```bash
 curl -s http://localhost:3000/api/app-config | grep -o '"remoteCatalog":"[^"]*"\|"catalogViaApi":[a-z]*'
 #   → "remoteCatalog":"http://localhost:3400/v1"  "catalogViaApi":true
-curl -sI https://tracker.yourdomain.com/ | head -1
+curl -sI https://mstr.pkmnmasterset.com/ | head -1
+curl -s https://www.pkmnmasterset.com/ | grep -o '<title>[^<]*'
+#   → the marketing page, not the app
 # in the browser: claim the setup code from the journal, then Administration →
 # the update check should say it is up to date (through the API), and on the
 # API side the token's spend is visible:
@@ -214,7 +228,7 @@ acquisition). One subscription product: Tracker Premium, $2.99/mo.
    **⋯ menu → Create payment link**. Copy the `https://buy.stripe.com/…`
    URL.
 2. **Developers → Webhooks → Add endpoint**:
-   `https://tracker.yourdomain.com/api/billing/stripe`, subscribed to
+   `https://mstr.pkmnmasterset.com/api/billing/stripe`, subscribed to
    `checkout.session.completed`, `customer.subscription.updated`,
    `customer.subscription.deleted`. Copy the signing secret (`whsec_…`).
 3. Two lines in `/etc/ptcg-tracker/env` (comments on their own lines!)
