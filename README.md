@@ -55,7 +55,7 @@ Without those variables, pulls fall back to reading `catalog.db` straight off a 
 
 ## Running your own copy
 
-Not currently offered. The pieces that used to make self-hosting a one-liner (the Docker files, the systemd unit, the Proxmox Helper-Script) are still in the repository and its history, but they are **unsupported and undocumented for now** — the hosting model is being reworked, and local installs will come back in some form once that settles. Use the hosted site in the meantime.
+Not currently offered. The pieces that used to make self-hosting a one-liner (the Docker files, the systemd unit, the Proxmox Helper-Script) are still in the repository, and their old documentation is preserved in [LEGACY-DEPLOY.md](LEGACY-DEPLOY.md) — but they are **unsupported for now** while the hosting model is reworked; local installs will come back in some form once that settles. Use the hosted site in the meantime.
 
 ## The maintainer workspace
 
