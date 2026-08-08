@@ -1,11 +1,10 @@
 # Deployment & CI/CD
 
-> **Maintainer notes.** This documents how the hosted deployment runs
-> today: one Vultr box shared with the TCG Card API, deployed by GitHub
-> Actions on every green push to main. Local installs are not currently
-> offered; the old self-host flow (Proxmox LXC / Docker / `ptcg-update`)
-> is preserved in **[LEGACY-DEPLOY.md](LEGACY-DEPLOY.md)** for whenever
-> they return.
+> **This file is one thing only: how the tracker gets onto, and stays on,
+> the east Vultr box.** Publishing the card database to R2 lives in
+> **[PUBLISHING.md](PUBLISHING.md)**; the retired self-host flow (Proxmox
+> LXC / Docker / `ptcg-update`) lives in
+> **[LEGACY-DEPLOY.md](LEGACY-DEPLOY.md)**.
 
 ## The flow at a glance
 
@@ -38,47 +37,6 @@ npm install --no-save playwright sharp
 npx playwright install chromium
 node tests/run-tests.js
 ```
-
-## The card database on Cloudflare R2
-
-The whole card database — data AND images — lives in a Cloudflare R2 bucket. The **maintainer workspace** (see README, "The maintainer workspace") maintains the database (in-app download/updates, admin uploads, custom printings) and publishes it; the hosted tracker consumes it through the card API, and images hotlink the bucket directly.
-
-Cost: full English database (≈5–8 GB with both qualities) fits R2's always-free 10 GB tier, and R2 egress is free at any volume — $0 regardless of popularity.
-
-**One-time setup (Cloudflare dashboard):**
-
-1. **R2 → Create bucket** (e.g. `pokemon-cards`).
-2. Bucket **Settings → Public access** → enable the `r2.dev` subdomain (or attach a custom domain). Note the public URL (`https://pub-….r2.dev`).
-3. Bucket **Settings → CORS policy** — required, the app fetches JSON cross-origin:
-
-   ```json
-   [{ "AllowedOrigins": ["*"], "AllowedMethods": ["GET"], "AllowedHeaders": ["*"], "MaxAgeSeconds": 86400 }]
-   ```
-
-4. **Manage R2 API Tokens → Create token**, *Object Read & Write*, scoped to the bucket. Note your Account ID (dashboard sidebar), Access Key ID and Secret.
-
-**Publish** — from wherever the database files live. The script talks to the R2 API directly (S3-compatible, signed with your token); it does NOT run through the app, and only works with your secret token. The dashboard's drag-and-drop caps at ~100 files, so this is the practical route for a 20k-file database.
-
-*From your Windows PC* (needs Node.js; database at `public\cdn` — build it with `node scripts\build-data.js` or copy it from the maintainer workspace, which preserves custom printings and uploaded scans):
-
-```powershell
-# once: create r2.env in the repo root (gitignored) with the four values —
-# R2_ACCOUNT_ID / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY / R2_BUCKET
-.\scripts\publish-images.ps1 --dry-run   # preview
-.\scripts\publish-images.ps1             # publish
-```
-
-*From the maintainer workspace (an LXC)*:
-
-```bash
-cd /opt/pokemon-set-tracker
-R2_ACCOUNT_ID=<account-id> R2_ACCESS_KEY_ID=<key> R2_SECRET_ACCESS_KEY=<secret> \
-R2_BUCKET=pokemon-cards node scripts/publish-images.js
-```
-
-*Copying the database from the workspace LXC to your PC* (keeps custom printings + uploaded scans): on the Proxmox host — `pct exec <ctid> -- tar czf /tmp/cdn.tgz -C /opt/pokemon-set-tracker/public cdn` then `pct pull <ctid> /tmp/cdn.tgz /root/cdn.tgz`, move that file to your PC (WinSCP/scp), and extract it so it lands at `public\cdn` in the repo.
-
-Zero dependencies (SigV4 is hand-rolled), idempotent — re-run after any database update, admin image upload, or new custom printing; only new/changed files transfer. Images upload immutable; data JSON uploads with a 60s cache so updates propagate fast. `--dry-run` previews, `--langs en` filters, `--images-only` skips data. Tip: keep the env vars in `/root/.r2.env` and run `env $(cat /root/.r2.env) node scripts/publish-images.js`.
 
 ## Hosting on the API's Vultr box (the current production home)
 
@@ -217,6 +175,6 @@ the backup list. The catalog, as ever, re-pulls itself.
 | API logs | `journalctl -u card-api -f` |
 | Restart tracker | `systemctl restart ptcg-tracker` |
 | What's running | `curl -s localhost:3000/api/app-config` → `release` is the deployed commit |
-| New sets released | publish from the maintainer workspace, then in-app: 👤 → Administration → **Update card database** |
+| New sets released | publish per [PUBLISHING.md](PUBLISHING.md), then in-app: 👤 → Administration → **Update card database** |
 | Mint/inspect API tokens | `cd /opt/card-api && sudo -u cardapi DATA_DIR=/var/lib/card-api node scripts/tokens.js …` |
 | Back up | `/var/lib/ptcg-tracker` (+ `/var/lib/card-api` while east is the only API node) |
