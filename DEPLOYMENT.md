@@ -81,17 +81,23 @@ mkdir -p /etc/ptcg-tracker && touch /etc/ptcg-tracker/env && chmod 600 /etc/ptcg
 
 `/etc/ptcg-tracker/env`:
 
+Careful with comments: **systemd env files only allow them on their own
+lines** — a `#` after a value becomes part of the value (and the service
+then tries to listen on a "hostname" with half a sentence in it).
+
 ```ini
 PORT=3000
-HOST=127.0.0.1                    # only the tunnel talks to it, and the tunnel is local
-                                  # (the API can't do this — its cluster peers dial in — but the tracker has no peers)
+# only the tunnel talks to it, and the tunnel is local (the API can't
+# bind loopback — its cluster peers dial in — but the tracker has no peers)
+HOST=127.0.0.1
 DATA_DIR=/var/lib/ptcg-tracker
 # the card API is on the SAME box — talk to it over localhost, not the
 # public hostname (no Cloudflare round-trip for catalog pulls)
 PTCG_API_BASE=http://localhost:3400
-PTCG_API_TOKEN=ptcg_live_…        # mint on this box: cd /opt/card-api &&
-                                  #   sudo -u cardapi DATA_DIR=/var/lib/card-api \
-                                  #   node scripts/tokens.js issue --name "Set Tracker (hosted)" --plan app
+# mint on this box: cd /opt/card-api &&
+#   sudo -u cardapi DATA_DIR=/var/lib/card-api \
+#   node scripts/tokens.js issue --name "Set Tracker (hosted)" --plan app
+PTCG_API_TOKEN=ptcg_live_…
 # behind the tunnel every visitor looks like localhost without this —
 # rate limiting and lockouts would count everyone as one person
 PTCG_CLIENT_IP_HEADER=cf-connecting-ip
