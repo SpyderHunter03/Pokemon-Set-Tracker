@@ -108,8 +108,8 @@ function fail(msg) {
     PORT: '3111',
     DATA_DIR: path.join(ROOT, '.test-data'),
     PTCG_SOURCE_API: 'http://localhost:3999/v2',
-    PTCG_LS_WEBHOOK_SECRET: 'test-ls-secret',
-    PTCG_LS_CHECKOUT_URL: 'https://example.lemonsqueezy.com/buy/premium',
+    PTCG_STRIPE_WEBHOOK_SECRET: 'whsec_test_secret',
+    PTCG_STRIPE_CHECKOUT_URL: 'https://buy.stripe.com/test_premium',
   }, true);
   await waitForPort(3111).catch((e) => fail(e.message));
   // the install is unclaimed, so it printed a code; the browser suite needs it
@@ -280,15 +280,17 @@ function fail(msg) {
   }
 
   // ---- plans and the billing webhook ----
-  // Free includes one binder; Premium removes the wall; the Lemon Squeezy
-  // webhook (HMAC over the raw body) is the only thing that flips the plan.
+  // Free includes one binder; Premium removes the wall; the Stripe webhook
+  // (Stripe-Signature: t=…,v1=HMAC(t + "." + body)) is the only thing that
+  // flips the plan.
   {
     const crypto = require('crypto');
     const reg = await jfetch('http://localhost:3111/api/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'freeloader', password: 'password123' }) });
     const fAuth = { 'Content-Type': 'application/json', Authorization: 'Bearer ' + reg.token };
     const meFree = await jfetch('http://localhost:3111/api/me', { headers: fAuth });
     check('plans: a fresh account is free, and is told so', meFree.plan === 'free');
-    check('plans: a free account gets a personalised upgrade link', typeof meFree.upgradeUrl === 'string' && meFree.upgradeUrl.includes('checkout%5Bcustom%5D%5Buser_id%5D=') === false && meFree.upgradeUrl.includes('checkout[custom][user_id]='));
+    check('plans: a free account gets a personalised upgrade link',
+      typeof meFree.upgradeUrl === 'string' && meFree.upgradeUrl.startsWith('https://buy.stripe.com/') && meFree.upgradeUrl.includes('client_reference_id='));
 
     const first = await jfetch('http://localhost:3111/api/binders', { method: 'POST', headers: fAuth, body: JSON.stringify({ name: 'The One Binder', size: 3 }) });
     check('plans: the free binder works', !!(first.binder && first.binder.id));
@@ -298,52 +300,54 @@ function fail(msg) {
       secondRes.status === 402 && second.premiumRequired === true && /Premium/.test(second.error));
 
     // the webhook needs the account id — take it from the upgrade link
-    const userId = decodeURIComponent(meFree.upgradeUrl.split('checkout[custom][user_id]=')[1]);
-    const hook = (eventName, status, uid, secret) => {
-      const body = JSON.stringify({
-        meta: { event_name: eventName, custom_data: { user_id: uid } },
-        data: { attributes: { status } },
-      });
-      return fetch('http://localhost:3111/api/billing/lemonsqueezy', {
+    const userId = decodeURIComponent(meFree.upgradeUrl.split('client_reference_id=')[1]);
+    const send = (evt, { secret = 'whsec_test_secret', at = Math.floor(Date.now() / 1000) } = {}) => {
+      const body = JSON.stringify(evt);
+      const sig = crypto.createHmac('sha256', secret).update(at + '.' + body).digest('hex');
+      return fetch('http://localhost:3111/api/billing/stripe', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Signature': crypto.createHmac('sha256', secret).update(body).digest('hex') },
+        headers: { 'Content-Type': 'application/json', 'Stripe-Signature': `t=${at},v1=${sig}` },
         body,
       });
     };
+    const checkoutDone = (uid, customer) => ({ type: 'checkout.session.completed',
+      data: { object: { mode: 'subscription', client_reference_id: uid, customer } } });
+    const subEvent = (type, customer, status, extra) => ({ type,
+      data: { object: { customer, status, ...(extra || {}) } } });
 
-    const badSig = await hook('subscription_created', 'active', userId, 'wrong-secret');
+    const badSig = await send(checkoutDone(userId, 'cus_test1'), { secret: 'whsec_wrong' });
+    const stale = await send(checkoutDone(userId, 'cus_test1'), { at: Math.floor(Date.now() / 1000) - 3600 });
     const meStillFree = await jfetch('http://localhost:3111/api/me', { headers: fAuth });
-    check('billing: a webhook with a bad signature is refused and changes nothing',
+    check('billing: a bad signature is refused and changes nothing',
       badSig.status === 401 && meStillFree.plan === 'free');
+    check('billing: a correctly signed but hour-old event is refused (replay window)',
+      stale.status === 401);
 
-    const paid = await hook('subscription_created', 'active', userId, 'test-ls-secret');
+    const paid = await send(checkoutDone(userId, 'cus_test1'));
     const mePaid = await jfetch('http://localhost:3111/api/me', { headers: fAuth });
-    check('billing: a signed subscription_created makes the account premium (and the upgrade link retires)',
+    check('billing: a signed checkout.session.completed makes the account premium (and the upgrade link retires)',
       paid.status === 200 && mePaid.plan === 'premium' && mePaid.upgradeUrl === null);
 
     const third = await jfetch('http://localhost:3111/api/binders', { method: 'POST', headers: fAuth, body: JSON.stringify({ name: 'Two', size: 3 }) });
     check('billing: premium removes the binder wall', !!(third.binder && third.binder.id));
 
-    // cancelled = paid through the period — still premium until it expires
-    await hook('subscription_updated', 'cancelled', userId, 'test-ls-secret');
+    // cancelled-but-paid-through-the-period arrives as active + cancel_at_period_end
+    await send(subEvent('customer.subscription.updated', 'cus_test1', 'active', { cancel_at_period_end: true }));
     const meCancelled = await jfetch('http://localhost:3111/api/me', { headers: fAuth });
     check('billing: cancelling keeps premium until the period ends', meCancelled.plan === 'premium');
 
-    await hook('subscription_expired', 'expired', userId, 'test-ls-secret');
+    await send(subEvent('customer.subscription.deleted', 'cus_test1', 'canceled'));
     const meLapsed = await jfetch('http://localhost:3111/api/me', { headers: fAuth });
     const lapsedList = await jfetch('http://localhost:3111/api/binders', { headers: fAuth });
     const fourth = await fetch('http://localhost:3111/api/binders', { method: 'POST', headers: fAuth, body: JSON.stringify({ name: 'Three', size: 3 }) });
-    check('billing: expiry drops the account to free', meLapsed.plan === 'free');
+    check('billing: the subscription ending drops the account to free', meLapsed.plan === 'free');
     check('billing: a lapsed account keeps every binder it made, and just cannot add more',
       lapsedList.binders.length === 2 && fourth.status === 402);
 
-    const strangerBody = JSON.stringify({ meta: { event_name: 'subscription_created', custom_data: { user_id: 'no-such-user' } }, data: { attributes: { status: 'active' } } });
-    const stranger = await fetch('http://localhost:3111/api/billing/lemonsqueezy', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Signature': crypto.createHmac('sha256', 'test-ls-secret').update(strangerBody).digest('hex') },
-      body: strangerBody,
-    });
-    check('billing: an event for an unknown account is acknowledged, not retried forever', stranger.status === 200);
+    const stranger = await send(subEvent('customer.subscription.updated', 'cus_nobody', 'active'));
+    const order = await send({ type: 'invoice.paid', data: { object: {} } });
+    check('billing: unknown customers and unrelated events are acknowledged, not retried forever',
+      stranger.status === 200 && order.status === 200);
   }
 
   // ---- sign-in security ----

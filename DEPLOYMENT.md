@@ -204,6 +204,36 @@ main without a push. Manual fallback if GitHub itself is down:
 cd /opt/ptcg-tracker && git pull && npm install --omit=dev && systemctl restart ptcg-tracker
 ```
 
+### 7. Billing (when ready to charge)
+
+Stripe, with **Managed Payments** enabled (Stripe as merchant of record —
+this is also where Lemon Squeezy sends new merchants since the
+acquisition). One subscription product: Tracker Premium, $2.99/mo.
+
+1. In Stripe: **Product catalog** → the Premium product → the price row's
+   **⋯ menu → Create payment link**. Copy the `https://buy.stripe.com/…`
+   URL.
+2. **Developers → Webhooks → Add endpoint**:
+   `https://tracker.yourdomain.com/api/billing/stripe`, subscribed to
+   `checkout.session.completed`, `customer.subscription.updated`,
+   `customer.subscription.deleted`. Copy the signing secret (`whsec_…`).
+3. Two lines in `/etc/ptcg-tracker/env` (comments on their own lines!)
+   and a restart:
+
+```ini
+PTCG_STRIPE_CHECKOUT_URL=https://buy.stripe.com/…
+PTCG_STRIPE_WEBHOOK_SECRET=whsec_…
+```
+
+The server hands each signed-in free account that link with its account
+id as `client_reference_id`; the checkout webhook stores the Stripe
+customer id against the account and flips it to premium; the
+subscription-deleted event flips it back. Cancelling mid-period keeps
+premium until the period ends, and a lapsed account keeps every binder
+it ever made — the wall is creation-only. Test the loop in Stripe's test
+mode (test-mode payment link + test-mode webhook secret) before flipping
+live keys in.
+
 ### What to back up on this box
 
 `/var/lib/ptcg-tracker` (accounts, collections, binders — the state that

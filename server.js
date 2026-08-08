@@ -188,6 +188,11 @@ try { db.exec('CREATE UNIQUE INDEX IF NOT EXISTS binders_share ON binders (share
 // saying so (planOf below), so flipping this by hand is only ever needed
 // for comps.
 try { db.exec("ALTER TABLE users ADD COLUMN plan TEXT NOT NULL DEFAULT 'free'"); } catch { /* already present */ }
+// The Stripe customer this account pays as. Written once at checkout
+// (checkout.session.completed carries both our user id and their customer
+// id); every later subscription event names only the customer, so this is
+// the join.
+try { db.exec('ALTER TABLE users ADD COLUMN stripe_customer TEXT'); } catch { /* already present */ }
 // Whether a shared binder admits which cards its owner actually holds. On by
 // default, because "here is my binder" is what sharing one usually means —
 // but a link is also a partial inventory of somebody's house, so it should be
@@ -2805,43 +2810,75 @@ async function handleApi(req, res, pathname, ip, url) {
     });
   }
 
-  /* ---- billing: the Lemon Squeezy webhook ----
-   * Public by necessity (Lemon Squeezy is the caller, not a user), guarded by
-   * an HMAC signature over the RAW body with the shared webhook secret
-   * (PTCG_LS_WEBHOOK_SECRET, set when creating the webhook in their
-   * dashboard). The checkout link carries the account id as custom data;
-   * every subscription event echoes it back, and the only thing this
-   * endpoint can do is set that account's plan column. Idempotent by
-   * construction — Lemon Squeezy retries are harmless. */
-  if (pathname === '/api/billing/lemonsqueezy' && req.method === 'POST') {
-    const secret = (process.env.PTCG_LS_WEBHOOK_SECRET || '').trim();
+  /* ---- billing: the Stripe webhook ----
+   * Public by necessity (Stripe is the caller, not a user), guarded by
+   * Stripe's signature scheme: the Stripe-Signature header carries a
+   * timestamp and one or more HMAC-SHA256 signatures of `${t}.${rawBody}`
+   * under the endpoint secret (PTCG_STRIPE_WEBHOOK_SECRET, the whsec_…
+   * value shown when the endpoint is created). The timestamp is bounded to
+   * five minutes, which is Stripe's own replay rule.
+   *
+   * Identity flows one way: the Payment Link carries our account id as
+   * client_reference_id, checkout.session.completed hands it back alongside
+   * Stripe's customer id, and that pair is stored. Every later
+   * subscription event names only the customer, and the stored pair is the
+   * join. The only thing this endpoint can ever do is set a plan column —
+   * idempotent, so Stripe's retries are harmless. */
+  if (pathname === '/api/billing/stripe' && req.method === 'POST') {
+    const secret = (process.env.PTCG_STRIPE_WEBHOOK_SECRET || '').trim();
     if (!secret) return sendJSON(res, 503, { error: 'Billing is not configured on this server' });
     const raw = await readRawBody(req, 1024 * 1024).catch(() => null);
     if (!raw) return sendJSON(res, 400, { error: 'Empty body' });
-    const theirs = String(req.headers['x-signature'] || '');
-    const ours = crypto.createHmac('sha256', secret).update(raw).digest('hex');
-    const a = Buffer.from(theirs, 'utf8'), b = Buffer.from(ours, 'utf8');
-    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
-      return sendJSON(res, 401, { error: 'Bad signature' });
+    const header = String(req.headers['stripe-signature'] || '');
+    let ts = null; const sigs = [];
+    for (const part of header.split(',')) {
+      const eq = part.indexOf('=');
+      if (eq < 0) continue;
+      const k = part.slice(0, eq).trim(), v = part.slice(eq + 1).trim();
+      if (k === 't') ts = v;
+      else if (k === 'v1') sigs.push(v);
     }
+    if (!ts || !sigs.length || Math.abs(Date.now() / 1000 - parseInt(ts, 10)) > 300) {
+      return sendJSON(res, 401, { error: 'Bad or stale signature header' });
+    }
+    const ours = crypto.createHmac('sha256', secret).update(ts + '.').update(raw).digest('hex');
+    const ok = sigs.some((s) => {
+      const a = Buffer.from(s, 'utf8'), b = Buffer.from(ours, 'utf8');
+      return a.length === b.length && crypto.timingSafeEqual(a, b);
+    });
+    if (!ok) return sendJSON(res, 401, { error: 'Bad signature' });
     let evt;
     try { evt = JSON.parse(raw.toString('utf8')); } catch { return sendJSON(res, 400, { error: 'Not JSON' }); }
-    const eventName = evt && evt.meta && evt.meta.event_name;
-    if (!/^subscription_/.test(String(eventName || ''))) {
-      return sendJSON(res, 200, { ok: true, ignored: eventName || null });   // orders etc. — not ours
+    const type = String(evt.type || '');
+    const obj = (evt.data && evt.data.object) || {};
+
+    if (type === 'checkout.session.completed') {
+      if (obj.mode !== 'subscription') return sendJSON(res, 200, { ok: true, ignored: 'not a subscription' });
+      const target = typeof obj.client_reference_id === 'string' ? getUserById(obj.client_reference_id) : null;
+      if (!target) return sendJSON(res, 200, { ok: true, ignored: 'no such account' });   // 200: retrying won't help
+      db.prepare('UPDATE users SET plan = ?, stripe_customer = ? WHERE id = ?')
+        .run('premium', typeof obj.customer === 'string' ? obj.customer : null, target.id);
+      console.log(`Billing: checkout completed → ${target.username} is premium`);
+      return sendJSON(res, 200, { ok: true, plan: 'premium' });
     }
-    const uid = evt.meta && evt.meta.custom_data && evt.meta.custom_data.user_id;
-    const target = typeof uid === 'string' ? getUserById(uid) : null;
-    if (!target) return sendJSON(res, 200, { ok: true, ignored: 'no such account' });   // 200: retrying won't help
-    const status = String((evt.data && evt.data.attributes && evt.data.attributes.status) || '');
-    // Premium for every living status — including 'cancelled', which in Lemon
-    // Squeezy means "not renewing but paid through the period". The end of the
-    // road is subscription_expired / status 'expired': back to free, keeping
-    // everything ever made (the binder gate above is creation-only).
-    const premium = eventName !== 'subscription_expired' && status !== 'expired' && status !== 'refunded';
-    db.prepare('UPDATE users SET plan = ? WHERE id = ?').run(premium ? 'premium' : 'free', target.id);
-    console.log(`Billing: ${eventName} (${status}) → ${target.username} is ${premium ? 'premium' : 'free'}`);
-    return sendJSON(res, 200, { ok: true, plan: premium ? 'premium' : 'free' });
+
+    if (type === 'customer.subscription.updated' || type === 'customer.subscription.deleted') {
+      const row = typeof obj.customer === 'string'
+        ? rowToUser(db.prepare('SELECT * FROM users WHERE stripe_customer = ?').get(obj.customer)) : null;
+      if (!row) return sendJSON(res, 200, { ok: true, ignored: 'unknown customer' });
+      // "Cancelled but paid through the period" arrives as status 'active'
+      // with cancel_at_period_end — which stays premium here with no special
+      // case at all. The end of the road is the deleted event (or a dead
+      // status): back to free, keeping everything ever made — the binder
+      // gate is creation-only.
+      const premium = type !== 'customer.subscription.deleted'
+        && ['active', 'trialing', 'past_due'].includes(String(obj.status || ''));
+      db.prepare('UPDATE users SET plan = ? WHERE id = ?').run(premium ? 'premium' : 'free', row.id);
+      console.log(`Billing: ${type} (${obj.status}) → ${row.username} is ${premium ? 'premium' : 'free'}`);
+      return sendJSON(res, 200, { ok: true, plan: premium ? 'premium' : 'free' });
+    }
+
+    return sendJSON(res, 200, { ok: true, ignored: type });   // invoices etc. — not ours
   }
 
   // authenticated routes
@@ -2849,12 +2886,12 @@ async function handleApi(req, res, pathname, ip, url) {
   if (!user) return sendJSON(res, 401, { error: 'Not signed in' });
 
   if (pathname === '/api/me' && req.method === 'GET') {
-    // upgradeUrl: the Lemon Squeezy checkout link with this account's id
-    // riding along as custom data, so the webhook knows whose plan to flip.
-    // Built here, not client-side: the user id never needs to be public.
-    const lsBase = (process.env.PTCG_LS_CHECKOUT_URL || '').trim();
-    const upgradeUrl = lsBase && planOf(user) !== 'premium'
-      ? lsBase + (lsBase.includes('?') ? '&' : '?') + 'checkout[custom][user_id]=' + encodeURIComponent(user.id)
+    // upgradeUrl: the Stripe Payment Link with this account's id riding along
+    // as client_reference_id, so the checkout webhook knows whose plan to
+    // flip. Built here, not client-side: the user id never needs to be public.
+    const payBase = (process.env.PTCG_STRIPE_CHECKOUT_URL || '').trim();
+    const upgradeUrl = payBase && planOf(user) !== 'premium'
+      ? payBase + (payBase.includes('?') ? '&' : '?') + 'client_reference_id=' + encodeURIComponent(user.id)
       : null;
     return sendJSON(res, 200, {
       username: user.display, admin: isAdminUser(user),

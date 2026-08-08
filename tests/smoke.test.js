@@ -86,11 +86,12 @@ const { chromium } = require('playwright');
   {
     const tok = await page.evaluate(() => JSON.parse(localStorage.getItem('ptcg.auth')).token);
     const meRes = await (await fetch('http://localhost:3111/api/me', { headers: { Authorization: 'Bearer ' + tok } })).json();
-    const uid = decodeURIComponent(meRes.upgradeUrl.split('checkout[custom][user_id]=')[1]);
-    const body = JSON.stringify({ meta: { event_name: 'subscription_created', custom_data: { user_id: uid } }, data: { attributes: { status: 'active' } } });
-    const sig = require('crypto').createHmac('sha256', 'test-ls-secret').update(body).digest('hex');
-    const flip = await (await fetch('http://localhost:3111/api/billing/lemonsqueezy', {
-      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Signature': sig }, body,
+    const uid = decodeURIComponent(meRes.upgradeUrl.split('client_reference_id=')[1]);
+    const body = JSON.stringify({ type: 'checkout.session.completed', data: { object: { mode: 'subscription', client_reference_id: uid, customer: 'cus_smoke' } } });
+    const at = Math.floor(Date.now() / 1000);
+    const sig = require('crypto').createHmac('sha256', 'whsec_test_secret').update(at + '.' + body).digest('hex');
+    const flip = await (await fetch('http://localhost:3111/api/billing/stripe', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'Stripe-Signature': `t=${at},v1=${sig}` }, body,
     })).json();
     if (!flip.ok) throw new Error('billing webhook refused the test upgrade');
   }
