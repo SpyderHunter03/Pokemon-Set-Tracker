@@ -224,6 +224,37 @@ curl -sI https://tracker.yourdomain.com/ | head -1
 #   cd /opt/card-api && sudo -u cardapi DATA_DIR=/var/lib/card-api node scripts/tokens.js list
 ```
 
+### 6. Push-to-deploy (one-time setup)
+
+`.github/workflows/deploy.yml` deploys this box automatically: push to
+main → the existing **CI** workflow runs the full end-to-end suite → only
+a green run on main triggers the deploy. On the box,
+`deploy/deploy-node.sh` updates the checkout, refreshes optional deps,
+writes the commit into `version.txt`, restarts the service, and then polls
+`/api/app-config` until the running process reports **exactly that
+commit** back (`release`) — if it never does, the script rolls back to the
+previous commit and restarts, so a failed deploy leaves the box on the old
+working version. User data is untouchable throughout: it lives in
+`/var/lib/ptcg-tracker`, outside the repo.
+
+Two repository secrets (GitHub → Settings → Secrets and variables →
+Actions); until they exist the workflow runs, says there is nothing to
+deploy to, and exits green:
+
+- `DEPLOY_SSH_KEY` — a private key whose public half is in the box's
+  `/root/.ssh/authorized_keys`. **The same keypair the API repo uses is
+  fine** — same box, one door; add the same secret to both repos.
+- `DEPLOY_HOST` — the box's IP. One host, not a list: the tracker is
+  single-home by design (see the rules above), which is also why this
+  workflow is simpler than the API's serial rollout.
+
+The manual trigger (**Actions → deploy → Run workflow**) redeploys current
+main without a push. Manual fallback if GitHub itself is down:
+
+```bash
+cd /opt/ptcg-tracker && git pull && npm install --omit=dev && systemctl restart ptcg-tracker
+```
+
 ### What to back up on this box
 
 `/var/lib/ptcg-tracker` (accounts, collections, binders — the state that
