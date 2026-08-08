@@ -11,6 +11,20 @@ function lsGet(key) {
 }
 function lsSet(key, val) { localStorage.setItem(key, JSON.stringify(val)); }
 
+/* Brand-new visitors get the front door (/home — what this is, what it
+ * costs); everyone else goes straight into the app. "New" means: never been
+ * here, not signed in, nothing tracked, and not following a deep link — a
+ * shared binder URL must open the binder, never a sales page. */
+(() => {
+  try {
+    const deepLink = location.hash && location.hash !== '#' && location.hash !== '#/';
+    const seen = lsGet('ptcg.visited') || lsGet('ptcg.auth')
+      || Object.keys(lsGet('ptcg.collection.v2') || {}).length > 0;
+    lsSet('ptcg.visited', true);
+    if (!deepLink && !seen) location.replace('/home');
+  } catch { /* storage blocked — just show the app */ }
+})();
+
 /* ============================================================
  * Card data provider — reads the catalog from the bundled server,
  * which serves it from its SQLite database. Each card carries its
@@ -1507,8 +1521,9 @@ async function renderHome() {
         h('div', {},
           h('strong', {}, serverAvailable ? 'Sign in to track your collection' : 'Browsing all cards'),
           h('div', { class: 'muted small' }, serverAvailable
-            ? 'Create a free account to mark which cards you own and sync across devices.'
-            : 'Every set and card is here to explore.')),
+            ? 'Create a free account to mark which cards you own and sync across devices. '
+            : 'Every set and card is here to explore.'),
+          serverAvailable ? h('a', { class: 'small', href: '/home' }, 'What is this? About & pricing') : null),
         serverAvailable
           ? h('button', { class: 'btn small', onclick: () => goToAccount() }, 'Sign in')
           : null,
@@ -3002,10 +3017,10 @@ async function renderScanPage() {
         h('div', { style: 'font-size:42px' }, '📷'),
         h('h1', { style: 'margin:10px 0 6px' }, 'Card scanner'),
         h('p', { class: 'muted', style: 'margin:0 0 14px' },
-          'Point your camera at a card and find out on the spot whether you already have it. Coming soon, as part of Premium.'),
+          'Point your camera at a card and find out on the spot whether you already have it. Coming soon, as part of Master Set Premium.'),
         auth
           ? (m && m.upgradeUrl
-            ? h('a', { class: 'btn', href: m.upgradeUrl, target: '_blank', rel: 'noopener' }, '⭐ Get Premium — $2.99/mo')
+            ? h('a', { class: 'btn', href: m.upgradeUrl, target: '_blank', rel: 'noopener' }, '⭐ Get Master Set Premium — $2.99/mo')
             : h('p', { class: 'muted small', style: 'margin:0' }, 'Premium sign-ups open soon.'))
           : h('button', { class: 'btn', onclick: () => goToAccount() }, 'Sign in first'),
       ));
@@ -3478,13 +3493,13 @@ function renderAccountPage(tab) {
       planCard.replaceChildren(
         h('h3', { style: 'margin:0 0 6px' }, 'Plan'),
         m.plan === 'premium'
-          ? h('p', { style: 'margin:0' }, '⭐ ', h('strong', {}, 'Premium'),
+          ? h('p', { style: 'margin:0' }, '⭐ ', h('strong', {}, 'Master Set Premium'),
             m.admin ? ' (administrator accounts are always Premium).' : ' — unlimited binders, and the card scanner when it ships.')
           : h('div', {},
             h('p', { style: 'margin:0 0 4px' }, h('strong', {}, 'Free'), ' — full collection tracking and one binder.'),
-            h('p', { class: 'muted small', style: 'margin:0 0 10px' }, 'Premium adds unlimited binders, and the card scanner when it ships.'),
+            h('p', { class: 'muted small', style: 'margin:0 0 10px' }, 'Master Set Premium adds unlimited binders, and the card scanner when it ships.'),
             m.upgradeUrl
-              ? h('a', { class: 'btn small', href: m.upgradeUrl, target: '_blank', rel: 'noopener' }, '⭐ Upgrade — $2.99/mo')
+              ? h('a', { class: 'btn small', href: m.upgradeUrl, target: '_blank', rel: 'noopener' }, '⭐ Upgrade to Master Set Premium — $2.99/mo')
               : h('p', { class: 'muted small', style: 'margin:0' }, 'Premium sign-ups open soon.')),
       );
     })();

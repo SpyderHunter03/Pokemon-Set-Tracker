@@ -1722,6 +1722,8 @@ function fail(msg) {
     const exe = process.env.CHROMIUM_PATH || undefined;
     const rbrowser = await chromium.launch(exe ? { executablePath: exe } : {});
     const rctx = await rbrowser.newContext({ serviceWorkers: 'block' });
+    // the app sends brand-new visitors to /home; this context targets the app
+    await rctx.addInitScript(() => localStorage.setItem('ptcg.visited', 'true'));
     const rp = await rctx.newPage();
     // the master gains one more set, so there is something to review
     {

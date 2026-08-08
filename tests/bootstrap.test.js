@@ -6,6 +6,14 @@ const { chromium } = require('playwright');
 (async () => {
   const launchOpts = process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {};
   const browser = await chromium.launch(launchOpts);
+  const _newContext = browser.newContext.bind(browser);
+  browser.newContext = async (opts) => {
+    const ctx = await _newContext(opts);
+    // the app sends brand-new visitors to /home; these tests target the app
+    // itself, so every context starts as a returning visitor
+    await ctx.addInitScript(() => localStorage.setItem('ptcg.visited', 'true'));
+    return ctx;
+  };
   const context = await browser.newContext({ serviceWorkers: 'block' });
   const page = await context.newPage();
   const errors = [];

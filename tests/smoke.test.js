@@ -4,6 +4,14 @@ const { chromium } = require('playwright');
 (async () => {
   const launchOpts = process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {};
   const browser = await chromium.launch(launchOpts);
+  const _newContext = browser.newContext.bind(browser);
+  browser.newContext = async (opts) => {
+    const ctx = await _newContext(opts);
+    // the app sends brand-new visitors to /home; these tests target the app
+    // itself, so every context starts as a returning visitor
+    await ctx.addInitScript(() => localStorage.setItem('ptcg.visited', 'true'));
+    return ctx;
+  };
   const context = await browser.newContext({ serviceWorkers: 'block' });
   const page = await context.newPage();
   const errors = [];
@@ -64,6 +72,34 @@ const { chromium } = require('playwright');
     (await page.locator('#account-page button:has-text("Export collection")').count()) === 0);
   check('logged out: account page offers no tabs',
     (await page.locator('#account-page .tabs a').count()) === 0);
+
+  // ---- the front door ----
+  // A brand-new visitor (no flag, no account, nothing tracked, no deep link)
+  // is sent to /home — the marketing page. Its own context: every other
+  // context here is init-scripted into a returning visitor, so this one
+  // layers a remove on top and stays genuinely new on every navigation.
+  {
+    const fctx = await browser.newContext({ serviceWorkers: 'block' });
+    await fctx.addInitScript(() => localStorage.removeItem('ptcg.visited'));
+    const fp = await fctx.newPage();
+    await fp.goto('http://localhost:3111/');
+    await fp.waitForURL('**/home');
+    check('a brand-new visitor lands on the marketing page', fp.url().endsWith('/home'));
+    const homeText = await fp.textContent('body');
+    check('the front door shows the tiers and the price',
+      /Master Set Premium/.test(homeText) && /\$2\.99/.test(homeText) && /Free account/.test(homeText));
+    check('the front door carries the non-affiliation disclaimer',
+      /not produced by, endorsed by, or affiliated/.test(homeText));
+    // a deep link is never hijacked to the sales page, even for a new visitor
+    await fp.goto('http://localhost:3111/#/pokemon');
+    await fp.waitForTimeout(800);
+    check('a deep link opens the app for a brand-new visitor, never the sales page', !fp.url().includes('/home'));
+    await fctx.close();
+  }
+  // and a returning visitor (the main context) goes straight to the app
+  await page.goto('http://localhost:3111/');
+  await page.waitForSelector('.set-card');
+  check('a returning visitor goes straight to the app', true);
 
   // ---- sign in + old v1 data migration ----
   const uniq = 'smoke' + Math.floor(Math.random() * 1e6);

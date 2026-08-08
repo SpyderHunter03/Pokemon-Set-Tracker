@@ -1240,6 +1240,7 @@ const MIME = {
 function serveStatic(req, res, urlPath) {
   let rel = decodeURIComponent(urlPath);
   if (rel === '/' || rel === '') rel = '/index.html';
+  if (rel === '/home') rel = '/home.html';   // the marketing front door, at a pretty URL
   const file = path.normalize(path.join(PUBLIC_DIR, rel));
   if (!file.startsWith(PUBLIC_DIR)) { res.writeHead(403); res.end('Forbidden'); return; }
   fs.stat(file, (err, stat) => {
@@ -3456,7 +3457,7 @@ async function handleApi(req, res, pathname, ip, url) {
     // simply can't create MORE until it upgrades again. Nothing is ever
     // deleted or locked over money.
     if (planOf(user) !== 'premium' && _bindersOf.all(user.id).length >= 1) {
-      return sendJSON(res, 402, { error: 'Free accounts include one binder — Premium unlocks unlimited binders', premiumRequired: true });
+      return sendJSON(res, 402, { error: 'Free accounts include one binder — Master Set Premium unlocks unlimited binders', premiumRequired: true });
     }
     if (_bindersOf.all(user.id).length >= 100) return sendJSON(res, 400, { error: 'Binder limit reached (100)' });
     const perPage = size * size;
