@@ -318,7 +318,7 @@ const _binderShare = db.prepare('UPDATE binders SET share = ?, share_have = ?, u
 // the only binder lookup that does not start from a signed-in account, so it
 // carries the owner's name along: the shared page says whose binder it is
 const _binderByShare = db.prepare(
-  'SELECT b.name, b.size, b.color, b.pages, b.slots, b.cover, b.share_have, u.display AS owner ' +
+  'SELECT b.id, b.user_id, b.name, b.size, b.color, b.pages, b.slots, b.cover, b.share_have, u.display AS owner ' +
   'FROM binders b JOIN users u ON u.id = b.user_id WHERE b.share = ?');
 const _binderPut = db.prepare(`INSERT INTO binders (user_id, id, name, size, color, pages, slots, cover, created, updated)
   VALUES (?,?,?,?,?,?,?,?,?,?)
@@ -1324,6 +1324,18 @@ function planOf(user) {
   if (!user) return 'free';
   return (isAdminUser(user) || user.plan === 'premium') ? 'premium' : 'free';
 }
+
+/** Binders beyond the free allowance (one), for a non-premium owner, are
+ * LOCKED: kept whole, shown by their cover on the shelf, but not openable,
+ * editable or shareable until the account is premium again. The OLDEST
+ * binder is the free one — creation order, nothing to configure. Deleting
+ * is still allowed (it is the owner's data), and deleting the free binder
+ * simply promotes the next-oldest. */
+function lockedBinderIds(user) {
+  if (planOf(user) === 'premium') return new Set();
+  return new Set(_bindersOf.all(user.id).slice(1).map((b) => b.id));
+}
+const BINDER_LOCKED_MSG = 'This binder is locked — upgrade to Master Set Premium to get back all your binders';
 
 function pushLog(line) {
   const text = String(line).trim();
@@ -2802,6 +2814,12 @@ async function handleApi(req, res, pathname, ip, url) {
     if (rateLimited(ip, 'shared', 120, 10 * 60 * 1000)) return sendJSON(res, 429, { error: 'Too many requests, try again later' });
     const row = _binderByShare.get(sharedMatch[1]);
     if (!row) return sendJSON(res, 404, { error: 'That link does not lead anywhere — it may have been turned off, or replaced with a new one.' });
+    // a share link must not be a back door into a locked binder — the
+    // owner's own plan decides whether this binder is out in the world
+    const shareOwner = getUserById(row.user_id);
+    if (shareOwner && lockedBinderIds(shareOwner).has(row.id)) {
+      return sendJSON(res, 404, { error: 'That link does not lead anywhere right now.' });
+    }
     const showHave = row.share_have !== 0;
     const slots = JSON.parse(row.slots);
     // stripped here rather than merely undrawn: a browser is the visitor's to
@@ -3443,11 +3461,13 @@ async function handleApi(req, res, pathname, ip, url) {
 
   // ---------- binders (per-account; independent have/need checklist) ----------
   if (pathname === '/api/binders' && req.method === 'GET') {
+    const lockedSet = lockedBinderIds(user);
     const rows = _bindersOf.all(user.id).map((b) => {
       const slots = JSON.parse(b.slots);
       const entries = Object.values(slots).filter((e) => e.card);   // art spans don't track
       return { id: b.id, name: b.name, size: b.size, color: b.color, pages: b.pages,
         cover: b.cover ? JSON.parse(b.cover) : null, shared: !!b.share,
+        locked: lockedSet.has(b.id),
         filled: entries.length, have: entries.filter((s) => s.have).length };
     });
     return sendJSON(res, 200, { binders: rows });
@@ -3533,6 +3553,7 @@ async function handleApi(req, res, pathname, ip, url) {
   if (shareToggle && req.method === 'POST') {
     const row = _binderGet.get(user.id, shareToggle[1]);
     if (!row) return sendJSON(res, 404, { error: 'Binder not found' });
+    if (lockedBinderIds(user).has(row.id)) return sendJSON(res, 402, { error: BINDER_LOCKED_MSG, premiumRequired: true, locked: true });
     const body = await readBody(req);
     const share = !body.on ? null
       : (row.share && !body.rotate) ? row.share
@@ -3547,6 +3568,11 @@ async function handleApi(req, res, pathname, ip, url) {
   if (binderMatch) {
     const row = _binderGet.get(user.id, binderMatch[1]);
     if (!row) return sendJSON(res, 404, { error: 'Binder not found' });
+    // a locked binder can still be DELETED (it is the owner's data to
+    // discard) — it just cannot be opened or changed
+    if (req.method !== 'DELETE' && lockedBinderIds(user).has(row.id)) {
+      return sendJSON(res, 402, { error: BINDER_LOCKED_MSG, premiumRequired: true, locked: true });
+    }
     if (req.method === 'GET') {
       return sendJSON(res, 200, { binder: { id: row.id, name: row.name, size: row.size, color: row.color,
         pages: row.pages, slots: JSON.parse(row.slots), cover: row.cover ? JSON.parse(row.cover) : null,

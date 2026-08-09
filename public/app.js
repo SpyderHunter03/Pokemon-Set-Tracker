@@ -741,7 +741,11 @@ async function apiCall(path, options = {}) {
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     if (res.status === 401 && auth) { auth = null; lsSet('ptcg.auth', null); updateAccountButton(); }
-    throw new Error(data.error || `Request failed (${res.status})`);
+    const err = new Error(data.error || `Request failed (${res.status})`);
+    err.status = res.status;
+    err.premiumRequired = !!data.premiumRequired;
+    err.locked = !!data.locked;
+    throw err;
   }
   return data;
 }
@@ -3941,14 +3945,16 @@ async function renderBindersPage() {
   for (const b of list) {
     const src = coverSrcOf(b);
     const artV = b.cover && b.cover.type === 'art' && b.cover.view && b.cover.view.s ? b.cover.view : null;
-    const tile = h('a', { class: `binder-cover b-${b.color}${src ? ' has-art' : ''}`, href: '#/binder/' + b.id },
+    const tile = h('a', { class: `binder-cover b-${b.color}${src ? ' has-art' : ''}${b.locked ? ' locked' : ''}`,
+      href: '#/binder/' + b.id,
+      style: b.locked ? 'filter:grayscale(0.7); opacity:0.75' : null },
       src && !artV ? h('img', { class: 'binder-cover-img' + (b.cover.type === 'set' ? ' logo' : ''), src, loading: 'lazy', alt: '' }) : null,
       h('div', { class: 'binder-name' }, b.name),
       h('div', { class: 'binder-meta' }, `${b.size}\u00d7${b.size} \u00b7 ${b.pages} page${b.pages === 1 ? '' : 's'}`),
-      h('div', { class: 'binder-meta' }, b.filled ? `${b.have} / ${b.filled} in hand` : 'empty'),
+      h('div', { class: 'binder-meta' }, b.locked ? '🔒 locked' : (b.filled ? `${b.have} / ${b.filled} in hand` : 'empty')),
       // a binder that is out in the world should say so from the shelf, not
       // only from inside its own share panel
-      b.shared ? h('div', { class: 'binder-shared', title: 'Anyone with the link can see this binder' }, '🔗') : null,
+      b.shared && !b.locked ? h('div', { class: 'binder-shared', title: 'Anyone with the link can see this binder' }, '🔗') : null,
     );
     if (src && artV) {
       const bg = h('div', { class: 'binder-cover-img' });
@@ -4078,6 +4084,23 @@ async function renderBinderPage(id, shareToken = null) {
     cardsById = new Map(idx.cards.map((c) => [c.id, c]));
     setsById = new Map(setIdx.sets.map((x) => [x.id, x]));
   } catch (e) {
+    if (e.locked) {
+      // kept, not gone: the binder sits on the shelf with its cover showing,
+      // and this is the door it opens instead of its pages
+      let m = null;
+      try { m = await ensureMe(); } catch { /* the pitch renders without the link */ }
+      view.replaceChildren(h('div', { class: 'center', style: 'padding:40px 16px; max-width:440px; margin:0 auto' },
+        h('div', { style: 'font-size:42px' }, '🔒'),
+        h('h1', { style: 'margin:10px 0 6px' }, 'This binder is locked'),
+        h('p', { class: 'muted', style: 'margin:0 0 14px' },
+          'Your Master Set Premium plan ended, and free accounts include one binder. Everything in this one is exactly as you left it — upgrading unlocks it again.'),
+        m && m.upgradeUrl
+          ? h('a', { class: 'btn', href: m.upgradeUrl, target: '_blank', rel: 'noopener' }, '⭐ Upgrade to get back all your binders')
+          : h('p', { class: 'muted small', style: 'margin:0' }, 'Upgrade from your Account page to open it again.'),
+        h('div', { style: 'margin-top:14px' }, h('a', { class: 'back-link', href: '#/binders' }, '\u2190 Your binders')),
+      ));
+      return;
+    }
     view.replaceChildren(dbErrorView(shared ? 'Could not open that binder.' : 'Could not load that binder.',
       e, () => renderBinderPage(id, shareToken)));
     return;

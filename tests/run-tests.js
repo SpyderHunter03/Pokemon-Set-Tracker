@@ -336,13 +336,37 @@ function fail(msg) {
     const meCancelled = await jfetch('http://localhost:3111/api/me', { headers: fAuth });
     check('billing: cancelling keeps premium until the period ends', meCancelled.plan === 'premium');
 
+    // before the lapse: share the SECOND binder, so the lock can prove it
+    // closes the public door too
+    const secondId = third.binder.id;
+    const shr = await jfetch(`http://localhost:3111/api/binders/${secondId}/share`, { method: 'POST', headers: fAuth, body: JSON.stringify({ on: true }) });
+
     await send(subEvent('customer.subscription.deleted', 'cus_test1', 'canceled'));
     const meLapsed = await jfetch('http://localhost:3111/api/me', { headers: fAuth });
     const lapsedList = await jfetch('http://localhost:3111/api/binders', { headers: fAuth });
     const fourth = await fetch('http://localhost:3111/api/binders', { method: 'POST', headers: fAuth, body: JSON.stringify({ name: 'Three', size: 3 }) });
     check('billing: the subscription ending drops the account to free', meLapsed.plan === 'free');
-    check('billing: a lapsed account keeps every binder it made, and just cannot add more',
+    check('billing: a lapsed account keeps every binder on the shelf, and cannot add more',
       lapsedList.binders.length === 2 && fourth.status === 402);
+    check('billing: the shelf says which binder is locked (the oldest stays free)',
+      lapsedList.binders[0].locked === false && lapsedList.binders[1].locked === true);
+    const openFirst = await fetch(`http://localhost:3111/api/binders/${first.binder.id}`, { headers: fAuth });
+    const openSecond = await fetch(`http://localhost:3111/api/binders/${secondId}`, { headers: fAuth });
+    const secondBody = await openSecond.json();
+    check('billing: the free binder opens; the locked one refuses with the upgrade sentence',
+      openFirst.status === 200 && openSecond.status === 402 && secondBody.premiumRequired === true && secondBody.locked === true && /all your binders/.test(secondBody.error));
+    const editSecond = await fetch(`http://localhost:3111/api/binders/${secondId}`, { method: 'PUT', headers: fAuth, body: JSON.stringify({ name: 'sneaky rename' }) });
+    const reshare = await fetch(`http://localhost:3111/api/binders/${secondId}/share`, { method: 'POST', headers: fAuth, body: JSON.stringify({ on: true }) });
+    check('billing: a locked binder cannot be edited or re-shared', editSecond.status === 402 && reshare.status === 402);
+    const sharedGone = await fetch(`http://localhost:3111/api/shared/${shr.share}`);
+    check('billing: a locked binder\'s existing share link goes quiet (no back door)', sharedGone.status === 404);
+    // upgrading again brings everything straight back
+    await send(subEvent('customer.subscription.updated', 'cus_test1', 'active'));
+    const reopened = await fetch(`http://localhost:3111/api/binders/${secondId}`, { headers: fAuth });
+    const sharedBack = await fetch(`http://localhost:3111/api/shared/${shr.share}`);
+    check('billing: upgrading unlocks every binder exactly as it was, share link included',
+      reopened.status === 200 && sharedBack.status === 200);
+    await send(subEvent('customer.subscription.deleted', 'cus_test1', 'canceled'));   // back to free for the checks below
 
     const stranger = await send(subEvent('customer.subscription.updated', 'cus_nobody', 'active'));
     const order = await send({ type: 'invoice.paid', data: { object: {} } });
