@@ -3497,8 +3497,12 @@ function renderAccountPage(tab) {
       planCard.replaceChildren(
         h('h3', { style: 'margin:0 0 6px' }, 'Plan'),
         m.plan === 'premium'
-          ? h('p', { style: 'margin:0' }, '⭐ ', h('strong', {}, 'Master Set Premium'),
-            m.admin ? ' (administrator accounts are always Premium).' : ' — unlimited binders, and the card scanner when it ships.')
+          ? h('div', {},
+            h('p', { style: 'margin:0' + (m.portalUrl ? ' 0 10px' : '') }, '⭐ ', h('strong', {}, 'Master Set Premium'),
+              m.admin ? ' (administrator accounts are always Premium).' : ' — unlimited binders, and the card scanner when it ships.'),
+            m.portalUrl
+              ? h('a', { class: 'btn ghost small', href: m.portalUrl, target: '_blank', rel: 'noopener' }, '⚙ Manage subscription')
+              : null)
           : h('div', {},
             h('p', { style: 'margin:0 0 4px' }, h('strong', {}, 'Free'), ' — full collection tracking and one binder.'),
             h('p', { class: 'muted small', style: 'margin:0 0 10px' }, 'Master Set Premium adds unlimited binders, and the card scanner when it ships.'),

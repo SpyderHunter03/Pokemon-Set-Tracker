@@ -111,6 +111,7 @@ function fail(msg) {
     PTCG_STRIPE_WEBHOOK_SECRET: 'whsec_test_secret',
     PTCG_STRIPE_CHECKOUT_URL: 'https://buy.stripe.com/test_premium',
     PTCG_METRICS_TOKEN: 'test-metrics-token',
+    PTCG_STRIPE_PORTAL_URL: 'https://billing.stripe.com/p/login/test_portal',
   }, true);
   await waitForPort(3111).catch((e) => fail(e.message));
   // the install is unclaimed, so it printed a code; the browser suite needs it
@@ -324,10 +325,13 @@ function fail(msg) {
     check('billing: a correctly signed but hour-old event is refused (replay window)',
       stale.status === 401);
 
+    check('billing: before paying, there is no subscription to manage', meFree.portalUrl === null);
     const paid = await send(checkoutDone(userId, 'cus_test1'));
     const mePaid = await jfetch('http://localhost:3111/api/me', { headers: fAuth });
     check('billing: a signed checkout.session.completed makes the account premium (and the upgrade link retires)',
       paid.status === 200 && mePaid.plan === 'premium' && mePaid.upgradeUrl === null);
+    check('billing: a paying subscriber gets the manage-subscription portal link',
+      mePaid.portalUrl === 'https://billing.stripe.com/p/login/test_portal');
 
     const third = await jfetch('http://localhost:3111/api/binders', { method: 'POST', headers: fAuth, body: JSON.stringify({ name: 'Two', size: 3 }) });
     check('billing: premium removes the binder wall', !!(third.binder && third.binder.id));

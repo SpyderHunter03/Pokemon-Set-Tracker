@@ -256,7 +256,7 @@ function writeJSONAtomic(file, obj) {
 
 // ---------- user & collection queries ----------
 
-const rowToUser = (r) => (r ? { id: r.id, username: r.username, display: r.display, salt: r.salt, hash: r.hash, created: r.created, admin: !!r.admin, email: r.email || null, emailVerified: !!r.email_verified, totpSecret: r.totp_secret || null, totpEnabled: !!r.totp_enabled, oidcIss: r.oidc_iss || null, oidcSub: r.oidc_sub || null, plan: r.plan === 'premium' ? 'premium' : 'free' } : null);
+const rowToUser = (r) => (r ? { id: r.id, username: r.username, display: r.display, salt: r.salt, hash: r.hash, created: r.created, admin: !!r.admin, email: r.email || null, emailVerified: !!r.email_verified, totpSecret: r.totp_secret || null, totpEnabled: !!r.totp_enabled, oidcIss: r.oidc_iss || null, oidcSub: r.oidc_sub || null, plan: r.plan === 'premium' ? 'premium' : 'free', stripeCustomer: r.stripe_customer || null } : null);
 
 const _getUserById = db.prepare('SELECT * FROM users WHERE id = ?');
 const _getUserByName = db.prepare('SELECT * FROM users WHERE username = ?');
@@ -3020,9 +3020,13 @@ async function handleApi(req, res, pathname, ip, url) {
     const upgradeUrl = payBase && planOf(user) !== 'premium'
       ? payBase + (payBase.includes('?') ? '&' : '?') + 'client_reference_id=' + encodeURIComponent(user.id)
       : null;
+    // manage-subscription: Stripe's hosted customer portal (the no-code
+    // login link). Only for accounts with a Stripe customer on file — a
+    // comped admin has no subscription to manage.
+    const portalUrl = user.stripeCustomer ? ((process.env.PTCG_STRIPE_PORTAL_URL || '').trim() || null) : null;
     return sendJSON(res, 200, {
       username: user.display, admin: isAdminUser(user),
-      plan: planOf(user), upgradeUrl,
+      plan: planOf(user), upgradeUrl, portalUrl,
       email: user.email, emailVerified: user.emailVerified,
       totpEnabled: user.totpEnabled,
       recoveryLeft: user.totpEnabled ? _countRecovery.get(user.id).n : 0,

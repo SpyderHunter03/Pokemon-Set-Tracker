@@ -237,7 +237,15 @@ acquisition). One subscription product: Tracker Premium, $2.99/mo.
 ```ini
 PTCG_STRIPE_CHECKOUT_URL=https://buy.stripe.com/…
 PTCG_STRIPE_WEBHOOK_SECRET=whsec_…
+PTCG_STRIPE_PORTAL_URL=https://billing.stripe.com/p/login/…
 ```
+
+The portal URL is Stripe's hosted customer portal login (Settings →
+Billing → Customer portal → activate the no-code link). It becomes the
+⚙ Manage subscription button on subscribers' Account pages — cancel,
+change card, see invoices, all on Stripe's side. Configure the portal to
+cancel **at period end**; that matches the app's paid-through-the-period
+behaviour.
 
 The server hands each signed-in free account that link with its account
 id as `client_reference_id`; the checkout webhook stores the Stripe
