@@ -294,6 +294,53 @@ const userCount = () => _countUsers.get().n;
 function createUser(u) {
   _insertUser.run(u.id, u.username, u.display, u.salt, u.hash, u.created, u.admin ? 1 : 0,
     u.email || null, u.emailVerified ? 1 : 0);
+  mEvents.signups += 1;
+}
+
+/* ---- metrics: Prometheus text format, hand-rolled ----
+ * Scraped by the operator's own Prometheus through the tunnel, behind
+ * PTCG_METRICS_TOKEN. Counters are per-process (rate() handles restarts);
+ * account/binder totals are read from the database at scrape time. */
+const METRICS_TOKEN = (process.env.PTCG_METRICS_TOKEN || '').trim();
+const mEvents = { signups: 0, upgrades: 0 };
+const mHttp = Object.create(null);   // 'kind|status' -> count
+function metricsText() {
+  const os = require('os');
+  const esc_ = (v) => String(v).replace(/(["\\])/g, '\\$1');
+  const L = [];
+  L.push('# TYPE ptcg_http_requests_total counter');
+  for (const [k, n] of Object.entries(mHttp)) {
+    const [kind, status] = k.split('|');
+    L.push(`ptcg_http_requests_total{kind="${esc_(kind)}",status="${status}"} ${n}`);
+  }
+  L.push('# TYPE ptcg_signups_total counter');
+  L.push(`ptcg_signups_total ${mEvents.signups}`);
+  L.push('# TYPE ptcg_upgrades_total counter');
+  L.push(`ptcg_upgrades_total ${mEvents.upgrades}`);
+  L.push('# TYPE ptcg_users gauge');
+  L.push(`ptcg_users{plan="all"} ${_countUsers.get().n}`);
+  L.push(`ptcg_users{plan="premium"} ${db.prepare("SELECT COUNT(*) AS n FROM users WHERE plan = 'premium'").get().n}`);
+  L.push('# TYPE ptcg_binders_total gauge');
+  L.push(`ptcg_binders_total ${db.prepare('SELECT COUNT(*) AS n FROM binders').get().n}`);
+  L.push('# TYPE ptcg_collections_total gauge');
+  L.push(`ptcg_collections_total ${db.prepare('SELECT COUNT(*) AS n FROM collections').get().n}`);
+  L.push('# TYPE box_load1 gauge');
+  L.push(`box_load1 ${os.loadavg()[0].toFixed(3)}`);
+  L.push('# TYPE box_memory_free_bytes gauge');
+  L.push(`box_memory_free_bytes ${os.freemem()}`);
+  L.push('# TYPE box_memory_total_bytes gauge');
+  L.push(`box_memory_total_bytes ${os.totalmem()}`);
+  try {
+    const st = fs.statfsSync(DATA_DIR);
+    L.push('# TYPE box_disk_free_bytes gauge');
+    L.push(`box_disk_free_bytes ${st.bavail * st.bsize}`);
+  } catch { /* statfs unavailable */ }
+  L.push('# TYPE process_resident_memory_bytes gauge');
+  L.push(`process_resident_memory_bytes ${process.memoryUsage().rss}`);
+  L.push('# TYPE process_uptime_seconds gauge');
+  L.push(`process_uptime_seconds ${process.uptime().toFixed(0)}`);
+  if (RELEASE_VERSION) L.push(`# TYPE ptcg_info gauge`, `ptcg_info{release="${esc_(RELEASE_VERSION)}"} 1`);
+  return L.join('\n') + '\n';
 }
 const getUserByEmail = (addr) => rowToUser(_getUserByEmail.get(String(addr || '').trim().toLowerCase()));
 function getCollectionOf(userId) {
@@ -2374,6 +2421,58 @@ async function handleApi(req, res, pathname, ip, url) {
 
   // does the master have a newer database than this install? (cheap ping of
   // catalog.json — no card data moves until the admin actually updates)
+  /* ---- data health: which cards, printings and sets have holes ----
+   * Admin-only, meant for the maintainer workspace where the editor that
+   * FIXES these lives. Read-only; lists cap at 300 rows each so a whole
+   * missing language can't flood the panel — the counts stay true. */
+  if (pathname === '/api/catalog/data-health' && req.method === 'GET') {
+    const dhUser = authUser(req);
+    if (!dhUser || !isAdminUser(dhUser)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    const CAP = 300;
+    const capped = (rows) => ({ count: rows.length, sample: rows.slice(0, CAP) });
+    const cardsNoImage = db.prepare(`SELECT lang, id, set_id, name FROM cards
+      WHERE hidden = 0 AND (img_low IS NULL OR img_low = '') ORDER BY lang, set_id, position`).all();
+    const cardsNoHigh = db.prepare(`SELECT lang, id, set_id, name FROM cards
+      WHERE hidden = 0 AND img_low IS NOT NULL AND img_low != '' AND (img_high IS NULL OR img_high = '')
+      ORDER BY lang, set_id, position`).all();
+    const printingsNoImage = db.prepare(`SELECT p.lang, p.card_id, p.variant, p.label, c.name FROM printings p
+      JOIN cards c ON c.lang = p.lang AND c.id = p.card_id
+      WHERE p.hidden = 0 AND c.hidden = 0 AND (p.img_low IS NULL OR p.img_low = '')
+      ORDER BY p.lang, p.card_id`).all();
+    const missingData = db.prepare(`SELECT lang, id, set_id, name, rarity, category, hp, dex_csv, types_csv, illustrator FROM cards
+      WHERE hidden = 0 AND (rarity IS NULL OR category IS NULL OR illustrator IS NULL
+        OR (category = 'Pokemon' AND (hp IS NULL OR dex_csv IS NULL OR dex_csv = '' OR types_csv IS NULL OR types_csv = '')))
+      ORDER BY lang, set_id, position`).all()
+      .map((c) => ({ lang: c.lang, id: c.id, set: c.set_id, name: c.name,
+        missing: [
+          c.rarity == null ? 'rarity' : null,
+          c.category == null ? 'category' : null,
+          c.illustrator == null ? 'illustrator' : null,
+          c.category === 'Pokemon' && c.hp == null ? 'hp' : null,
+          c.category === 'Pokemon' && !c.dex_csv ? 'dex' : null,
+          c.category === 'Pokemon' && !c.types_csv ? 'types' : null,
+        ].filter(Boolean) }));
+    const setIssues = db.prepare(`SELECT s.lang, s.id, s.name, s.logo, s.release_date, s.official_count,
+        (SELECT COUNT(*) FROM cards c WHERE c.lang = s.lang AND c.set_id = s.id AND c.hidden = 0) AS actual
+      FROM sets s WHERE s.hidden = 0 ORDER BY s.lang, s.position`).all()
+      .map((x) => ({ lang: x.lang, id: x.id, name: x.name,
+        missing: [
+          !x.logo ? 'logo' : null,
+          !x.release_date ? 'releaseDate' : null,
+          x.official_count == null ? 'officialCount' : null,
+          x.official_count != null && x.actual < x.official_count ? `cards (${x.actual}/${x.official_count})` : null,
+        ].filter(Boolean) }))
+      .filter((x) => x.missing.length);
+    return sendJSON(res, 200, {
+      totalCards: db.prepare('SELECT COUNT(*) AS n FROM cards WHERE hidden = 0').get().n,
+      cardsNoImage: capped(cardsNoImage),
+      cardsNoHigh: capped(cardsNoHigh),
+      printingsNoImage: capped(printingsNoImage),
+      missingData: capped(missingData),
+      setIssues: capped(setIssues),
+    });
+  }
+
   if (pathname === '/api/catalog/update-check' && req.method === 'GET') {
     // same answer the scheduled check records, asked on demand
     const st = await masterUpdateStatus();
@@ -2885,6 +2984,7 @@ async function handleApi(req, res, pathname, ip, url) {
       if (!target) return sendJSON(res, 200, { ok: true, ignored: 'no such account' });   // 200: retrying won't help
       db.prepare('UPDATE users SET plan = ?, stripe_customer = ? WHERE id = ?')
         .run('premium', typeof obj.customer === 'string' ? obj.customer : null, target.id);
+      mEvents.upgrades += 1;
       console.log(`Billing: checkout completed → ${target.username} is premium`);
       return sendJSON(res, 200, { ok: true, plan: 'premium' });
     }
@@ -3668,7 +3768,29 @@ async function handleApi(req, res, pathname, ip, url) {
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
   const ip = clientIp(req);
+  // count on the way out: landing views vs app shell vs API vs assets
+  res.on('finish', () => {
+    const p = url.pathname;
+    const host = String(req.headers.host || '').toLowerCase().split(':')[0];
+    const kind = p.startsWith('/api/') ? 'api'
+      : (p === '/home' || p === '/home.html' || ((p === '/' || p === '/index.html') && HOME_HOSTS.includes(host))) ? 'landing'
+      : (p === '/' || p === '/index.html') ? 'app'
+      : 'asset';
+    const k = kind + '|' + res.statusCode;
+    mHttp[k] = (mHttp[k] || 0) + 1;
+  });
   try {
+    if (url.pathname === '/metrics') {
+      if (!METRICS_TOKEN) { res.writeHead(404); return res.end('Metrics are not enabled (set PTCG_METRICS_TOKEN).'); }
+      const given = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+      const a = Buffer.from(given), b = Buffer.from(METRICS_TOKEN);
+      if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+        res.writeHead(401); return res.end('Metrics want their own bearer token.');
+      }
+      const body = metricsText();
+      res.writeHead(200, { 'Content-Type': 'text/plain; version=0.0.4; charset=utf-8', 'Content-Length': Buffer.byteLength(body) });
+      return res.end(body);
+    }
     if (url.pathname.startsWith('/api/')) {
       await handleApi(req, res, url.pathname, ip, url);
     } else if (url.pathname.startsWith('/bimg/') && (req.method === 'GET' || req.method === 'HEAD')) {

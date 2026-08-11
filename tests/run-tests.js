@@ -110,6 +110,7 @@ function fail(msg) {
     PTCG_SOURCE_API: 'http://localhost:3999/v2',
     PTCG_STRIPE_WEBHOOK_SECRET: 'whsec_test_secret',
     PTCG_STRIPE_CHECKOUT_URL: 'https://buy.stripe.com/test_premium',
+    PTCG_METRICS_TOKEN: 'test-metrics-token',
   }, true);
   await waitForPort(3111).catch((e) => fail(e.message));
   // the install is unclaimed, so it printed a code; the browser suite needs it
@@ -372,6 +373,32 @@ function fail(msg) {
     const order = await send({ type: 'invoice.paid', data: { object: {} } });
     check('billing: unknown customers and unrelated events are acknowledged, not retried forever',
       stranger.status === 200 && order.status === 200);
+  }
+
+  /* ---- metrics + data health ---- */
+  {
+    const noTok = await fetch('http://localhost:3111/metrics');
+    check('metrics want their own bearer token', noTok.status === 401);
+    const met = await fetch('http://localhost:3111/metrics', { headers: { Authorization: 'Bearer test-metrics-token' } });
+    const mBody = await met.text();
+    check('metrics speak Prometheus: signups, upgrades, users, http kinds, box gauges',
+      met.status === 200 &&
+      /ptcg_signups_total \d+/.test(mBody) && /ptcg_upgrades_total [1-9]/.test(mBody) &&
+      /ptcg_users\{plan="all"\} \d+/.test(mBody) &&
+      /ptcg_http_requests_total\{kind="api",status="200"\} \d+/.test(mBody) &&
+      /box_memory_free_bytes \d+/.test(mBody));
+
+    const admLogin = await jfetch('http://localhost:3111/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'ptcgadmin', password: 'password123' }) });
+    const aAuth = { Authorization: 'Bearer ' + admLogin.token };
+    const anonDh = await fetch('http://localhost:3111/api/catalog/data-health');
+    check('data health is for administrators only', anonDh.status === 403 || anonDh.status === 401);
+    const dh = await jfetch('http://localhost:3111/api/catalog/data-health', { headers: aAuth });
+    check('data health finds the imageless cards (the ceiling set has no scans at all)',
+      dh.cardsNoImage.count >= 200 && dh.cardsNoImage.sample.some((c) => c.set_id === 'ceiling'));
+    check('data health flags cards missing data, and says which fields',
+      dh.missingData.count > 0 && dh.missingData.sample.every((c) => Array.isArray(c.missing) && c.missing.length > 0));
+    check('data health caps its samples but tells the true count',
+      dh.cardsNoImage.sample.length <= 300 && dh.cardsNoImage.count >= dh.cardsNoImage.sample.length);
   }
 
   // ---- sign-in security ----

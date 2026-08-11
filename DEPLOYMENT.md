@@ -248,6 +248,31 @@ it ever made — the wall is creation-only. Test the loop in Stripe's test
 mode (test-mode payment link + test-mode webhook secret) before flipping
 live keys in.
 
+### 8. Metrics (optional — for your own Prometheus/Grafana)
+
+Both services speak Prometheus behind their own bearer tokens. Mint two
+values (`openssl rand -hex 24`), set `PTCG_METRICS_TOKEN=…` in
+`/etc/ptcg-tracker/env` and `CARD_METRICS_TOKEN=…` in
+`/etc/card-api/env`, restart both, and scrape through the tunnels:
+
+```yaml
+- job_name: pkmn-tracker
+  scheme: https
+  metrics_path: /metrics
+  authorization: { credentials: <tracker value> }
+  static_configs: [{ targets: ['mstr.pkmnmasterset.com'] }]
+- job_name: card-api
+  scheme: https
+  metrics_path: /metrics
+  authorization: { credentials: <api value> }
+  static_configs: [{ targets: ['api.pkmnmasterset.com'] }]
+```
+
+Tracker: landing/app/api request counters (funnel = signups over landing
+views), signup and upgrade counters, user/premium/binder gauges. API:
+per-route request counters + latency, per-token monthly spend, catalog
+version/age. Both: box load, memory and disk — no node_exporter needed.
+
 ### What to back up on this box
 
 `/var/lib/ptcg-tracker` (accounts, collections, binders — the state that

@@ -3719,6 +3719,39 @@ function adminCardsTab() {
         h('h3', { style: 'margin:0 0 6px' }, 'Jobs'),
         h('div', { class: 'row' }, ...jobs),
       ) : null,
+      // where the catalog has holes — meant for the workspace, where the
+      // editor that fixes them lives
+      (() => {
+        const out = h('div', {});
+        const btn = h('button', { class: 'btn ghost small', onclick: async (e) => {
+          e.target.disabled = true;
+          out.replaceChildren(spinner());
+          try {
+            const d = await apiCall('catalog/data-health');
+            const section = (title, box, render) => box.count === 0 ? null : h('details', { style: 'margin:6px 0' },
+              h('summary', {}, `${title}: ${box.count}${box.count > box.sample.length ? ` (showing ${box.sample.length})` : ''}`),
+              h('div', { class: 'muted small', style: 'max-height:220px; overflow:auto; margin-top:4px' },
+                ...box.sample.map(render)));
+            const rows = [
+              section('Cards with no image at all', d.cardsNoImage, (c) => h('div', {}, `${c.name} — ${c.lang}/${c.id}`)),
+              section('Cards missing the high-res scan', d.cardsNoHigh, (c) => h('div', {}, `${c.name} — ${c.lang}/${c.id}`)),
+              section('Printings with no scan of their own', d.printingsNoImage, (p) => h('div', {}, `${p.name} — ${p.lang}/${p.card_id} · ${p.label || p.variant}`)),
+              section('Cards missing data', d.missingData, (c) => h('div', {}, `${c.name} — ${c.lang}/${c.id} · missing ${c.missing.join(', ')}`)),
+              section('Sets with issues', d.setIssues, (x) => h('div', {}, `${x.name} — ${x.lang}/${x.id} · ${x.missing.join(', ')}`)),
+            ].filter(Boolean);
+            out.replaceChildren(
+              h('p', { class: 'muted small', style: 'margin:6px 0' },
+                rows.length ? `${d.totalCards} visible cards checked.` : `All clean — ${d.totalCards} cards, no holes found.`),
+              ...rows);
+          } catch (err) { out.replaceChildren(); toast(err.message); }
+          e.target.disabled = false;
+        } }, '🩺 Check data health');
+        return settingsCard(
+          h('h3', { style: 'margin:0 0 6px' }, 'Data health'),
+          h('p', { class: 'muted small', style: 'margin:0 0 8px' },
+            'Which cards, printings and sets are missing images or data. Fix them here in the workspace — then publish.'),
+          btn, out);
+      })(),
       // download images locally + repoint rows to the local copies
       settingsCard(
         h('h3', { style: 'margin:0 0 6px' }, 'Images'),
