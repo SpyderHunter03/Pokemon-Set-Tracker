@@ -3503,8 +3503,14 @@ function renderAccountPage(tab) {
             m.portalApi
               ? h('button', { class: 'btn ghost small', onclick: async (e) => {
                 e.target.disabled = true;
-                try { const r = await apiCall('billing/portal', { method: 'POST', body: '{}' }); location.href = r.url; }
-                catch (err) { e.target.disabled = false; toast(err.message); }
+                // open the tab NOW, synchronously in the click — popup blockers
+                // allow that, then we point it at the session once it exists
+                const tab = window.open('', '_blank');
+                try {
+                  const r = await apiCall('billing/portal', { method: 'POST', body: '{}' });
+                  if (tab) { tab.opener = null; tab.location = r.url; } else { location.href = r.url; }
+                } catch (err) { if (tab) tab.close(); toast(err.message); }
+                e.target.disabled = false;
               } }, '⚙ Manage subscription')
               : m.portalUrl
                 ? h('div', {},
