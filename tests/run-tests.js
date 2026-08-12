@@ -104,6 +104,8 @@ function fail(msg) {
   pinTestConfig();
   fs.rmSync(path.join(ROOT, 'public', 'cdn'), { recursive: true, force: true });
   fs.rmSync(path.join(ROOT, '.test-data'), { recursive: true, force: true });
+  start('node', ['tests/mock-stripe.js']);
+  await waitForPort(3994).catch((e) => fail(e.message));
   const mainServer = start('node', ['server.js'], {
     PORT: '3111',
     DATA_DIR: path.join(ROOT, '.test-data'),
@@ -112,6 +114,8 @@ function fail(msg) {
     PTCG_STRIPE_CHECKOUT_URL: 'https://buy.stripe.com/test_premium',
     PTCG_METRICS_TOKEN: 'test-metrics-token',
     PTCG_STRIPE_PORTAL_URL: 'https://billing.stripe.com/p/login/test_portal',
+    PTCG_STRIPE_SECRET_KEY: 'rk_test_portal_key',
+    PTCG_STRIPE_API_BASE: 'http://localhost:3994',
   }, true);
   await waitForPort(3111).catch((e) => fail(e.message));
   // the install is unclaimed, so it printed a code; the browser suite needs it
@@ -330,8 +334,11 @@ function fail(msg) {
     const mePaid = await jfetch('http://localhost:3111/api/me', { headers: fAuth });
     check('billing: a signed checkout.session.completed makes the account premium (and the upgrade link retires)',
       paid.status === 200 && mePaid.plan === 'premium' && mePaid.upgradeUrl === null);
-    check('billing: a paying subscriber gets the manage-subscription portal link',
-      mePaid.portalUrl === 'https://billing.stripe.com/p/login/test_portal');
+    check('billing: with a secret key configured, subscribers get portal sessions (API beats the login link)',
+      mePaid.portalApi === true && mePaid.portalUrl === null);
+    const session = await jfetch('http://localhost:3111/api/billing/portal', { method: 'POST', headers: fAuth, body: '{}' });
+    check('billing: the portal endpoint mints a session straight to the customer\'s portal',
+      session.url === 'https://billing.stripe.com/session/mock_cus_test1');
 
     const third = await jfetch('http://localhost:3111/api/binders', { method: 'POST', headers: fAuth, body: JSON.stringify({ name: 'Two', size: 3 }) });
     check('billing: premium removes the binder wall', !!(third.binder && third.binder.id));

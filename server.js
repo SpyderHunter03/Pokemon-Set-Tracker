@@ -3012,6 +3012,34 @@ async function handleApi(req, res, pathname, ip, url) {
   const user = authUser(req);
   if (!user) return sendJSON(res, 401, { error: 'Not signed in' });
 
+  /* ---- billing: open the customer portal, no email dance ----
+   * Creates a Stripe billing-portal session for THIS user's stored customer
+   * and hands back its one-time URL. Plain REST, zero dependencies. Use a
+   * RESTRICTED key (rk_live_…, "Customer portal" write only) — this endpoint
+   * is the only thing that needs it, so the key should be able to do
+   * nothing else. PTCG_STRIPE_API_BASE exists for the test suite's mock. */
+  if (pathname === '/api/billing/portal' && req.method === 'POST') {
+    const sk = (process.env.PTCG_STRIPE_SECRET_KEY || '').trim();
+    if (!sk) return sendJSON(res, 400, { error: 'Portal sessions are not configured on this server' });
+    if (!user.stripeCustomer) return sendJSON(res, 400, { error: 'No subscription on file for this account' });
+    const stripeBase = (process.env.PTCG_STRIPE_API_BASE || 'https://api.stripe.com').replace(/\/+$/, '');
+    const host = String(req.headers.host || 'mstr.pkmnmasterset.com');
+    try {
+      const r = await fetch(stripeBase + '/v1/billing_portal/sessions', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer ' + sk, 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ customer: user.stripeCustomer, return_url: 'https://' + host + '/#/account' }).toString(),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok || !data.url) {
+        return sendJSON(res, 502, { error: (data.error && data.error.message) || 'Stripe refused to open the portal' });
+      }
+      return sendJSON(res, 200, { url: data.url });
+    } catch (e) {
+      return sendJSON(res, 502, { error: 'Could not reach Stripe: ' + e.message });
+    }
+  }
+
   if (pathname === '/api/me' && req.method === 'GET') {
     // upgradeUrl: the Stripe Payment Link with this account's id riding along
     // as client_reference_id, so the checkout webhook knows whose plan to
@@ -3020,13 +3048,16 @@ async function handleApi(req, res, pathname, ip, url) {
     const upgradeUrl = payBase && planOf(user) !== 'premium'
       ? payBase + (payBase.includes('?') ? '&' : '?') + 'client_reference_id=' + encodeURIComponent(user.id)
       : null;
-    // manage-subscription: Stripe's hosted customer portal (the no-code
-    // login link). Only for accounts with a Stripe customer on file — a
-    // comped admin has no subscription to manage.
-    const portalUrl = user.stripeCustomer ? ((process.env.PTCG_STRIPE_PORTAL_URL || '').trim() || null) : null;
+    // manage-subscription: Stripe's hosted customer portal. Two flavours —
+    // portalApi (this server mints a session; no email step) when a secret
+    // key is configured, else the no-code login link. Either way only for
+    // accounts with a Stripe customer on file: a comped admin has nothing
+    // to manage.
+    const portalApi = !!user.stripeCustomer && !!(process.env.PTCG_STRIPE_SECRET_KEY || '').trim();
+    const portalUrl = user.stripeCustomer && !portalApi ? ((process.env.PTCG_STRIPE_PORTAL_URL || '').trim() || null) : null;
     return sendJSON(res, 200, {
       username: user.display, admin: isAdminUser(user),
-      plan: planOf(user), upgradeUrl, portalUrl,
+      plan: planOf(user), upgradeUrl, portalUrl, portalApi,
       email: user.email, emailVerified: user.emailVerified,
       totpEnabled: user.totpEnabled,
       recoveryLeft: user.totpEnabled ? _countRecovery.get(user.id).n : 0,

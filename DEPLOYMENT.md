@@ -238,7 +238,15 @@ acquisition). One subscription product: Tracker Premium, $2.99/mo.
 PTCG_STRIPE_CHECKOUT_URL=https://buy.stripe.com/…
 PTCG_STRIPE_WEBHOOK_SECRET=whsec_…
 PTCG_STRIPE_PORTAL_URL=https://billing.stripe.com/p/login/…
+PTCG_STRIPE_SECRET_KEY=rk_live_…
 ```
+
+`PTCG_STRIPE_SECRET_KEY` upgrades ⚙ Manage subscription from the email
+magic-link page to a direct portal session (no email step): create a
+**restricted key** in Stripe (Developers → API keys → Create restricted
+key) with ONLY the "Customer portal" write permission — the endpoint
+needs nothing else, so the key should be able to do nothing else. With
+the key absent, the no-code PTCG_STRIPE_PORTAL_URL is the fallback.
 
 The portal URL is Stripe's hosted customer portal login (Settings →
 Billing → Customer portal → activate the no-code link). It becomes the

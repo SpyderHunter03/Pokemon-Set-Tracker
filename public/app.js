@@ -3500,9 +3500,17 @@ function renderAccountPage(tab) {
           ? h('div', {},
             h('p', { style: 'margin:0' + (m.portalUrl ? ' 0 10px' : '') }, '⭐ ', h('strong', {}, 'Master Set Premium'),
               m.admin ? ' (administrator accounts are always Premium).' : ' — unlimited binders, and the card scanner when it ships.'),
-            m.portalUrl
-              ? h('a', { class: 'btn ghost small', href: m.portalUrl, target: '_blank', rel: 'noopener' }, '⚙ Manage subscription')
-              : null)
+            m.portalApi
+              ? h('button', { class: 'btn ghost small', onclick: async (e) => {
+                e.target.disabled = true;
+                try { const r = await apiCall('billing/portal', { method: 'POST', body: '{}' }); location.href = r.url; }
+                catch (err) { e.target.disabled = false; toast(err.message); }
+              } }, '⚙ Manage subscription')
+              : m.portalUrl
+                ? h('div', {},
+                  h('a', { class: 'btn ghost small', href: m.portalUrl, target: '_blank', rel: 'noopener' }, '⚙ Manage subscription'),
+                  h('p', { class: 'muted small', style: 'margin:6px 0 0' }, 'Use the email from your purchase receipt to sign in.'))
+                : null)
           : h('div', {},
             h('p', { style: 'margin:0 0 4px' }, h('strong', {}, 'Free'), ' — full collection tracking and one binder.'),
             h('p', { class: 'muted small', style: 'margin:0 0 10px' }, 'Master Set Premium adds unlimited binders, and the card scanner when it ships.'),
