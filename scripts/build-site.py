@@ -79,6 +79,12 @@ CSS = """
   footer .cols { display:flex; gap:40px; flex-wrap:wrap; margin-bottom:20px; }
   footer .col { min-width:140px; } footer .col b { color:var(--text); display:block; margin-bottom:8px; font-size:13.5px; }
   footer .col a { display:block; color:var(--muted); padding:2px 0; }
+  .frame { max-width:980px; margin:44px auto 0; border:1px solid var(--line); border-radius:16px; overflow:hidden;
+           box-shadow:0 30px 80px -30px rgba(0,0,0,0.8); background:#0b0e1c; }
+  .frame video, .frame img { width:100%; display:block; }
+  .shot { width:100%; display:block; border:1px solid var(--line); border-radius:14px; margin-top:26px;
+          box-shadow:0 24px 60px -28px rgba(0,0,0,0.75); }
+  .brandmark { width:26px; height:26px; vertical-align:-7px; margin-right:2px; }
   @media (max-width:720px) { nav .links { display:none; } .hero { padding:56px 0 44px; } section { padding:42px 0; } }
 """
 
@@ -91,7 +97,7 @@ def nav(active):
         parts.append('<a href="' + h + '"' + cls + '>' + t + '</a>')
     a = ''.join(parts)
     return f'''<nav><div class="wrap">
-  <a class="brand" href="/">🃏 Pkmn <span>Master Set</span></a>
+  <a class="brand" href="/"><img class="brandmark" src="/site/assets/mark.svg" alt=""> Pkmn <span>Master Set</span></a>
   <div class="links">{a}</div>
   <a class="btn ghost cta" href="{APP}/">Open the tracker</a>
 </div></nav>'''
@@ -121,6 +127,13 @@ def page(fname, title, desc, active, body, canonical):
 <meta name="description" content="{desc}">
 <link rel="icon" href="/icons/icon-192.png">
 <link rel="canonical" href="https://www.pkmnmasterset.com{canonical}">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Pkmn Master Set">
+<meta property="og:title" content="{title}">
+<meta property="og:description" content="{desc}">
+<meta property="og:image" content="https://www.pkmnmasterset.com/site/assets/og.png">
+<meta property="og:url" content="https://www.pkmnmasterset.com{canonical}">
+<meta name="twitter:card" content="summary_large_image">
 <style>{CSS}</style>
 </head>
 <body>
@@ -145,6 +158,13 @@ index_body = f'''
     <a class="btn ghost big" href="{APP}/">Browse the card library</a>
   </div>
   <div class="tiny">The full card library is open to everyone — no account needed to look around.</div>
+  <div class="frame">
+    <video autoplay loop muted playsinline poster="/site/assets/hero-poster.png" aria-label="Ticking cards in the tracker as the set's progress bar climbs">
+      <source src="/site/assets/hero.webm" type="video/webm">
+      <source src="/site/assets/hero.mp4" type="video/mp4">
+      <img src="/site/assets/hero-poster.png" alt="The tracker's set page">
+    </video>
+  </div>
 </div></div>
 
 <section><div class="wrap">
@@ -171,6 +191,7 @@ index_body = f'''
     <div class="card"><div class="ico">🔗</div><h3>Share your binders</h3>
       <p>Unguessable links anyone can open — trade lists, brag pages, want-lists. Free for everyone.</p></div>
   </div>
+  <img class="shot" src="/site/assets/shot-wantlist.png" alt="A set as a text want-list with the Missing filter on" loading="lazy" style="max-width:980px; margin-left:auto; margin-right:auto">
   <p style="text-align:center; margin-top:26px"><a class="btn ghost" href="/features">See all features</a></p>
 </div></section>
 
@@ -204,6 +225,7 @@ features_body = f'''
     <div class="card"><div class="ico">🌍</div><h3>Multi-language</h3>
       <p>Card data in English, Japanese, German and more. Your collection is keyed to the card, not the name, so it carries across languages.</p></div>
   </div>
+  <img class="shot" src="/site/assets/shot-sets.png" alt="The sets page: every set with its completion progress" loading="lazy">
 </div></section>
 
 <section class="alt"><div class="wrap">
@@ -217,6 +239,7 @@ features_body = f'''
     <div class="card"><div class="ico">🔗</div><h3>Sharing</h3>
       <p>Every binder is private until you say otherwise. A share link is unguessable, needs no account to open, can hide your ticks, and dies the moment you turn it off.</p></div>
   </div>
+  <img class="shot" src="/site/assets/shot-binders.png" alt="The binder shelf: colored binders with page counts" loading="lazy">
 </div></section>
 
 <section><div class="wrap">
