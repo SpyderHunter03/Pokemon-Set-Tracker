@@ -90,6 +90,7 @@ const { chromium } = require('playwright');
       /Master Set Premium/.test(homeText) && /\$2\.99/.test(homeText) && /Free account/.test(homeText));
     check('the front door carries the non-affiliation disclaimer',
       /not produced by, endorsed by, or affiliated/.test(homeText));
+    check('the front door sells the API too', /TCG Card API/.test(homeText) && /API docs/.test(homeText));
     // a deep link is never hijacked to the sales page, even for a new visitor
     await fp.goto('http://localhost:3111/#/pokemon');
     await fp.waitForTimeout(800);
