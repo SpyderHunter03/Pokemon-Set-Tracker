@@ -117,6 +117,25 @@ FOOTER = f'''<footer><div class="wrap">
      No card artwork is sold.</p>
 </div></footer>'''
 
+import hashlib, re as _re
+def _asset_versions():
+    d = {}
+    adir = os.path.join(OUT, 'assets')
+    if os.path.isdir(adir):
+        for f in os.listdir(adir):
+            with open(os.path.join(adir, f), 'rb') as fh:
+                d[f] = hashlib.md5(fh.read()).hexdigest()[:8]
+    return d
+ASSET_V = _asset_versions()
+
+def bust(html):
+    # /site/assets/<file> -> /site/assets/<file>?v=<content hash>, so caches
+    # can hold assets for a day AND updates show up the moment they deploy
+    def sub(m):
+        f = m.group(1)
+        return f'/site/assets/{f}?v={ASSET_V[f]}' if f in ASSET_V else m.group(0)
+    return _re.sub(r'/site/assets/([A-Za-z0-9._-]+)', sub, html)
+
 def page(fname, title, desc, active, body, canonical):
     html = f'''<!doctype html>
 <html lang="en">
@@ -144,7 +163,7 @@ def page(fname, title, desc, active, body, canonical):
 </html>
 '''
     with open(os.path.join(OUT, fname), 'w', encoding='utf-8') as f:
-        f.write(html)
+        f.write(bust(html))
     print('wrote', fname)
 
 # ---------------- index ----------------
