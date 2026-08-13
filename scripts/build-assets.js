@@ -125,30 +125,25 @@ async function waitUp(url, ms = 15000) {
     await page.screenshot({ path: path.join(OUT, 'shot-wantlist.png') });
     await ctx.close();
 
-    /* ---- the hero loop: ticking cards, progress climbing ---- */
-    const vctx = await mk({ recordVideo: { dir: OUT, size: { width: 1360, height: 850 } }, deviceScaleFactor: 1 });
-    const vp = await vctx.newPage();
-    await vp.goto(`${BASE}/#/set/verdantgrove`);
-    await vp.waitForSelector('.tcg-card');
-    await vp.waitForTimeout(1200);
-    const tiles = vp.locator('.tcg-card:not(.owned)');
-    for (let i = 0; i < 6; i++) {
-      const t = tiles.nth(i * 2);
-      if (!(await t.count())) break;
-      await t.click().catch(() => {});
-      await vp.waitForTimeout(650);
-    }
-    await vp.waitForTimeout(1000);
-    await vp.close();
-    const video = await (await vctx.pages(), vctx).close().then(() => {
-      const files = fs.readdirSync(OUT).filter((f) => f.endsWith('.webm'));
-      return files.length ? path.join(OUT, files[0]) : null;
+    /* ---- the hero film: 3D stage, choreographed in scripts/hero-stage.html ---- */
+    const vctx = await browser.newContext({
+      viewport: { width: 1200, height: 750 },
+      recordVideo: { dir: OUT, size: { width: 1200, height: 750 } },
     });
-    if (video) {
-      execSync(`ffmpeg -y -loglevel error -i "${video}" -an -vf "scale=1200:-2" -c:v libx264 -crf 26 -pix_fmt yuv420p "${path.join(OUT, 'hero.mp4')}"`);
-      execSync(`ffmpeg -y -loglevel error -i "${video}" -an -vf "scale=1200:-2" -c:v libvpx-vp9 -crf 38 -b:v 0 "${path.join(OUT, 'hero.webm')}"`);
-      execSync(`ffmpeg -y -loglevel error -ss 3 -i "${path.join(OUT, 'hero.mp4')}" -frames:v 1 "${path.join(OUT, 'hero-poster.png')}"`);
-      fs.rmSync(video);
+    const vp = await vctx.newPage();
+    await vp.goto('file://' + path.join(__dirname, 'hero-stage.html'));
+    await vp.waitForTimeout(12800);
+    await vp.close();
+    await vctx.close();
+    {
+      const files = fs.readdirSync(OUT).filter((f) => f.endsWith('.webm') && f !== 'hero.webm');
+      const video = files.length ? path.join(OUT, files[0]) : null;
+      if (video) {
+        execSync(`ffmpeg -y -loglevel error -ss 0.2 -t 12.4 -i "${video}" -an -c:v libx264 -crf 24 -pix_fmt yuv420p "${path.join(OUT, 'hero.mp4')}"`);
+        execSync(`ffmpeg -y -loglevel error -ss 0.2 -t 12.4 -i "${video}" -an -c:v libvpx-vp9 -crf 36 -b:v 0 "${path.join(OUT, 'hero.webm')}"`);
+        execSync(`ffmpeg -y -loglevel error -ss 2.8 -i "${path.join(OUT, 'hero.mp4')}" -frames:v 1 "${path.join(OUT, 'hero-poster.png')}"`);
+        fs.rmSync(video);
+      }
     }
 
     /* ---- OG share image (1200×630) ---- */

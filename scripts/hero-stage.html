@@ -1,0 +1,177 @@
+<!doctype html>
+<!-- The hero video's film set. scripts/build-assets.js opens this in a
+     headless browser, records ~12.5s, and encodes the result. Everything is
+     deterministic CSS keyframes on one master timeline — same film every
+     take. Invented sets and cards only; no Pokémon artwork, ever. -->
+<html><head><meta charset="utf-8"><style>
+  * { box-sizing:border-box; margin:0; }
+  html,body { width:1200px; height:750px; overflow:hidden; }
+  body { background:#0d1020; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; color:#e9ebf8;
+         opacity:0; animation: fadein .5s ease .05s forwards, fadeout .6s ease 11.9s forwards; }
+  @keyframes fadein { to { opacity:1; } }
+  @keyframes fadeout { to { opacity:0; } }
+  body::before { content:""; position:fixed; inset:0;
+    background:radial-gradient(700px 420px at 70% 12%, rgba(77,143,224,0.16), transparent 65%),
+               radial-gradient(520px 340px at 15% 90%, rgba(255,203,5,0.10), transparent 65%); }
+  .stage { position:absolute; inset:0; perspective:1500px; perspective-origin:50% 42%; }
+
+  /* ================= SCENE 1: the tilted grid, cards getting ticked ====== */
+  .s1 { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center;
+        transform-style:preserve-3d; animation: s1drift 4.2s ease-in-out .4s both, s1out .8s ease-in 4.4s forwards; }
+  @keyframes s1drift { 0% { transform: rotateX(12deg) rotateY(-9deg) translateZ(-40px); }
+                       100% { transform: rotateX(7deg) rotateY(9deg) translateZ(0); } }
+  @keyframes s1out { to { transform: rotateX(6deg) rotateY(-80deg) translateX(-320px) translateZ(-120px); opacity:0; } }
+  .s1 h2 { font-size:22px; margin-bottom:18px; letter-spacing:-0.3px; }
+  .s1 h2 span { color:#98a1c8; font-weight:400; font-size:16px; }
+  .cards { display:grid; grid-template-columns:repeat(4, 150px); gap:16px; transform-style:preserve-3d; }
+  .mini { width:150px; height:205px; border-radius:10px; background:#181d36; border:1px solid #272e52;
+          position:relative; padding:10px; transform-style:preserve-3d; box-shadow:0 18px 40px -18px rgba(0,0,0,0.8); }
+  .mini .art { height:104px; border-radius:7px; margin-bottom:8px; }
+  .g1 .art { background:linear-gradient(135deg,#2f7c4f,#173a2a); } .g2 .art { background:linear-gradient(135deg,#3b8a58,#14532d); }
+  .g3 .art { background:linear-gradient(135deg,#2e8b6e,#0f3d2e); } .g4 .art { background:linear-gradient(135deg,#followill,#173a2a); background:linear-gradient(135deg,#357a52,#122f22); }
+  .mini .nm { font-weight:700; font-size:14px; } .mini .no { color:#98a1c8; font-size:12px; }
+  .mini .hp { position:absolute; top:14px; right:14px; font-size:11px; color:#e9ebf8; opacity:.8; }
+  .tick { position:absolute; inset:0; border-radius:10px; opacity:0; }
+  .tick::before { content:""; position:absolute; inset:0; border-radius:10px; border:2px solid #4ade80; }
+  .tick::after { content:"✓"; position:absolute; top:-12px; right:-10px; width:34px; height:34px; border-radius:99px;
+                 background:#4ade80; color:#0d1020; font-weight:900; font-size:20px; display:flex; align-items:center; justify-content:center;
+                 box-shadow:0 6px 18px rgba(74,222,128,0.5); }
+  .t1 .tick { animation: pop .5s cubic-bezier(.2,1.6,.4,1) 1.0s forwards; } .t1 { animation: lift .5s ease 1.0s; }
+  .t2 .tick { animation: pop .5s cubic-bezier(.2,1.6,.4,1) 1.6s forwards; } .t2 { animation: lift .5s ease 1.6s; }
+  .t3 .tick { animation: pop .5s cubic-bezier(.2,1.6,.4,1) 2.2s forwards; } .t3 { animation: lift .5s ease 2.2s; }
+  .t4 .tick { animation: pop .5s cubic-bezier(.2,1.6,.4,1) 2.8s forwards; } .t4 { animation: lift .5s ease 2.8s; }
+  @keyframes pop { from { opacity:0; transform:scale(.6); } to { opacity:1; transform:scale(1); } }
+  @keyframes lift { 30% { transform:translateZ(46px); } 100% { transform:translateZ(0); } }
+  .hud { margin-top:22px; width:560px; background:rgba(24,29,54,0.9); border:1px solid #272e52; border-radius:12px; padding:12px 16px; }
+  .hud .lbl { display:flex; justify-content:space-between; font-size:13px; color:#98a1c8; margin-bottom:6px; }
+  .hud .bar { height:9px; border-radius:99px; background:#0b0e1c; overflow:hidden; }
+  .hud .fill { height:100%; border-radius:99px; background:linear-gradient(90deg,#ff5722,#ffcb05); width:52%;
+               animation: hudfill 2.4s steps(4, end) 1.0s forwards; }
+  @keyframes hudfill { to { width:81%; } }
+
+  /* ================= SCENE 2: progress bars race to MAX ================== */
+  .s2 { position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+        transform-style:preserve-3d; opacity:0;
+        animation: s2in .8s ease-out 4.7s both; }
+  @keyframes s2in { from { transform: rotateY(75deg) translateX(340px) translateZ(-140px); opacity:0; }
+                    to { transform: rotateY(-4deg) rotateX(4deg); opacity:1; } }
+  .panel { width:640px; background:#12162b; border:1px solid #272e52; border-radius:18px; padding:30px 34px;
+           box-shadow:0 40px 90px -30px rgba(0,0,0,0.85); position:relative; }
+  .panel h2 { font-size:20px; margin-bottom:20px; }
+  .prow { margin-bottom:20px; }
+  .prow .lbl { display:flex; justify-content:space-between; font-size:14px; margin-bottom:7px; }
+  .prow .lbl b { font-weight:700; } .prow .lbl span { color:#98a1c8; }
+  .prow .bar { height:14px; border-radius:99px; background:#0b0e1c; overflow:hidden; position:relative; }
+  .prow .fill { height:100%; border-radius:99px; background:linear-gradient(90deg,#ff5722,#ffcb05); }
+  .p1 .fill { width:62%; animation: full .9s cubic-bezier(.6,0,.3,1) 5.7s forwards; }
+  .p2 .fill { width:48%; animation: full 1.0s cubic-bezier(.6,0,.3,1) 6.1s forwards; }
+  .p3 .fill { width:24%; animation: full 1.2s cubic-bezier(.6,0,.3,1) 6.5s forwards; }
+  @keyframes full { to { width:100%; } }
+  .max { position:absolute; right:-8px; top:-11px; background:#4ade80; color:#0d1020; font-size:11px; font-weight:900;
+         border-radius:99px; padding:2px 9px; opacity:0; }
+  .p1 .max { animation: pop .4s cubic-bezier(.2,1.6,.4,1) 6.6s forwards; }
+  .p2 .max { animation: pop .4s cubic-bezier(.2,1.6,.4,1) 7.1s forwards; }
+  .p3 .max { animation: pop .4s cubic-bezier(.2,1.6,.4,1) 7.7s forwards; }
+  .stamp { position:absolute; right:26px; bottom:18px; border:3px solid #ffcb05; color:#ffcb05; border-radius:10px;
+           font-weight:900; font-size:20px; padding:6px 14px; transform:rotate(-8deg) scale(2.4); opacity:0;
+           animation: stamp .45s cubic-bezier(.2,1.4,.4,1) 7.9s forwards; }
+  @keyframes stamp { to { opacity:1; transform:rotate(-8deg) scale(1); } }
+
+  /* ================= the FOLD: scene 2 turns like a binder page ========== */
+  .fold { position:absolute; inset:0; transform-style:preserve-3d;
+          animation: foldgone .01s linear 9.9s forwards; }
+  @keyframes foldgone { to { opacity:0; visibility:hidden; } }
+  .leaf { position:absolute; inset:0; transform-origin:14% 50%; transform-style:preserve-3d;
+          animation: turn 1.15s cubic-bezier(.55,.05,.35,1) 8.7s forwards; }
+  @keyframes turn { to { transform: rotateY(-176deg); } }
+  .leaf .front { position:absolute; inset:0; backface-visibility:hidden; }
+  .leaf .back { position:absolute; inset:0; transform:rotateY(180deg); backface-visibility:hidden;
+                background:#0d1020; }
+  .shade { position:absolute; inset:0; background:linear-gradient(100deg, rgba(0,0,0,0) 30%, rgba(0,0,0,0.55));
+           opacity:0; animation: shadein 1.15s ease 8.7s; pointer-events:none; }
+  @keyframes shadein { 30% { opacity:1; } 100% { opacity:0; } }
+
+  /* ================= SCENE 3: the binder page, card drops in ============= */
+  .s3 { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; opacity:0;
+        animation: s3in .01s linear 9.25s forwards; perspective:1200px; }
+  @keyframes s3in { to { opacity:1; } }
+  .bpage { width:470px; background:linear-gradient(160deg,#8e2f2a,#6e1f1c); border-radius:16px; padding:22px;
+           box-shadow:0 40px 90px -28px rgba(0,0,0,0.9); transform: rotateX(6deg) rotateY(-5deg);
+           animation: bsettle 2.4s ease-out 9.3s both; position:relative; }
+  @keyframes bsettle { from { transform: rotateX(10deg) rotateY(-9deg); } to { transform: rotateX(5deg) rotateY(-3deg); } }
+  .bpage .rings { position:absolute; left:-9px; top:36px; bottom:36px; width:10px;
+    background:repeating-linear-gradient(#e9ebf8 0 14px, transparent 14px 42px); border-radius:6px; opacity:.85; }
+  .pockets { display:grid; grid-template-columns:repeat(3, 1fr); gap:11px; }
+  .pocket { aspect-ratio:63/88; border-radius:9px; border:2px dashed rgba(255,255,255,0.35);
+            background:rgba(0,0,0,0.18); position:relative; }
+  .pcard { position:absolute; inset:5px; border-radius:7px; background:#181d36; border:1px solid #272e52; padding:7px; }
+  .pcard .art { height:52%; border-radius:5px; background:linear-gradient(135deg,#31688f,#14263c); margin-bottom:6px; }
+  .pcard .nm { font-size:11px; font-weight:700; } .pcard .no { font-size:9.5px; color:#98a1c8; }
+  .drop .pcard { animation: drop 1.0s cubic-bezier(.3,0,.3,1.35) 10.2s both; }
+  .drop .pcard .art { background:linear-gradient(135deg,#b9770e,#7a4a05); }
+  @keyframes drop { 0% { transform: translate(240px,-520px) rotate(14deg); opacity:0; }
+                    25% { opacity:1; }
+                    100% { transform: translate(0,0) rotate(0); } }
+  .drop::after { content:"✓"; position:absolute; top:-11px; right:-11px; width:30px; height:30px; border-radius:99px;
+                 background:#4ade80; color:#0d1020; font-weight:900; font-size:17px; display:flex; align-items:center;
+                 justify-content:center; opacity:0; animation: pop .4s cubic-bezier(.2,1.6,.4,1) 11.25s forwards; }
+  .drop { animation: pglow .5s ease 11.2s; }
+  @keyframes pglow { 50% { box-shadow:0 0 0 5px rgba(74,222,128,0.45); border-color:#4ade80; } }
+  .btitle { text-align:center; color:rgba(255,255,255,0.92); font-weight:800; font-size:17px; margin-bottom:16px;
+            text-shadow:0 2px 8px rgba(0,0,0,0.5); }
+</style></head>
+<body>
+<div class="stage">
+
+  <!-- scene 3 sits at the bottom of the pile; the fold reveals it -->
+  <div class="s3"><div class="bpage">
+    <div class="rings"></div>
+    <div class="btitle">Emberwind Master Set — page 2</div>
+    <div class="pockets">
+      <div class="pocket"><div class="pcard"><div class="art"></div><div class="nm">Wavelet</div><div class="no">#9 · Common</div></div></div>
+      <div class="pocket"><div class="pcard"><div class="art"></div><div class="nm">Tidebloom</div><div class="no">#10 · Uncommon</div></div></div>
+      <div class="pocket"><div class="pcard"><div class="art"></div><div class="nm">Brinepup</div><div class="no">#11 · Common</div></div></div>
+      <div class="pocket"><div class="pcard"><div class="art"></div><div class="nm">Coralisk</div><div class="no">#12 · Rare</div></div></div>
+      <div class="pocket drop"><div class="pcard"><div class="art"></div><div class="nm">Pyrelark</div><div class="no">#13 · Rare Holo</div></div></div>
+      <div class="pocket"></div>
+      <div class="pocket"><div class="pcard"><div class="art"></div><div class="nm">Mistfin</div><div class="no">#14 · Common</div></div></div>
+      <div class="pocket"></div>
+      <div class="pocket"><div class="pcard"><div class="art"></div><div class="nm">Deepmaw</div><div class="no">#15 · Rare</div></div></div>
+    </div>
+  </div></div>
+
+  <!-- scenes 1+2 ride on the leaf that folds away -->
+  <div class="fold"><div class="leaf"><div class="front">
+
+    <div class="s1">
+      <h2>Verdant Grove <span>· 21 cards</span></h2>
+      <div class="cards">
+        <div class="mini g1"><div class="art"></div><div class="nm">Sproutle</div><div class="no">#1 · Common</div><div class="hp">HP 40</div><div class="tick"></div></div>
+        <div class="mini g2 t1"><div class="art"></div><div class="nm">Thornbud</div><div class="no">#2 · Common</div><div class="hp">HP 50</div><div class="tick"></div></div>
+        <div class="mini g3"><div class="art"></div><div class="nm">Mossvale</div><div class="no">#3 · Uncommon</div><div class="hp">HP 60</div><div class="tick"></div></div>
+        <div class="mini g4 t2"><div class="art"></div><div class="nm">Fernwhirl</div><div class="no">#4 · Rare</div><div class="hp">HP 70</div><div class="tick"></div></div>
+        <div class="mini g2"><div class="art"></div><div class="nm">Bloomkit</div><div class="no">#5 · Common</div><div class="hp">HP 40</div><div class="tick"></div></div>
+        <div class="mini g3 t3"><div class="art"></div><div class="nm">Verdanox</div><div class="no">#6 · Rare Holo</div><div class="hp">HP 90</div><div class="tick"></div></div>
+        <div class="mini g1 t4"><div class="art"></div><div class="nm">Petalisk</div><div class="no">#7 · Uncommon</div><div class="hp">HP 60</div><div class="tick"></div></div>
+        <div class="mini g4"><div class="art"></div><div class="nm">Grovemane</div><div class="no">#8 · Rare</div><div class="hp">HP 80</div><div class="tick"></div></div>
+      </div>
+      <div class="hud"><div class="lbl"><span>Set progress</span><span>climbing…</span></div>
+        <div class="bar"><div class="fill"></div></div></div>
+    </div>
+
+    <div class="s2"><div class="panel">
+      <h2>Your master sets</h2>
+      <div class="prow p1"><div class="lbl"><b>Emberwind</b><span>24 / 24</span></div>
+        <div class="bar"><div class="fill"></div><div class="max">MAX</div></div></div>
+      <div class="prow p2"><div class="lbl"><b>Tidal Crown</b><span>18 / 18</span></div>
+        <div class="bar"><div class="fill"></div><div class="max">MAX</div></div></div>
+      <div class="prow p3"><div class="lbl"><b>Verdant Grove</b><span>21 / 21</span></div>
+        <div class="bar"><div class="fill"></div><div class="max">MAX</div></div></div>
+      <div class="stamp">MASTER SET ✓</div>
+    </div></div>
+
+  </div><div class="back"></div></div>
+  <div class="shade"></div></div>
+
+</div>
+</body></html>
