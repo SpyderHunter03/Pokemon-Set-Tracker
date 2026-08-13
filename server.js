@@ -199,6 +199,25 @@ try { db.exec('ALTER TABLE users ADD COLUMN stripe_customer TEXT'); } catch { /*
 // a choice rather than a consequence.
 try { db.exec('ALTER TABLE binders ADD COLUMN share_have INTEGER NOT NULL DEFAULT 1'); } catch { /* already present */ }
 
+/* Personal printings: a user's OWN layer over the shared catalog. A row is a
+ * printing only its owner can see — an oddball the master does not carry, or
+ * their own scan attached to a printing the master does carry (label NULL,
+ * images set). Strictly separate from catalog curation on purpose: nothing in
+ * this table is ever published, pulled, or shown to anybody else. */
+db.exec(`
+  CREATE TABLE IF NOT EXISTS user_printings (
+    user_id  TEXT NOT NULL,
+    lang     TEXT NOT NULL DEFAULT 'en',
+    card_id  TEXT NOT NULL,
+    variant  TEXT NOT NULL,
+    label    TEXT,
+    img_low  TEXT,
+    img_high TEXT,
+    created  TEXT NOT NULL,
+    PRIMARY KEY (user_id, lang, card_id, variant)
+  );
+`);
+
 /* One-shot links: verify this address, reset this password. Only the SHA-256
  * of each token is kept — the raw value exists in the email and nowhere else,
  * so a copy of the database is not a set of skeleton keys. Every one carries
@@ -371,6 +390,26 @@ const _binderPut = db.prepare(`INSERT INTO binders (user_id, id, name, size, col
   VALUES (?,?,?,?,?,?,?,?,?,?)
   ON CONFLICT(user_id, id) DO UPDATE SET name=excluded.name, size=excluded.size, color=excluded.color,
     pages=excluded.pages, slots=excluded.slots, cover=excluded.cover, updated=excluded.updated`);
+
+// ---------- personal printings (the per-user catalog layer) ----------
+const USER_IMG_DIR = path.join(DATA_DIR, 'user-images');       // personal card scans
+const MAX_USER_PRINTINGS = 500;                                // per account, across languages
+const _userPrints = db.prepare('SELECT card_id, variant, label, img_low, img_high FROM user_printings WHERE user_id = ? AND lang = ? ORDER BY card_id, variant');
+const _userPrintsOfCard = db.prepare('SELECT variant, label, img_low, img_high FROM user_printings WHERE user_id = ? AND lang = ? AND card_id = ?');
+const _userPrintGet = db.prepare('SELECT variant, label, img_low, img_high FROM user_printings WHERE user_id = ? AND lang = ? AND card_id = ? AND variant = ?');
+const _userPrintPut = db.prepare(`INSERT INTO user_printings (user_id, lang, card_id, variant, label, img_low, img_high, created)
+  VALUES (?,?,?,?,?,?,?,?)
+  ON CONFLICT(user_id, lang, card_id, variant) DO UPDATE SET label=COALESCE(excluded.label, label),
+    img_low=COALESCE(excluded.img_low, img_low), img_high=COALESCE(excluded.img_high, img_high)`);
+const _userPrintDel = db.prepare('DELETE FROM user_printings WHERE user_id = ? AND lang = ? AND card_id = ? AND variant = ?');
+const _userPrintCount = db.prepare('SELECT COUNT(*) AS n FROM user_printings WHERE user_id = ?');
+/** remove a personal row's image files from disk (they are per-row, never shared) */
+function dropUserImages(row) {
+  for (const u of [row && row.img_low, row && row.img_high]) {
+    const m = typeof u === 'string' && u.match(/^\/uimg\/([a-f0-9-]{36}-(?:low|high)\.webp)$/);
+    if (m) fs.rm(path.join(USER_IMG_DIR, m[1]), { force: true }, () => {});
+  }
+}
 /** validate a binder cover choice: a set logo, a card's picture, or uploaded art */
 function cleanBinderCover(c) {
   if (!c || typeof c !== 'object') return null;
@@ -3677,6 +3716,87 @@ async function handleApi(req, res, pathname, ip, url) {
     return sendJSON(res, 200, { ok: true, updatedAt, count: Object.keys(clean).length });
   }
 
+  /* ---------- personal printings ----------
+   * A user's own layer over the catalog: printings only they can see, and
+   * their own scans attached to printings everybody can see. Never published,
+   * never pulled, never anybody else's. Admins get this too — it is how the
+   * curator keeps their collector hat separate. */
+  if (pathname === '/api/my/printings' && req.method === 'GET') {
+    const lang = LANG_RE.test(url.searchParams.get('lang') || '') ? url.searchParams.get('lang') : 'en';
+    const rows = _userPrints.all(user.id, lang).map((r) => ({
+      card: r.card_id, variant: r.variant, label: r.label || null,
+      img: (r.img_low || r.img_high) ? { low: r.img_low || null, high: r.img_high || null } : null,
+    }));
+    return sendJSON(res, 200, { lang, printings: rows });
+  }
+
+  if (pathname === '/api/my/printings' && req.method === 'POST') {
+    const body = await readBody(req);
+    const lang = LANG_RE.test(body.lang || '') ? body.lang : 'en';
+    const cardId = typeof body.cardId === 'string' && CARD_ID_RE.test(body.cardId) ? body.cardId : null;
+    const label = typeof body.label === 'string' ? body.label.trim().slice(0, 40) : '';
+    if (!cardId || label.length < 2) return sendJSON(res, 400, { error: 'cardId and a printing name (2+ characters) are required' });
+    if (!_cardExists.get(lang, cardId)) return sendJSON(res, 404, { error: `Card ${cardId} not found in the ${lang} database` });
+    // personal keys carry a my- prefix so they can never wear a standard
+    // printing's key — "Holo" as a personal name must not become the holo tick
+    const key = 'my-' + slugifyVariant(label).slice(0, 20);
+    if (!VARIANT_KEY_RE.test(key) || key === 'my-') return sendJSON(res, 400, { error: 'That name produces an invalid key' });
+    if (_userPrintCount.get(user.id).n >= MAX_USER_PRINTINGS && !_userPrintGet.get(user.id, lang, cardId, key)) {
+      return sendJSON(res, 400, { error: `Personal printings are capped at ${MAX_USER_PRINTINGS} per account` });
+    }
+    _userPrintPut.run(user.id, lang, cardId, key, label, null, null, new Date().toISOString());
+    return sendJSON(res, 200, { ok: true, cardId, key, label });
+  }
+
+  // attach YOUR scan to a printing — yours or a standard one. Only you see it.
+  if (pathname === '/api/my/printing-image' && req.method === 'POST') {
+    const lang = LANG_RE.test(url.searchParams.get('lang') || '') ? url.searchParams.get('lang') : 'en';
+    const cardId = url.searchParams.get('cardId') || '';
+    const variant = url.searchParams.get('variant') || '';
+    if (!CARD_ID_RE.test(cardId) || !VARIANT_KEY_RE.test(variant)) {
+      return sendJSON(res, 400, { error: 'Valid cardId and variant query parameters are required' });
+    }
+    let sharp;
+    try { sharp = require('sharp'); } catch {
+      return sendJSON(res, 501, { error: 'Image processing needs the sharp package on the server: npm install --no-save sharp' });
+    }
+    if (!_cardExists.get(lang, cardId)) return sendJSON(res, 404, { error: `Card ${cardId} not found in the ${lang} database` });
+    const existing = _userPrintGet.get(user.id, lang, cardId, variant);
+    if (!existing && _userPrintCount.get(user.id).n >= MAX_USER_PRINTINGS) {
+      return sendJSON(res, 400, { error: `Personal printings are capped at ${MAX_USER_PRINTINGS} per account` });
+    }
+    const raw = await readRawBody(req, 8 * 1024 * 1024).catch(() => null);
+    if (!raw || !raw.length) return sendJSON(res, 400, { error: 'Send the image file as the request body (8 MB max)' });
+    fs.mkdirSync(USER_IMG_DIR, { recursive: true });
+    const stem = crypto.randomUUID();
+    try {
+      await sharp(raw).rotate().resize({ width: 745, withoutEnlargement: true }).webp({ quality: 88 }).toFile(path.join(USER_IMG_DIR, `${stem}-high.webp`));
+      await sharp(raw).rotate().resize({ width: 245, withoutEnlargement: true }).webp({ quality: 82 }).toFile(path.join(USER_IMG_DIR, `${stem}-low.webp`));
+    } catch (e) {
+      return sendJSON(res, 400, { error: 'Could not process that image: ' + e.message });
+    }
+    if (existing) dropUserImages(existing);   // replaced scans do not pile up on disk
+    const low = `/uimg/${stem}-low.webp`;
+    const high = `/uimg/${stem}-high.webp`;
+    // an upsert that never nulls the label: a scan on a personal printing
+    // keeps its name; a scan on a standard variant has no name to keep
+    _userPrintPut.run(user.id, lang, cardId, variant, existing ? existing.label : null, low, high, new Date().toISOString());
+    return sendJSON(res, 200, { ok: true, urls: { low, high } });
+  }
+
+  if (pathname === '/api/my/printing-remove' && req.method === 'POST') {
+    const body = await readBody(req);
+    const lang = LANG_RE.test(body.lang || '') ? body.lang : 'en';
+    const cardId = typeof body.cardId === 'string' && CARD_ID_RE.test(body.cardId) ? body.cardId : null;
+    const variant = typeof body.variant === 'string' && VARIANT_KEY_RE.test(body.variant) ? body.variant : null;
+    if (!cardId || !variant) return sendJSON(res, 400, { error: 'cardId and variant are required' });
+    const row = _userPrintGet.get(user.id, lang, cardId, variant);
+    if (!row) return sendJSON(res, 404, { error: 'You have no personal printing there' });
+    dropUserImages(row);
+    _userPrintDel.run(user.id, lang, cardId, variant);
+    return sendJSON(res, 200, { ok: true });
+  }
+
   // ---------- binders (per-account; independent have/need checklist) ----------
   if (pathname === '/api/binders' && req.method === 'GET') {
     const lockedSet = lockedBinderIds(user);
@@ -3722,7 +3842,13 @@ async function handleApi(req, res, pathname, ip, url) {
       // between them can never actually be finished. Each card's printings sit
       // together, so the set's own numbering still runs front to back.
       const wanted = [];
-      for (const c of fill.cards) for (const variant of printingsOf(flang, c)) wanted.push({ card: c.id, variant, have: 0 });
+      for (const c of fill.cards) {
+        const vs = printingsOf(flang, c);
+        // the owner's personal printings belong in their own binder fill —
+        // a master-set binder that skipped your oddballs would never finish
+        for (const r of _userPrintsOfCard.all(user.id, flang, c.id)) if (!vs.includes(r.variant)) vs.push(r.variant);
+        for (const variant of vs) wanted.push({ card: c.id, variant, have: 0 });
+      }
       // a binder is a physical object with a limit; when the fill is bigger than
       // one, it fills what fits and says how much it left rather than silently
       // stopping short or making a binder the app can't page through
@@ -3911,6 +4037,18 @@ const server = http.createServer(async (req, res) => {
     }
     if (url.pathname.startsWith('/api/')) {
       await handleApi(req, res, url.pathname, ip, url);
+    } else if (url.pathname.startsWith('/uimg/') && (req.method === 'GET' || req.method === 'HEAD')) {
+      // personal card scans (stored under DATA_DIR, not public/) — reachable
+      // only by their unguessable name, exactly like binder art
+      const m = url.pathname.match(/^\/uimg\/([a-f0-9-]{36}-(?:low|high)\.webp)$/);
+      const file = m && path.join(USER_IMG_DIR, m[1]);
+      fs.stat(file || '', (err, stat) => {
+        if (err || !stat.isFile()) { res.writeHead(404); res.end('Not found'); return; }
+        res.writeHead(200, { 'Content-Type': 'image/webp', 'Content-Length': stat.size,
+          'Cache-Control': 'public, max-age=31536000, immutable' });
+        if (req.method === 'HEAD') return res.end();
+        fs.createReadStream(file).pipe(res);
+      });
     } else if (url.pathname.startsWith('/bimg/') && (req.method === 'GET' || req.method === 'HEAD')) {
       // user-uploaded binder images (stored under DATA_DIR, not public/)
       const m = url.pathname.match(/^\/bimg\/([a-f0-9-]{36}\.webp)$/);

@@ -1555,10 +1555,10 @@ const { chromium } = require('playwright');
     await ep.click('.binder-grid .pocket.filled .pocket-edit >> nth=0');
     await ep.waitForSelector('.pocket-actions');
     await ep.click('.pocket-actions button:has-text("Details")');
-    await ep.waitForSelector('#card-modal[open] button:has-text("Add printing")');
+    await ep.waitForSelector('#card-modal[open] button:has-text("Add printing (master)")');
     const printing = 'Smoke Keepstate';
     ep.once('dialog', (d) => d.accept(printing));
-    await ep.click('#card-modal button:has-text("Add printing")');
+    await ep.click('#card-modal button:has-text("Add printing (master)")');
     await ep.waitForSelector(`#card-modal .chip:has-text("${printing}")`);
     check('binder: adding a printing keeps edit mode on',
       (await ep.locator('.page-remove').count()) > 0);

@@ -137,13 +137,15 @@ const { chromium } = require('playwright');
   // add a custom printing to Charizard via the modal
   page.once('dialog', (d) => d.accept('Cracked Ice Holo'));
   await page.click('.tcg-card[data-card-id="base1-4"] >> nth=0 >> .info-btn');
-  await page.waitForSelector('#card-modal[open] button:has-text("Add printing")');
-  await page.click('#card-modal button:has-text("Add printing")');
+  await page.waitForSelector('#card-modal[open] button:has-text("Add printing (master)")');
+  check('the personal printing controls sit alongside the master ones',
+    (await page.locator('#card-modal button:has-text("just for you")').count()) === 1);
+  await page.click('#card-modal button:has-text("Add printing (master)")');
   await page.waitForSelector('#card-modal .chips .chip:has-text("Cracked Ice Holo")');
   check('admin can add a custom printing', true);
 
   // upload our own image for that printing
-  await page.setInputFiles('#card-modal input[type=file]', require('path').join(__dirname, 'fixtures', 'base1-4.png'));
+  await page.setInputFiles('#card-modal input[data-master-upload]', require('path').join(__dirname, 'fixtures', 'base1-4.png'));
   await page.waitForFunction(() => {
     const img = document.querySelector('#card-modal .card-img-wrap img');
     return img && img.src.includes('cracked-ice-holo');
@@ -188,7 +190,7 @@ const { chromium } = require('playwright');
   check('editor: removed printing drops its tile from the set', true);
   // re-adding a printing with the same name restores it, scan and all
   page.once('dialog', (d) => d.accept('Cracked Ice Holo'));
-  await page.click('#card-modal button:has-text("Add printing")');
+  await page.click('#card-modal button:has-text("Add printing (master)")');
   await page.waitForSelector('#card-modal .chips .chip:has-text("Cracked Ice Holo")');
   await page.click('#card-modal button:has-text("Close")');
   await page.waitForFunction((n) => document.querySelectorAll('.tcg-card').length === n + 1, tilesBefore);

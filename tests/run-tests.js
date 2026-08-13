@@ -232,6 +232,47 @@ function fail(msg) {
     try { fs.unlinkSync(orphanNew); } catch { /* tidy */ }
   }
 
+  // ---- personal printings: the per-user layer over the catalog ----
+  {
+    const regA = await jfetch('http://localhost:3111/api/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'mineuser', password: 'password123' }) });
+    const aAuth = { 'Content-Type': 'application/json', Authorization: 'Bearer ' + regA.token };
+    const regB = await jfetch('http://localhost:3111/api/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'notmineuser', password: 'password123' }) });
+    const bAuth2 = { 'Content-Type': 'application/json', Authorization: 'Bearer ' + regB.token };
+
+    const made = await jfetch('http://localhost:3111/api/my/printings', { method: 'POST', headers: aAuth, body: JSON.stringify({ cardId: 'base1-4', label: 'Graded PSA 9' }) });
+    check('personal printing minted with a my- key', made.ok === true && made.key === 'my-graded-psa-9' && made.label === 'Graded PSA 9');
+    const list = await jfetch('http://localhost:3111/api/my/printings?lang=en', { headers: aAuth });
+    check('personal printing listed for its owner', list.printings.length === 1 && list.printings[0].card === 'base1-4' && list.printings[0].label === 'Graded PSA 9');
+    const listB = await jfetch('http://localhost:3111/api/my/printings?lang=en', { headers: bAuth2 });
+    check('somebody else sees none of it', (listB.printings || []).length === 0);
+    const pubSet = await jfetch('http://localhost:3111/api/catalog/set?lang=en&id=base1');
+    check('the shared catalog stays clean of personal printings', !JSON.stringify(pubSet).includes('my-graded-psa-9'));
+
+    await jfetch('http://localhost:3111/api/collection', { method: 'PUT', headers: aAuth, body: JSON.stringify({ collection: { 'base1-4': { 'my-graded-psa-9': 1 } } }) });
+    const mColl = await jfetch('http://localhost:3111/api/collection', { headers: aAuth });
+    check('a personal printing ticks like any other', mColl.collection['base1-4']['my-graded-psa-9'] === 1);
+
+    // your own scan on a STANDARD printing: only you see it, served from /uimg/
+    const scanPng = await require('sharp')({ create: { width: 50, height: 70, channels: 3, background: { r: 200, g: 10, b: 10 } } }).png().toBuffer();
+    const up = await jfetch('http://localhost:3111/api/my/printing-image?cardId=base1-4&variant=holo&lang=en', {
+      method: 'POST', headers: { Authorization: aAuth.Authorization, 'Content-Type': 'image/png' }, body: scanPng,
+    });
+    check('your own scan lands on a standard printing', up.ok === true && /^\/uimg\/[a-f0-9-]{36}-low\.webp$/.test(up.urls.low));
+    const scanRes = await fetch('http://localhost:3111' + up.urls.low);
+    check('the scan serves from its unguessable address', scanRes.status === 200 && scanRes.headers.get('content-type') === 'image/webp');
+
+    // a master-set binder deals pockets to YOUR printings too
+    const mBin = await jfetch('http://localhost:3111/api/binders', { method: 'POST', headers: aAuth, body: JSON.stringify({ name: 'Mine', size: 3, color: 'red', fillFromSet: 'base1', lang: 'en' }) });
+    const mSlots = Object.values((mBin.binder && mBin.binder.slots) || {});
+    check('binder fill deals a pocket to your personal printing', mSlots.some((s) => s.card === 'base1-4' && s.variant === 'my-graded-psa-9'));
+
+    const rm = await jfetch('http://localhost:3111/api/my/printing-remove', { method: 'POST', headers: aAuth, body: JSON.stringify({ cardId: 'base1-4', variant: 'holo' }) });
+    check('removing your scan works', rm.ok === true);
+    await new Promise((r) => setTimeout(r, 150));   // the file removal is fire-and-forget
+    const goneRes = await fetch('http://localhost:3111' + up.urls.low);
+    check('a removed scan disappears from disk', goneRes.status === 404);
+  }
+
   // ---- the sixty-page ceiling ----
   // MAX_BINDER_PAGES clamps in three places and none of them was ever
   // exercised, because reaching it through the UI means sixty sheets. It does
