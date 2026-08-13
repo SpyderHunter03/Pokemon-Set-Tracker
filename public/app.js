@@ -739,7 +739,34 @@ async function ensureMe() {
   if (!auth || !serverAvailable) return null;
   if (_meCache && _meCache.username === auth.username) return _meCache;
   try { _meCache = await apiCall('me'); } catch { _meCache = null; }
+  refreshCurationBadge();
   return _meCache;
+}
+
+/* ---------- curation mode ----------
+ * Off (the default), an administrator's app is indistinguishable from a
+ * regular user's — personal printings, personal scans, and none of the master
+ * editing tools. On, the master tools (edit card, master images, new sets,
+ * hidden-row restore) appear in place until it is turned off again. The
+ * switch lives on the Administration page; the badge below is the way back. */
+function curationOn() { return !!lsGet('ptcg.curation'); }
+function setCuration(on) {
+  lsSet('ptcg.curation', on ? true : null);
+  refreshCurationBadge();
+}
+function refreshCurationBadge() {
+  let el = document.getElementById('curation-badge');
+  const show = !!auth && !!(_meCache && _meCache.admin) && curationOn();
+  if (!show) { if (el) el.remove(); return; }
+  if (el) return;
+  el = h('button', {
+    id: 'curation-badge',
+    class: 'btn small',
+    style: 'position:fixed; left:12px; bottom:12px; z-index:60; opacity:0.92',
+    title: 'Curation mode is on — master editing tools are showing. Click to turn it off.',
+    onclick: () => { setCuration(false); toast('Curation mode off — back to being a regular user'); route(); },
+  }, '🛠️ Curating');
+  document.body.append(el);
 }
 
 /* ---------- personal printings (your own layer over the catalog) ----------
@@ -1299,8 +1326,9 @@ async function openCardModal(brief, { variant, onOwnershipChange, onCardChanged 
   // ---- admin: add custom printings & upload your own variant images ----
   function renderAdminControls() {
     adminWrap.replaceChildren();
-    // editing writes to the server's database (this install's own copy)
-    if (!isAdmin || appConfig.readonly) return;
+    // editing writes to the server's database (this install's own copy) —
+    // and only shows when the admin has deliberately put the curator hat on
+    if (!isAdmin || !curationOn() || appConfig.readonly) return;
     const fileInput = h('input', { type: 'file', accept: 'image/*', hidden: '', 'data-master-upload': '' });
     fileInput.addEventListener('change', async (e) => {
       const f = e.target.files[0];
@@ -1681,7 +1709,7 @@ async function renderHome() {
   );
 
   const homeMe = await ensureMe();
-  const homeAdmin = !!(homeMe && homeMe.admin) && !appConfig.readonly;
+  const homeAdmin = !!(homeMe && homeMe.admin) && curationOn() && !appConfig.readonly;
   const newSetBtn = homeAdmin
     ? h('button', { class: 'chip', onclick: () => openSetCreator(() => renderHome()) }, '＋ New set')
     : null;
@@ -2086,7 +2114,7 @@ async function renderSetPage(setId) {
   const cards = set.cards || [];
   const officialTotal = (set.cardCount && (set.cardCount.official || set.cardCount.total)) || cards.length;
   const me = await ensureMe();
-  const isAdmin = !!(me && me.admin) && !appConfig.readonly;
+  const isAdmin = !!(me && me.admin) && curationOn() && !appConfig.readonly;
   let filter = 'all';
   let query = '';
   let cardSort = lsGet('ptcg.sort.cards') || 'number';
@@ -3835,6 +3863,29 @@ function adminCardsTab() {
       } }, '🔍 Rebuild scanner index'));
     }
 
+    // The admin's two hats, made explicit: this switch is the only thing that
+    // ever puts master-editing tools into the ordinary pages. Off, the app
+    // treats the admin exactly like anybody else.
+    const curationCard = (() => {
+      const cb = h('input', { type: 'checkbox', id: 'curation-toggle' });
+      cb.checked = curationOn();
+      cb.addEventListener('change', () => {
+        setCuration(cb.checked);
+        toast(cb.checked
+          ? 'Curation mode on — master editing tools now show on cards and sets'
+          : 'Curation mode off — back to being a regular user');
+      });
+      return settingsCard(
+        h('h3', { style: 'margin:0 0 6px' }, 'Curation mode'),
+        h('p', { class: 'muted small', style: 'margin:0 0 10px' },
+          'Off, the app treats you exactly like a regular user — personal printings and all. ' +
+          'On, the master editing tools (edit card, master images, new sets and cards, hidden-row restore) ' +
+          'appear in place on cards and sets until you switch it off. A 🛠️ badge shows while it’s on.'),
+        h('label', { class: 'row', style: 'gap:8px; align-items:center; cursor:pointer' },
+          cb, h('span', {}, 'Show master editing tools in the app')),
+      );
+    })();
+
     // The other half of the workspace: nothing edited here reaches anyone
     // until it is published. Preview is the review step — it lists exactly
     // what would move, and moves nothing.
@@ -3877,6 +3928,7 @@ function adminCardsTab() {
         updateArea,
         autoArea.children.length ? autoArea : null,
       ),
+      curationCard,
       publishCard,
       jobs.length ? settingsCard(
         h('h3', { style: 'margin:0 0 6px' }, 'Jobs'),

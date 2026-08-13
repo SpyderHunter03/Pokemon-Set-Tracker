@@ -129,6 +129,23 @@ const { chromium } = require('playwright');
   await page.waitForSelector('#admin-page button:has-text("Update cards from TCGdex")', { timeout: 120000 });
   check('admin update completes', true);
 
+  // ---- curation mode: an admin's app is a regular user's until they flip it ----
+  await page.goto('http://localhost:3111/#/set/base1');
+  await page.waitForSelector('.tcg-card');
+  await page.click('.tcg-card[data-card-id="base1-4"] >> nth=0 >> .info-btn');
+  await page.waitForSelector('#card-modal[open] button:has-text("just for you")');
+  check('curation off: the modal offers personal tools but no master ones',
+    (await page.locator('#card-modal button:has-text("(master)")').count()) === 0);
+  check('curation off: no add-card tile in the set grid',
+    (await page.locator('.add-card-tile').count()) === 0);
+  await page.evaluate(() => document.getElementById('card-modal').close());
+  // the switch lives where admin things live: the Administration page
+  await page.goto('http://localhost:3111/#/admin');
+  await page.waitForSelector('#curation-toggle');
+  await page.click('#curation-toggle');
+  await page.waitForSelector('#curation-badge');
+  check('curation on: the badge shows the hat being worn', true);
+
   // ---- custom printings + own variant images (admin) ----
   await page.goto('http://localhost:3111/#/set/base1');
   await page.waitForSelector('.tcg-card');

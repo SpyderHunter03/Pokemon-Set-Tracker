@@ -8,8 +8,13 @@ const { chromium } = require('playwright');
   browser.newContext = async (opts) => {
     const ctx = await _newContext(opts);
     // the app sends brand-new visitors to /home; these tests target the app
-    // itself, so every context starts as a returning visitor
-    await ctx.addInitScript(() => localStorage.setItem('ptcg.visited', 'true'));
+    // itself, so every context starts as a returning visitor. Curation mode
+    // starts on so the admin-flow tests see the master tools (bootstrap.test
+    // covers the off-by-default behaviour).
+    await ctx.addInitScript(() => {
+      localStorage.setItem('ptcg.visited', 'true');
+      localStorage.setItem('ptcg.curation', 'true');
+    });
     return ctx;
   };
   const context = await browser.newContext({ serviceWorkers: 'block' });
