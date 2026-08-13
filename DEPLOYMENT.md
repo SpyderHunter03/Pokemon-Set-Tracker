@@ -298,6 +298,54 @@ workspace. The API's ledger (`/var/lib/card-api`) is worth a copy while
 east is the only node; once a peer exists it replicates and retires from
 the backup list. The catalog, as ever, re-pulls itself.
 
+## Making this server the catalog maintainer
+
+The maintainer workspace does not have to be a separate machine: the hosted
+box can be it. With the flags below, the live tracker's admin pages grow the
+whole curation toolkit — download new sets from TCGdex, edit cards and sets,
+add custom printings, upload scans, run the data-health report — and a
+**Publish** card that sends the result to R2, where the card API (and any
+other install) picks it up. Nothing reaches R2 until Publish is pressed, and
+**Preview** shows the exact change list first — that is the review step.
+
+1. Credentials, root-owned, outside `/opt` (same shape the publish script has
+   always used — see [PUBLISHING.md](PUBLISHING.md) for making the token):
+
+   ```bash
+   cat > /etc/ptcg-tracker/r2.env <<'EOF'
+   R2_ACCOUNT_ID=your-cloudflare-account-id
+   R2_ACCESS_KEY_ID=your-access-key
+   R2_SECRET_ACCESS_KEY=your-secret
+   R2_BUCKET=pokemon-cards
+   PTCG_CDN_BASE=https://pub-xxxxxxxx.r2.dev
+   EOF
+   chmod 600 /etc/ptcg-tracker/r2.env
+   ```
+
+   `PTCG_CDN_BASE` is the bucket's public URL — the publisher rewrites
+   locally-uploaded image paths to it so they work everywhere, not just here.
+
+2. Mark the install as the workspace: add `PTCG_MASTER=1` to
+   `/etc/ptcg-tracker/env`.
+
+3. The unit file already knows to read `r2.env` when it exists
+   (`EnvironmentFile=-`). If this box predates that line, re-copy it:
+   `cp deploy/ptcg-tracker.service /etc/systemd/system/ && systemctl daemon-reload`.
+
+4. `systemctl restart ptcg-tracker` (environment changes never apply without
+   a restart), then check: 👤 → Administration → card database should show
+   the workspace banner and the Publish card.
+
+5. Propagation: the card API on this box checks R2 every 6 hours. For a
+   faster loop, add `CARD_CHECK_INTERVAL_MS=900000` (15 min) to
+   `/etc/card-api/env` and `systemctl restart card-api` — the check is one
+   tiny JSON fetch, so even a short interval costs nothing. The tracker
+   itself needs no pull: its database IS the master (leave auto-update off).
+
+Since edits now originate here, `/opt/ptcg-tracker/public/cdn` (uploaded
+scans) joins `/var/lib/ptcg-tracker` on the backup list above — though after
+every publish, R2 also holds a copy of all of it.
+
 ## Operations cheat-sheet (the east box)
 
 | Task | Command |
@@ -307,6 +355,6 @@ the backup list. The catalog, as ever, re-pulls itself.
 | API logs | `journalctl -u card-api -f` |
 | Restart tracker | `systemctl restart ptcg-tracker` |
 | What's running | `curl -s localhost:3000/api/app-config` → `release` is the deployed commit |
-| New sets released | publish per [PUBLISHING.md](PUBLISHING.md), then in-app: 👤 → Administration → **Update card database** |
+| New sets released | in-app: 👤 → Administration → **Update cards from TCGdex** → review (data health) → **Publish** |
 | Mint/inspect API tokens | `cd /opt/card-api && sudo -u cardapi DATA_DIR=/var/lib/card-api node scripts/tokens.js …` |
 | Back up | `/var/lib/ptcg-tracker` (+ `/var/lib/card-api` while east is the only API node) |

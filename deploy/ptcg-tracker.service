@@ -13,6 +13,10 @@ User=ptcg
 Group=ptcg
 WorkingDirectory=/opt/ptcg-tracker
 EnvironmentFile=/etc/ptcg-tracker/env
+# R2 publishing credentials — only present when this server is the maintainer
+# workspace (DEPLOYMENT.md, "Making this server the catalog maintainer").
+# The leading dash means "fine if the file does not exist".
+EnvironmentFile=-/etc/ptcg-tracker/r2.env
 ExecStart=/usr/bin/node /opt/ptcg-tracker/server.js
 Restart=always
 RestartSec=3

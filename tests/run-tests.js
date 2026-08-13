@@ -1872,6 +1872,57 @@ function fail(msg) {
     wsPub.status === 0 && /publishing the master catalog only/.test(wsOut) &&
     new RegExp(`version ${wsBefore + 1}\\b`).test(wsOut));
 
+  console.log('=== in-app publish: the workspace publishes from the admin page ===');
+  // a maintainer-workspace server with R2 credentials in its environment —
+  // the endpoint runs the same publish script the CLI flow uses
+  const pubDir = path.join(ROOT, '.test-data-pub');
+  fs.rmSync(pubDir, { recursive: true, force: true });
+  fs.cpSync(path.join(ROOT, '.test-data'), pubDir, { recursive: true });
+  start('node', ['server.js'], {
+    PORT: '3124', DATA_DIR: pubDir, PTCG_MASTER: '1',
+    R2_ENDPOINT: 'http://localhost:3998', R2_ACCESS_KEY_ID: 'testkey',
+    R2_SECRET_ACCESS_KEY: 'testsecret', R2_BUCKET: 'cards',
+    PTCG_CDN_BASE: 'http://localhost:3998/cards',
+  });
+  await waitForPort(3124).catch((e) => fail(e.message));
+  const pubAdmin = await jfetch('http://localhost:3124/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'ptcgadmin', password: 'password123' }) });
+  const pubHdr = { 'Content-Type': 'application/json', Authorization: 'Bearer ' + pubAdmin.token };
+  const pubCfg = await jfetch('http://localhost:3124/api/app-config');
+  check('workspace with R2 creds says canPublish', pubCfg.master === true && pubCfg.canPublish === true);
+  // guards: strangers, and installs that are not the workspace
+  const pubAnon = await fetch('http://localhost:3124/api/catalog/publish', { method: 'POST', body: '{}' });
+  check('publish without an admin account is refused', pubAnon.status === 403);
+  const mainAdmin = await jfetch('http://localhost:3111/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'ptcgadmin', password: 'password123' }) });
+  const pubNotMaster = await fetch('http://localhost:3111/api/catalog/publish', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + mainAdmin.token }, body: '{}' });
+  check('publish outside the maintainer workspace is refused', pubNotMaster.status === 403);
+  // dry run: completes, reports, and does not bump the published version
+  const verBefore = Number((await jfetch('http://localhost:3998/cards/catalog.json')).version) || 0;
+  const dryStart = await jfetch('http://localhost:3124/api/catalog/publish', { method: 'POST', headers: pubHdr, body: JSON.stringify({ dryRun: true }) });
+  check('dry-run publish starts', dryStart.ok === true && dryStart.dryRun === true);
+  let pubSt = null;
+  for (let i = 0; i < 120; i++) {
+    pubSt = await jfetch('http://localhost:3124/api/catalog/publish-status', { headers: pubHdr });
+    if (!pubSt.running) break;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  const dryLog = ((pubSt && pubSt.log) || []).join('\n');
+  check('dry-run publish completes cleanly and shows its work',
+    pubSt && !pubSt.running && pubSt.exitCode === 0 && !pubSt.error && /Local files:/.test(dryLog));
+  const verAfterDry = Number((await jfetch('http://localhost:3998/cards/catalog.json')).version) || 0;
+  check('dry run changed nothing in the bucket', verAfterDry === verBefore);
+  // the real thing: publishes, and the bucket's master version moves
+  const realStart = await jfetch('http://localhost:3124/api/catalog/publish', { method: 'POST', headers: pubHdr, body: '{}' });
+  check('publish starts', realStart.ok === true && realStart.dryRun === false);
+  for (let i = 0; i < 240; i++) {
+    pubSt = await jfetch('http://localhost:3124/api/catalog/publish-status', { headers: pubHdr });
+    if (!pubSt.running) break;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  const realLog = ((pubSt && pubSt.log) || []).join('\n');
+  const verAfter = Number((await jfetch('http://localhost:3998/cards/catalog.json')).version) || 0;
+  check('publish completes and the master version moves',
+    pubSt && pubSt.exitCode === 0 && !pubSt.error && /Done\./.test(realLog) && verAfter === verBefore + 1);
+
   const pullOk = catRes.ok && pullCfg.remoteCatalog === 'http://localhost:3998/cards' && pullStats.cards > 10 &&
     pullCard && pullCard.printings && pullCard.printings['cracked-ice-holo'] === 'Cracked Ice Holo' &&
     catManifest.version === 1 && chk2.behind === true && pullCfg2.masterVersion === 2 && !gone &&
@@ -1880,7 +1931,7 @@ function fail(msg) {
   try { fs.rmSync(pullRoot, { recursive: true, force: true }); } catch { /* best effort */ }
 
   cleanup();
-  for (const d of ['.test-data', '.test-data-ro', '.test-data-mirror', '.test-data-ov', '.test-data-mig']) {
+  for (const d of ['.test-data', '.test-data-ro', '.test-data-mirror', '.test-data-ov', '.test-data-mig', '.test-data-pub']) {
     fs.rmSync(path.join(ROOT, d), { recursive: true, force: true });
   }
   if (suite.status !== 0) { console.error('\nBrowser suite failed.'); process.exit(1); }

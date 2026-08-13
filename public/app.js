@@ -3726,6 +3726,41 @@ function adminCardsTab() {
       } }, '🔍 Rebuild scanner index'));
     }
 
+    // The other half of the workspace: nothing edited here reaches anyone
+    // until it is published. Preview is the review step — it lists exactly
+    // what would move, and moves nothing.
+    const publishCard = appConfig.master ? (() => {
+      const logBox = h('pre', { style: 'display:none; max-height:240px; overflow:auto; margin:10px 0 0; padding:10px; font-size:11.5px; line-height:1.5; background:rgba(0,0,0,0.25); border:1px solid var(--line, rgba(255,255,255,0.12)); border-radius:8px; white-space:pre-wrap' });
+      const btnPrev = h('button', { class: 'btn ghost small' }, '👀 Preview (changes nothing)');
+      const btnPub = h('button', { class: 'btn small' }, '🚀 Publish to every install');
+      const setBusy = (b) => { btnPrev.disabled = b; btnPub.disabled = b; };
+      const poll = async () => {
+        let st;
+        try { st = await apiCall('catalog/publish-status'); } catch { setBusy(false); return; }
+        if (st.log && st.log.length) { logBox.style.display = ''; logBox.textContent = st.log.join('\n'); logBox.scrollTop = logBox.scrollHeight; }
+        if (st.running) { setTimeout(poll, 1000); return; }
+        setBusy(false);
+        if (st.error) toast(st.error);
+        else if (st.finishedAt) toast(st.dryRun ? 'Preview finished — nothing was changed' : 'Published — other installs pick this up on their next check');
+      };
+      const run = (dryRun) => async () => {
+        setBusy(true);
+        logBox.style.display = 'none'; logBox.textContent = '';
+        try { await apiCall('catalog/publish', { method: 'POST', body: JSON.stringify({ dryRun }) }); poll(); }
+        catch (err) { setBusy(false); toast(err.message); }
+      };
+      btnPrev.addEventListener('click', run(true));
+      btnPub.addEventListener('click', run(false));
+      return settingsCard(
+        h('h3', { style: 'margin:0 0 6px' }, 'Publish'),
+        h('p', { class: 'muted small', style: 'margin:0 0 10px' }, appConfig.canPublish
+          ? 'Sends this database — data, uploaded images, and the master catalog.db — to the bucket every other install reads. Preview first: it lists what would change without touching anything.'
+          : 'Publishing is set up in the server environment (R2 credentials) — see DEPLOYMENT.md. Until then, edits stay on this server.'),
+        appConfig.canPublish ? h('div', { class: 'row' }, btnPrev, btnPub) : null,
+        logBox,
+      );
+    })() : null;
+
     content.replaceChildren(...[
       settingsCard(
         h('h3', { style: 'margin:0 0 6px' }, 'Card database'),
@@ -3733,6 +3768,7 @@ function adminCardsTab() {
         updateArea,
         autoArea.children.length ? autoArea : null,
       ),
+      publishCard,
       jobs.length ? settingsCard(
         h('h3', { style: 'margin:0 0 6px' }, 'Jobs'),
         h('div', { class: 'row' }, ...jobs),

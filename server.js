@@ -2297,6 +2297,52 @@ function variantImageManifest(lang) {
   });
 }
 
+/* ---------- publishing the master database (workspace → R2) ----------
+ * The publish script is the tested tool; this job only runs it and keeps its
+ * words. Credentials come from the service environment (an EnvironmentFile
+ * kept outside the app directory) and never from a request. --prune is not
+ * offered on purpose: a workspace that holds only its own additions would
+ * read "these 20,000 remote images no longer exist locally" as an
+ * instruction to delete the entire published database. */
+const publishJob = { running: false, dryRun: false, log: [], startedAt: null, finishedAt: null, error: null, exitCode: null };
+const r2Configured = () => !!(process.env.R2_ACCESS_KEY_ID && process.env.R2_SECRET_ACCESS_KEY && process.env.R2_BUCKET
+  && (process.env.R2_ACCOUNT_ID || process.env.R2_ENDPOINT));
+function startPublish(dryRun) {
+  publishJob.running = true;
+  publishJob.dryRun = !!dryRun;
+  publishJob.log = [];
+  publishJob.startedAt = Date.now();
+  publishJob.finishedAt = null;
+  publishJob.error = null;
+  publishJob.exitCode = null;
+  const args = [path.join(__dirname, 'scripts', 'publish-images.js')];
+  if (dryRun) args.push('--dry-run');
+  const child = spawn(process.execPath, args, {
+    cwd: __dirname, env: { ...process.env }, stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const feed = (chunk) => {
+    for (const raw of String(chunk).split('\n')) {
+      const line = raw.trimEnd();
+      if (line) publishJob.log.push(line);
+    }
+    // the log is a window, not an archive — uploads can number in the thousands
+    if (publishJob.log.length > 500) publishJob.log.splice(0, publishJob.log.length - 500);
+  };
+  child.stdout.on('data', feed);
+  child.stderr.on('data', feed);
+  child.on('error', (e) => {
+    publishJob.error = e.message;
+    publishJob.running = false;
+    publishJob.finishedAt = Date.now();
+  });
+  child.on('close', (code) => {
+    publishJob.exitCode = code;
+    if (code !== 0 && !publishJob.error) publishJob.error = 'The publish exited with code ' + code + ' — the log above says why';
+    publishJob.running = false;
+    publishJob.finishedAt = Date.now();
+  });
+}
+
 // ---------- api routes ----------
 
 const USERNAME_RE = /^[a-zA-Z0-9_]{3,30}$/;
@@ -2332,7 +2378,7 @@ async function handleApi(req, res, pathname, ip, url) {
       updateRemoteVersion: s.updateRemoteVersion || null,
       master: MASTER_MODE,
       release: RELEASE_VERSION,
-      canPublish: !READONLY && !!(process.env.R2_ACCESS_KEY_ID && process.env.R2_SECRET_ACCESS_KEY && process.env.R2_BUCKET),
+      canPublish: MASTER_MODE && !READONLY && r2Configured(),
     });
   }
 
@@ -2554,6 +2600,36 @@ async function handleApi(req, res, pathname, ip, url) {
     } : null;
     startCatalogPull(source, bypass);
     return sendJSON(res, 200, { ok: true, started: true, source: source.base });
+  }
+
+  /* admin (workspace only): publish this database to the bucket every other
+   * install reads. Preview (dryRun) lists what would change without touching
+   * anything — that is the review step; publish is the approval. */
+  if (pathname === '/api/catalog/publish' && req.method === 'POST') {
+    if (!MASTER_MODE) return sendJSON(res, 403, { error: 'Publishing belongs to the maintainer workspace (PTCG_MASTER=1)' });
+    const admin = authUser(req);
+    if (!admin || !isAdminUser(admin)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    if (!r2Configured()) return sendJSON(res, 400, { error: 'R2 credentials are not configured on this server — see DEPLOYMENT.md, step 10' });
+    if (publishJob.running) return sendJSON(res, 409, { error: 'A publish is already running' });
+    if (build.running) return sendJSON(res, 409, { error: 'Another job is already running — let it finish first' });
+    const body = await readBody(req);
+    startPublish(!!body.dryRun);
+    return sendJSON(res, 200, { ok: true, started: true, dryRun: !!body.dryRun });
+  }
+  if (pathname === '/api/catalog/publish-status' && req.method === 'GET') {
+    const admin = authUser(req);
+    if (!admin || !isAdminUser(admin)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    return sendJSON(res, 200, {
+      configured: r2Configured(),
+      master: MASTER_MODE,
+      running: publishJob.running,
+      dryRun: publishJob.dryRun,
+      startedAt: publishJob.startedAt,
+      finishedAt: publishJob.finishedAt,
+      error: publishJob.error,
+      exitCode: publishJob.exitCode,
+      log: publishJob.log.slice(-200),
+    });
   }
 
   // what a master update would ADD — the admin reviews this before pulling
