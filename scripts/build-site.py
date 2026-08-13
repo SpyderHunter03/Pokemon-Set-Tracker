@@ -82,6 +82,17 @@ CSS = """
   .frame { max-width:980px; margin:44px auto 0; border:1px solid var(--line); border-radius:16px; overflow:hidden;
            box-shadow:0 30px 80px -30px rgba(0,0,0,0.8); background:#0b0e1c; }
   .frame video, .frame img { width:100%; display:block; }
+  .hero.film { padding:150px 0 130px; }
+  .hero.film::before { display:none; }
+  .bgfilm { position:absolute; inset:0; z-index:0; background:#0b0e1c; }
+  .bgfilm video { width:100%; height:100%; object-fit:cover; display:block; }
+  .bgfilm::after { content:""; position:absolute; inset:0;
+    background:radial-gradient(760px 460px at 50% 44%, rgba(13,16,32,0.82), rgba(13,16,32,0.48) 62%, rgba(13,16,32,0.22) 100%),
+               linear-gradient(180deg, rgba(13,16,32,0.72), rgba(13,16,32,0.18) 32%, rgba(13,16,32,0.30) 70%, var(--bg) 99%); }
+  .hero.film .wrap { position:relative; z-index:1; }
+  .hero.film h1, .hero.film .lede { text-shadow:0 2px 26px rgba(0,0,0,0.6); }
+  .hero.film .lede { color:#c6cdea; }
+  @media (max-width:720px) { .hero.film { padding:96px 0 84px; } }
   .shot { width:100%; display:block; border:1px solid var(--line); border-radius:14px; margin-top:26px;
           box-shadow:0 24px 60px -28px rgba(0,0,0,0.75); }
   .brandmark { width:26px; height:26px; vertical-align:-7px; margin-right:2px; }
@@ -168,7 +179,15 @@ def page(fname, title, desc, active, body, canonical):
 
 # ---------------- index ----------------
 index_body = f'''
-<div class="hero"><div class="wrap">
+<div class="hero film">
+  <div class="bgfilm" aria-hidden="true">
+    <video autoplay loop muted playsinline poster="/site/assets/hero-poster.png">
+      <source src="/site/assets/hero.webm" type="video/webm">
+      <source src="/site/assets/hero.mp4" type="video/mp4">
+      <img src="/site/assets/hero-poster.png" alt="">
+    </video>
+  </div>
+  <div class="wrap">
   <h1>Know <em>exactly</em> which<br>cards you own.</h1>
   <p class="lede">Pkmn Master Set tracks your Pokémon card collection set by set and printing by printing —
      holo, reverse, 1st&nbsp;Edition — synced everywhere, organised into binders that match the ones on your shelf.</p>
@@ -177,13 +196,6 @@ index_body = f'''
     <a class="btn ghost big" href="{APP}/">Browse the card library</a>
   </div>
   <div class="tiny">The full card library is open to everyone — no account needed to look around.</div>
-  <div class="frame">
-    <video autoplay loop muted playsinline poster="/site/assets/hero-poster.png" aria-label="Ticking cards in the tracker as the set's progress bar climbs">
-      <source src="/site/assets/hero.webm" type="video/webm">
-      <source src="/site/assets/hero.mp4" type="video/mp4">
-      <img src="/site/assets/hero-poster.png" alt="The tracker's set page">
-    </video>
-  </div>
 </div></div>
 
 <section><div class="wrap">
