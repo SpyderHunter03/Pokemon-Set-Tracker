@@ -86,11 +86,25 @@ const { chromium } = require('playwright');
     await fp.waitForURL('**/home');
     check('a brand-new visitor lands on the marketing page', fp.url().endsWith('/home'));
     const homeText = await fp.textContent('body');
-    check('the front door shows the tiers and the price',
-      /Master Set Premium/.test(homeText) && /\$2\.99/.test(homeText) && /Free account/.test(homeText));
+    check('the front door shows both products and the price',
+      /Master Set Premium/.test(homeText) && /\$2\.99/.test(homeText) && /TCG Card API/.test(homeText));
     check('the front door carries the non-affiliation disclaimer',
       /not produced by, endorsed by, or affiliated/.test(homeText));
-    check('the front door sells the API too', /TCG Card API/.test(homeText) && /API docs/.test(homeText));
+    // the site is multi-page now — each page carries its own weight
+    await fp.goto('http://localhost:3111/pricing');
+    const pricingText = await fp.textContent('body');
+    check('the pricing page carries the tiers',
+      /Free account/.test(pricingText) && /\$2\.99/.test(pricingText) && /MOST POPULAR/.test(pricingText));
+    await fp.goto('http://localhost:3111/developers');
+    const devText = await fp.textContent('body');
+    check('the developers page sells the API', /TCG Card API/.test(devText) && /OpenAPI/.test(devText) && /Get a token/.test(devText));
+    await fp.goto('http://localhost:3111/terms');
+    const termsText = await fp.textContent('body');
+    await fp.goto('http://localhost:3111/privacy');
+    const privText = await fp.textContent('body');
+    check('terms and privacy pages exist and say the honest things',
+      /Terms of Service/.test(termsText) && /never delete your data over money/i.test(termsText) &&
+      /Privacy Policy/.test(privText) && /card numbers never touch/i.test(privText));
     // a deep link is never hijacked to the sales page, even for a new visitor
     await fp.goto('http://localhost:3111/#/pokemon');
     await fp.waitForTimeout(800);

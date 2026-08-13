@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FAQ — Pkmn Master Set</title>
+<meta name="description" content="Answers about the Pkmn Master Set tracker, Master Set Premium, payments, cancellation, and the TCG Card API.">
+<link rel="icon" href="/icons/icon-192.png">
+<link rel="canonical" href="https://www.pkmnmasterset.com/faq">
+<style>
+  :root { --bg:#0d1020; --bg2:#12162b; --card:#181d36; --line:#272e52; --text:#e9ebf8;
+          --muted:#98a1c8; --accent:#ffcb05; --accent2:#4d8fe0; --good:#4ade80; }
+  * { box-sizing:border-box; margin:0; }
+  html { scroll-behavior:smooth; }
+  body { background:var(--bg); color:var(--text); font:16px/1.65 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  a { color:var(--accent2); text-decoration:none; }
+  .wrap { max-width:1060px; margin:0 auto; padding:0 22px; }
+  nav { position:sticky; top:0; z-index:10; backdrop-filter:blur(12px);
+        background:rgba(13,16,32,0.82); border-bottom:1px solid var(--line); }
+  nav .wrap { display:flex; align-items:center; gap:22px; height:60px; }
+  .brand { font-weight:800; font-size:17px; color:var(--text); white-space:nowrap; }
+  .brand span { color:var(--accent); }
+  nav .links { display:flex; gap:18px; font-size:14.5px; margin-left:8px; }
+  nav .links a { color:var(--muted); } nav .links a.on, nav .links a:hover { color:var(--text); }
+  nav .cta { margin-left:auto; }
+  .btn { display:inline-block; background:var(--accent); color:#171b30; font-weight:700;
+         padding:10px 20px; border-radius:10px; border:0; cursor:pointer; font-size:15px; }
+  .btn.ghost { background:transparent; color:var(--text); border:1px solid var(--line); }
+  .btn.big { padding:14px 28px; font-size:16.5px; }
+  .hero { text-align:center; padding:88px 0 64px; position:relative; overflow:hidden; }
+  .hero::before { content:""; position:absolute; inset:-40% -20% auto; height:130%; z-index:-1;
+    background:radial-gradient(600px 320px at 50% 20%, rgba(77,143,224,0.16), transparent 70%),
+               radial-gradient(420px 260px at 62% 8%, rgba(255,203,5,0.10), transparent 70%); }
+  h1 { font-size:clamp(32px,5.4vw,52px); line-height:1.1; letter-spacing:-1px; }
+  h1 em, .glow { font-style:normal; color:var(--accent); }
+  .lede { color:var(--muted); max-width:600px; margin:18px auto 30px; font-size:18.5px; }
+  .row { display:flex; gap:12px; justify-content:center; flex-wrap:wrap; }
+  .tiny { color:var(--muted); font-size:13.5px; margin-top:14px; }
+  section { padding:56px 0; }
+  section.alt { background:var(--bg2); border-top:1px solid var(--line); border-bottom:1px solid var(--line); }
+  h2 { font-size:30px; letter-spacing:-0.5px; text-align:center; margin-bottom:8px; }
+  .sub { text-align:center; color:var(--muted); margin:0 auto 38px; max-width:620px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:22px; }
+  .card .ico { font-size:26px; } .card h3 { margin:8px 0 5px; font-size:17px; }
+  .card p { color:var(--muted); font-size:14.5px; }
+  .plans { display:grid; grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); gap:16px; align-items:stretch; }
+  .plan { background:var(--card); border:1px solid var(--line); border-radius:16px; padding:26px 22px; display:flex; flex-direction:column; }
+  .plan.hot { border-color:var(--accent); box-shadow:0 0 0 1px var(--accent), 0 12px 40px -18px rgba(255,203,5,0.35); position:relative; }
+  .plan .flag { position:absolute; top:-12px; left:50%; transform:translateX(-50%); background:var(--accent);
+    color:#171b30; font-size:11.5px; font-weight:800; padding:2px 12px; border-radius:99px; white-space:nowrap; }
+  .plan h3 { font-size:18px; }
+  .price { font-size:36px; font-weight:800; margin:6px 0 2px; }
+  .price small { font-size:14px; color:var(--muted); font-weight:400; }
+  .plan ul { list-style:none; padding:0; margin:16px 0 22px; flex:1; }
+  .plan li { padding:5px 0 5px 26px; position:relative; font-size:14.5px; }
+  .plan li::before { content:"✓"; color:var(--good); position:absolute; left:4px; font-weight:700; }
+  .plan li.soon::before { content:"◷"; color:var(--muted); } .plan li.soon { color:var(--muted); }
+  .plan .btn { text-align:center; }
+  .faq { max-width:740px; margin:0 auto; }
+  .faq details { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:15px 18px; margin-bottom:10px; }
+  .faq summary { cursor:pointer; font-weight:600; }
+  .faq p { color:var(--muted); margin-top:8px; font-size:14.5px; }
+  pre.code { background:#0b0e1c; border:1px solid var(--line); border-radius:12px; padding:18px;
+             text-align:left; font:13px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace; color:#c9d4f6;
+             overflow-x:auto; max-width:640px; margin:0 auto; }
+  pre.code .c { color:#6b769e; } pre.code .k { color:var(--accent); } pre.code .s { color:#8ce99a; }
+  .prose { max-width:760px; margin:0 auto; }
+  .prose h2 { text-align:left; font-size:22px; margin:34px 0 10px; }
+  .prose p, .prose li { color:var(--muted); font-size:15px; }
+  .prose ul { padding-left:22px; }
+  .prose strong { color:var(--text); }
+  .updated { color:var(--muted); font-size:13px; text-align:center; margin-top:-26px; margin-bottom:34px; }
+  footer { border-top:1px solid var(--line); padding:34px 0 46px; color:var(--muted); font-size:13px; }
+  footer .cols { display:flex; gap:40px; flex-wrap:wrap; margin-bottom:20px; }
+  footer .col { min-width:140px; } footer .col b { color:var(--text); display:block; margin-bottom:8px; font-size:13.5px; }
+  footer .col a { display:block; color:var(--muted); padding:2px 0; }
+  @media (max-width:720px) { nav .links { display:none; } .hero { padding:56px 0 44px; } section { padding:42px 0; } }
+</style>
+</head>
+<body>
+<nav><div class="wrap">
+  <a class="brand" href="/">🃏 Pkmn <span>Master Set</span></a>
+  <div class="links"><a href="/">Home</a><a href="/features">Features</a><a href="/pricing">Pricing</a><a href="/developers">Developers</a><a href="/faq" class="on">FAQ</a></div>
+  <a class="btn ghost cta" href="https://mstr.pkmnmasterset.com/">Open the tracker</a>
+</div></nav>
+
+<div class="hero"><div class="wrap">
+  <h1>FAQ</h1>
+  <p class="lede">Straight answers. If yours isn't here, <a href="mailto:support@pkmnmasterset.com">support@pkmnmasterset.com</a> reaches a human.</p>
+</div></div>
+
+<section style="padding-top:10px"><div class="wrap">
+  <div class="faq">
+    <h2 style="text-align:left; font-size:20px; margin:18px 0 12px">The tracker</h2>
+    <details><summary>Do I need an account just to look at cards?</summary>
+      <p>No — the whole library is browsable without one. An account is what lets the app remember which cards are <em>yours</em>.</p></details>
+    <details><summary>Is my collection data mine?</summary>
+      <p>Yes. Export it as JSON whenever you like, on the free plan too. Your collection is keyed to card IDs, so it stays meaningful anywhere.</p></details>
+    <details><summary>Does it work on my phone?</summary>
+      <p>Yes — it installs from the browser like an app, and visited pages keep working offline.</p></details>
+    <details><summary>Can I track 1st Editions, holos and stamps separately?</summary>
+      <p>That's the whole point: every printing is its own tick with its own count, and custom printings can be added for the oddballs.</p></details>
+
+    <h2 style="text-align:left; font-size:20px; margin:26px 0 12px">Premium &amp; payments</h2>
+    <details><summary>What does Master Set Premium cost, and what's in it?</summary>
+      <p>$2.99/month: unlimited binders now, the card scanner when it ships. The free account keeps full collection tracking and one binder, forever.</p></details>
+    <details><summary>What happens to my binders if I cancel?</summary>
+      <p>Your data is never deleted. Your first binder stays fully usable; binders beyond it lock — covers visible, contents kept — until you're Premium again. Everything comes back exactly as you left it.</p></details>
+    <details><summary>How do payments work?</summary>
+      <p>Through Stripe — card details never touch our servers. Cancel any time from <strong>Manage subscription</strong> on your Account page; your plan stays active through the period you've paid for.</p></details>
+
+    <h2 style="text-align:left; font-size:20px; margin:26px 0 12px">The API</h2>
+    <details><summary>How do I get an API token?</summary>
+      <p>Pick a plan on the <a href="https://api.pkmnmasterset.com/docs#plans">API docs page</a> — your token is minted the moment you subscribe, shown once. For the free tier (1,000 requests/mo), email <a href="mailto:support@pkmnmasterset.com">support@pkmnmasterset.com</a>.</p></details>
+    <details><summary>Do card images cost API requests?</summary>
+      <p>No. Images cost 0 against every plan, permanently — that's a standing policy of this project.</p></details>
+    <details><summary>I lost my token.</summary>
+      <p>Tokens are shown once and only their fingerprint is stored, so it can't be re-displayed. Email support: the old one gets revoked, a new one minted.</p></details>
+
+    <h2 style="text-align:left; font-size:20px; margin:26px 0 12px">The project</h2>
+    <details><summary>Is this affiliated with The Pokémon Company?</summary>
+      <p>No. This is an independent fan-built tool. Card names and data are used descriptively to identify cards; no card artwork is sold, ever.</p></details>
+    <details><summary>Who runs this?</summary>
+      <p>A collector who wanted a proper master-set tracker and ended up building the whole thing — tracker, API, and all. Small by design; email actually gets read.</p></details>
+  </div>
+</div></section>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div class="col"><b>Product</b>
+      <a href="https://mstr.pkmnmasterset.com/">Open the tracker</a><a href="/features">Features</a><a href="/pricing">Pricing</a><a href="/faq">FAQ</a></div>
+    <div class="col"><b>Developers</b>
+      <a href="/developers">TCG Card API</a><a href="https://api.pkmnmasterset.com/docs">API documentation</a><a href="https://api.pkmnmasterset.com/docs#plans">API plans</a></div>
+    <div class="col"><b>Company</b>
+      <a href="/terms">Terms of Service</a><a href="/privacy">Privacy Policy</a><a href="mailto:support@pkmnmasterset.com">support@pkmnmasterset.com</a></div>
+  </div>
+  <p>This is an independent, fan-built collection tool. It is not produced by, endorsed by, or affiliated with
+     Nintendo, Creatures Inc., GAME FREAK inc., or The Pokémon Company International. Pokémon and Pokémon character
+     names are trademarks of their respective owners; card data is used descriptively to identify cards.
+     No card artwork is sold.</p>
+</div></footer>
+</body>
+</html>
