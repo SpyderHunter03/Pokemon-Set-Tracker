@@ -414,6 +414,16 @@ const { chromium } = require('playwright');
     (await page.locator('select[data-col="8"]').inputValue()) === 'variant');
   await page.click('#cur-sheet-analyze');
   await page.waitForSelector('#cur-sheet-apply');
+  // the review arrives folded: only the totals line and group summaries show
+  check('sheet: the review is one screen — totals + collapsed groups, no row lists',
+    (await page.locator('#cur-sheet-stage label').count()) === 0 &&
+    (await page.textContent('#cur-sheet-totals')).includes('5 to add') &&
+    (await page.textContent('#cur-sheet-totals')).includes('3 absent'));
+  const expandAll = async () => {
+    await page.evaluate(() => document.querySelectorAll('#cur-sheet-stage details').forEach((d) => { d.open = true; }));
+    await page.waitForTimeout(200);   // toggle events render the rows lazily
+  };
+  await expandAll();
   const stageText = await page.textContent('#cur-sheet-stage');
   check('sheet: rows already in the database produce NO proposals (no duplicates)',
     stageText.includes('4 row(s) already match the database'));
@@ -421,8 +431,8 @@ const { chromium } = require('playwright');
     !stageText.includes('Charizard'));
   check('sheet: duplicate rows inside the sheet are collapsed', stageText.includes('1 duplicate row(s)'));
   check('sheet: a new set is proposed', stageText.includes('New sets (1)') && stageText.includes('Consultant Promos'));
-  check('sheet: new cards are proposed with their printings',
-    stageText.includes('New cards (2)') && stageText.includes('Brand New Mon') && stageText.includes('Sheetmon'));
+  check('sheet: new cards are proposed with their printings, grouped under their sets',
+    stageText.includes('Brand New Mon') && stageText.includes('Sheetmon'));
   check('sheet: a standard variant is matched through its synonym (Reverse Foil)',
     stageText.includes('New printings (1)') && stageText.includes('Reverse Holo'));
   check('sheet: an unknown printing becomes a custom-printing proposal',
@@ -430,7 +440,7 @@ const { chromium } = require('playwright');
   check('sheet: a differing field goes up for review, not silently applied',
     stageText.includes('Field differences (1)') && stageText.includes('Eevee Star Prime'));
   check('sheet: rows deleted from the sheet are reported, never auto-applied',
-    stageText.includes('In the database but not in the sheet (3)') &&
+    stageText.includes('In the database but not in the sheet') &&
     stageText.includes('Pika Promo') && stageText.includes('Sparkle Foil is absent'));
   check('sheet: the skipped 1st Edition row surfaces by name (the Machamp case)',
     stageText.includes('Pikachu') && stageText.includes('1st Edition is absent'));
@@ -469,9 +479,10 @@ const { chromium } = require('playwright');
   await page.click('#cur-sheet-analyze');
   await page.waitForSelector('#cur-sheet-clean');
   check('sheet: uploading the same sheet again imports nothing (idempotent)', true);
+  await expandAll();
   const cleanText = await page.textContent('#cur-sheet-stage');
   check('sheet: deleted rows are still reported alongside a clean import',
-    cleanText.includes('In the database but not in the sheet (3)') && cleanText.includes('Pika Promo'));
+    (await page.textContent('#cur-sheet-totals')).includes('3 absent') && cleanText.includes('Pika Promo'));
   check('sheet: every deletion box starts unticked',
     (await page.locator('#cur-sheet-stage input[type=checkbox]:checked').count()) === 0);
   // acting on a deletion is an explicit tick — and surgical: Pika Promo also

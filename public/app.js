@@ -3640,6 +3640,7 @@ function sheetImportCard(onApplied) {
     const ix = await getIndex();
     const setByNorm = new Map();
     for (const st of ix.sets) { setByNorm.set(norm(st.id), st.id); setByNorm.set(norm(st.name), st.id); }
+    const setNames = new Map(ix.sets.map((st) => [st.id, st.name]));
     const setCache = new Map();
     const getSetCards = async (sid) => {
       if (!setCache.has(sid)) setCache.set(sid, (await getSet(sid)).cards || []);
@@ -3767,64 +3768,129 @@ function sheetImportCard(onApplied) {
         }
       }
     }
+    for (const ns of plan.newSets.values()) setNames.set(ns.id, ns.name);
+    plan.setNames = setNames;
     return plan;
   }
 
   function renderPlan(plan) {
-    const boxes = [];
-    const section = (title, items, describe, tag, ticked = true) => {
-      if (!items.length) return null;
-      const rows = items.map((it) => {
-        const cb = h('input', ticked ? { type: 'checkbox', checked: '' } : { type: 'checkbox' });
-        boxes.push({ cb, it, tag });
-        return h('label', { class: 'row', style: 'gap:8px; align-items:center; margin:3px 0; cursor:pointer' }, cb, h('span', {}, describe(it)));
-      });
-      return h('div', { style: 'margin-top:10px' }, h('h4', { class: 'muted small', style: 'margin:0 0 4px' }, `${title} (${items.length})`), ...rows);
+    /* A real sheet is a hundred rows per set: the review must stay one screen
+     * tall until asked. Everything renders as collapsed groups — per set, per
+     * category — with a tick-all box in each summary. Tick state lives on the
+     * data (not the DOM), so a group can be accepted without ever opening it,
+     * and detail rows only render on first expand. */
+    const items = [];                        // { it, tag, on }
+    const groups = new Map();                // groupTitle -> [ { title, tag, defaultOn, entries: [{item, text}] } ]
+    const addEntry = (groupTitle, catTitle, tag, defaultOn, it, text) => {
+      if (!groups.has(groupTitle)) groups.set(groupTitle, []);
+      let cat = groups.get(groupTitle).find((c) => c.title === catTitle);
+      if (!cat) { cat = { title: catTitle, tag, defaultOn, entries: [] }; groups.get(groupTitle).push(cat); }
+      const item = { it, tag, on: defaultOn };
+      items.push(item);
+      cat.entries.push({ item, text });
     };
-    const sections = [
-      section('New sets', [...plan.newSets.values()], (x) => `${x.name} (${x.id})`, 'set'),
-      section('New cards', [...plan.newCards.values()], (x) => {
-        const pr = [...Object.keys(x.variants).map((k) => VARIANT_LABELS[k] || k), ...x.customs];
-        return `${x.set} #${x.number} — ${x.name}${pr.length ? ' · ' + pr.join(', ') : ''}`;
-      }, 'card'),
-      section('New printings', plan.addVariants, (x) => `${x.card.name} (${x.card.id}) — ${x.label}`, 'variant'),
-      section('New custom printings', plan.addCustoms, (x) => `${x.card.name} (${x.card.id}) — "${x.label}"`, 'custom'),
-      section('Field differences', plan.fieldDiffs, (x) => `${x.card.name} (${x.card.id}) ${x.field}: "${x.from}" → "${x.to}"`, 'diff'),
-    ].filter(Boolean);
-    // deletions are a report, not a default: every box here starts UNTICKED
-    const missingSection = section('In the database but not in the sheet', plan.missing,
-      (x) => x.whole
+    const nameOf = (sid) => (plan.setNames && plan.setNames.get(sid)) || sid;
+
+    for (const x of plan.newSets.values()) addEntry('New sets', 'New sets', 'set', true, x, `${x.name} (${x.id})`);
+    for (const x of plan.newCards.values()) {
+      const pr = [...Object.keys(x.variants).map((k) => VARIANT_LABELS[k] || k), ...x.customs];
+      addEntry(nameOf(x.set), 'New cards', 'card', true, x, `#${x.number} — ${x.name}${pr.length ? ' · ' + pr.join(', ') : ''}`);
+    }
+    for (const x of plan.addVariants) addEntry(nameOf(setIdOf(x.card.id)), 'New printings', 'variant', true, x, `${x.card.name} (${x.card.id}) — ${x.label}`);
+    for (const x of plan.addCustoms) addEntry(nameOf(setIdOf(x.card.id)), 'New custom printings', 'custom', true, x, `${x.card.name} (${x.card.id}) — "${x.label}"`);
+    for (const x of plan.fieldDiffs) addEntry(nameOf(setIdOf(x.card.id)), 'Field differences', 'diff', true, x, `${x.card.name} (${x.card.id}) ${x.field}: "${x.from}" → "${x.to}"`);
+    // deletions start UNTICKED, always: a report first, a removal only by choice
+    for (const x of plan.missing) addEntry(nameOf(setIdOf(x.card.id)), 'In the database but not in the sheet', 'missing', false, x,
+      x.whole
         ? `${x.card.name} (${x.card.id}) — the whole card is absent from the sheet (tick to hide it)`
-        : `${x.card.name} (${x.card.id}) — ${x.label} is absent from the sheet (tick to remove the printing)`,
-      'missing', false);
+        : `${x.card.name} (${x.card.id}) — ${x.label} is absent from the sheet (tick to remove the printing)`);
 
     const notes = [];
     if (plan.matched) notes.push(`${plan.matched} row(s) already match the database — nothing to do for them.`);
     if (plan.dupes) notes.push(`${plan.dupes} duplicate row(s) in the sheet were collapsed.`);
     for (const p of plan.problems) notes.push('⚠ ' + p);
 
-    if (!sections.length && !missingSection) {
+    const adds = plan.newSets.size + plan.newCards.size + plan.addVariants.length + plan.addCustoms.length;
+    if (!items.length) {
       stage.replaceChildren(
         h('p', { id: 'cur-sheet-clean', style: 'margin:10px 0 0' }, '✅ Nothing to import — the database already matches the sheet.'),
         ...notes.map((n) => h('p', { class: 'muted small', style: 'margin:4px 0 0' }, n)));
       return;
     }
 
-    const applyBtn = h('button', { class: 'btn small', id: 'cur-sheet-apply', style: 'margin-top:12px' }, 'Apply the ticked changes');
+    const applyBtn = h('button', { class: 'btn small', id: 'cur-sheet-apply', style: 'margin-top:12px' }, 'Apply');
     const progress = h('p', { class: 'muted small', style: 'margin:6px 0 0' });
+    const updateApply = () => {
+      const n = items.filter((x) => x.on).length;
+      applyBtn.textContent = `Apply ${n} ticked change(s)`;
+    };
+
+    const catBlocks = [];
+    const catBlock = (cat) => {
+      const groupCb = h('input', { type: 'checkbox' });
+      groupCb.checked = cat.defaultOn;
+      groupCb.addEventListener('click', (e) => e.stopPropagation());
+      const body = h('div', { style: 'margin:4px 0 4px 22px' });
+      let rowCbs = null;
+      const renderRows = () => {
+        rowCbs = [];
+        const rowOf = ({ item, text }) => {
+          const cb = h('input', { type: 'checkbox' });
+          cb.checked = item.on;
+          cb.addEventListener('change', () => { item.on = cb.checked; syncGroup(); updateApply(); });
+          rowCbs.push({ cb, item });
+          return h('label', { class: 'row', style: 'gap:8px; align-items:center; margin:3px 0; cursor:pointer' }, cb, h('span', {}, text));
+        };
+        const CHUNK = 150;
+        body.replaceChildren(...cat.entries.slice(0, CHUNK).map(rowOf));
+        if (cat.entries.length > CHUNK) {
+          const more = h('button', { class: 'btn ghost small', style: 'margin-top:6px' }, `Show all ${cat.entries.length}`);
+          more.addEventListener('click', () => { body.replaceChildren(...cat.entries.map(rowOf)); syncGroup(); });
+          body.append(more);
+        }
+      };
+      const syncGroup = () => {
+        const on = cat.entries.filter((e) => e.item.on).length;
+        groupCb.checked = on === cat.entries.length && on > 0;
+        groupCb.indeterminate = on > 0 && on < cat.entries.length;
+      };
+      groupCb.addEventListener('change', () => {
+        for (const e of cat.entries) e.item.on = groupCb.checked;
+        if (rowCbs) for (const r of rowCbs) r.cb.checked = r.item.on;
+        updateApply();
+      });
+      const det = h('details', { class: 'cur-cat' },
+        h('summary', { style: 'cursor:pointer; margin:4px 0' }, groupCb, ` ${cat.title} (${cat.entries.length})`),
+        body);
+      det.addEventListener('toggle', () => { if (det.open && !body.children.length) renderRows(); });
+      catBlocks.push(det);
+      return det;
+    };
+
+    const groupEls = [];
+    for (const [title, cats] of groups) {
+      groupEls.push(h('div', { style: 'margin-top:12px' },
+        h('h4', { class: 'muted small', style: 'margin:0 0 2px' }, title),
+        ...cats.map(catBlock)));
+    }
+
+    const totals = h('p', { id: 'cur-sheet-totals', style: 'margin:10px 0 0' },
+      `${adds} to add · ${plan.fieldDiffs.length} field difference(s) · ${plan.missing.length} absent from the sheet · ${plan.matched} matched`);
+
     applyBtn.addEventListener('click', async () => {
-      const todo = boxes.filter((b) => b.cb.checked);
+      const todo = items.filter((x) => x.on);
       if (!todo.length) { toast('Nothing ticked'); return; }
       applyBtn.disabled = true;
       let done = 0, failed = 0;
-      const step = (label) => { progress.textContent = `${++done + failed} / ${todo.length} — ${label}`; };
-      // order matters: sets before their cards, cards before their printings
+      const step = (label) => { progress.textContent = `${done + failed + 1} / ${todo.length} — ${label}`; };
       const byTag = (t) => todo.filter((b) => b.tag === t);
       try {
         for (const b of byTag('set')) {
           step('set ' + b.it.name);
-          try { await apiCall('set-create', { method: 'POST', body: JSON.stringify({ lang, id: b.it.id, name: b.it.name }) }); }
-          catch (e) { failed++; done--; toast(e.message); }
+          try {
+            await apiCall('set-create', { method: 'POST', body: JSON.stringify({ lang, id: b.it.id, name: b.it.name }) });
+            done++;
+          } catch (e) { failed++; toast(e.message); }
         }
         for (const b of byTag('card')) {
           step('card ' + b.it.name);
@@ -3838,7 +3904,8 @@ function sheetImportCard(onApplied) {
             for (const label of b.it.customs) {
               await apiCall('custom-variant', { method: 'POST', body: JSON.stringify({ cardId: `${b.it.set}-${b.it.number}`.replace(/\s+/g, ''), label, lang }) });
             }
-          } catch (e) { failed++; done--; toast(e.message); }
+            done++;
+          } catch (e) { failed++; toast(e.message); }
         }
         for (const b of byTag('variant')) {
           step(b.it.card.name + ' ' + b.it.label);
@@ -3848,12 +3915,15 @@ function sheetImportCard(onApplied) {
             for (const k of realVariants(fresh).filter((x) => !x.startsWith('my-'))) variants[k] = true;
             variants[b.it.key] = true;
             await apiCall('card', { method: 'POST', body: JSON.stringify({ lang, cardId: b.it.card.id, variants }) });
-          } catch (e) { failed++; done--; toast(e.message); }
+            done++;
+          } catch (e) { failed++; toast(e.message); }
         }
         for (const b of byTag('custom')) {
           step(b.it.card.name + ' "' + b.it.label + '"');
-          try { await apiCall('custom-variant', { method: 'POST', body: JSON.stringify({ cardId: b.it.card.id, label: b.it.label, lang }) }); }
-          catch (e) { failed++; done--; toast(e.message); }
+          try {
+            await apiCall('custom-variant', { method: 'POST', body: JSON.stringify({ cardId: b.it.card.id, label: b.it.label, lang }) });
+            done++;
+          } catch (e) { failed++; toast(e.message); }
         }
         for (const b of byTag('diff')) {
           step(b.it.card.name + ' ' + b.it.field);
@@ -3862,7 +3932,8 @@ function sheetImportCard(onApplied) {
             if (b.it.field === 'types') body.types = b.it.to.split(/[,;/&+]/).map((t) => t.trim()).filter(Boolean);
             else body[b.it.field] = b.it.field === 'hp' ? parseInt(b.it.to, 10) : b.it.to;
             await apiCall('card', { method: 'POST', body: JSON.stringify(body) });
-          } catch (e) { failed++; done--; toast(e.message); }
+            done++;
+          } catch (e) { failed++; toast(e.message); }
         }
         // removals go last, and only ever by explicit tick
         for (const b of byTag('missing')) {
@@ -3870,7 +3941,8 @@ function sheetImportCard(onApplied) {
           try {
             if (b.it.whole) await apiCall('card-hide', { method: 'POST', body: JSON.stringify({ cardId: b.it.card.id, hidden: true, lang }) });
             else await apiCall('variant-remove', { method: 'POST', body: JSON.stringify({ cardId: b.it.card.id, variant: b.it.key, lang }) });
-          } catch (e) { failed++; done--; toast(e.message); }
+            done++;
+          } catch (e) { failed++; toast(e.message); }
         }
       } finally {
         clearDataCaches();
@@ -3880,10 +3952,11 @@ function sheetImportCard(onApplied) {
         if (onApplied) onApplied();
       }
     });
+    updateApply();
     stage.replaceChildren(
-      ...(sections.length ? sections
-        : [h('p', { id: 'cur-sheet-clean', style: 'margin:10px 0 0' }, '✅ Nothing to import — the database already matches the sheet.')]),
-      ...(missingSection ? [missingSection] : []),
+      ...(adds || plan.fieldDiffs.length ? [] : [h('p', { id: 'cur-sheet-clean', style: 'margin:10px 0 0' }, '✅ Nothing to import — the database already matches the sheet.')]),
+      totals,
+      ...groupEls,
       ...notes.map((n) => h('p', { class: 'muted small', style: 'margin:8px 0 0' }, n)),
       applyBtn, progress);
   }
