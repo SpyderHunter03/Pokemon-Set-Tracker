@@ -3555,6 +3555,327 @@ function renderAdminPage(tab) {
 }
 
 
+
+/** The consultant lane: a Google Sheet tracked elsewhere, imported here.
+ * Workflow by design: open the sheet (link card) → File → Download → CSV →
+ * upload it below. Everything is cross-referenced against the live catalog
+ * BEFORE anything applies: printings the database already has produce no
+ * proposals (no duplicates, ever), variant names are matched through a
+ * synonym table ("1st Ed" is firstEdition, "Reverse Foil" is reverse), and
+ * every change sits behind a checkbox until Apply. One row = one printing. */
+function sheetImportCard(onApplied) {
+  const SHEET_KEY = 'ptcg.sheetUrl';
+  const urlIn = h('input', { type: 'text', id: 'cur-sheet-url', placeholder: 'https://docs.google.com/spreadsheets/…',
+    value: lsGet(SHEET_KEY) || '', style: 'flex:1; min-width:200px' });
+  const openA = h('a', { class: 'btn ghost small', id: 'cur-sheet-open', target: '_blank', rel: 'noopener' }, '↗ Open the sheet');
+  const syncOpen = () => {
+    const u = (urlIn.value || '').trim();
+    if (/^https:\/\/[^ ]+$/.test(u)) { openA.href = u; openA.style.display = ''; } else openA.style.display = 'none';
+  };
+  urlIn.addEventListener('input', () => { lsSet(SHEET_KEY, urlIn.value.trim() || null); syncOpen(); });
+  syncOpen();
+
+  const stage = h('div', { id: 'cur-sheet-stage' });
+
+  /* -- CSV/TSV, hand-parsed: quotes, embedded commas and newlines included -- */
+  function parseDelimited(text) {
+    const head = text.slice(0, text.indexOf('\n') + 1 || text.length);
+    const delim = (head.match(/\t/g) || []).length > (head.match(/,/g) || []).length ? '\t' : ',';
+    const rows = []; let row = [], cell = '', q = false;
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i];
+      if (q) {
+        if (ch === '"') { if (text[i + 1] === '"') { cell += '"'; i++; } else q = false; }
+        else cell += ch;
+      } else if (ch === '"') q = true;
+      else if (ch === delim) { row.push(cell); cell = ''; }
+      else if (ch === '\n' || ch === '\r') {
+        if (ch === '\r' && text[i + 1] === '\n') i++;
+        row.push(cell); cell = '';
+        if (row.some((c) => c.trim() !== '')) rows.push(row);
+        row = [];
+      } else cell += ch;
+    }
+    row.push(cell);
+    if (row.some((c) => c.trim() !== '')) rows.push(row);
+    return rows;
+  }
+
+  const FIELD_DEFS = [
+    ['set', 'Set (name or id)'], ['number', 'Card number'], ['name', 'Card name'],
+    ['variant', 'Printing / variant'], ['rarity', 'Rarity'], ['category', 'Category'],
+    ['hp', 'HP'], ['illustrator', 'Illustrator'], ['', '— ignore —'],
+  ];
+  function guessField(header) {
+    const n = header.trim().toLowerCase();
+    if (/set|expansion|series/.test(n)) return 'set';
+    if (/^(#|no\.?|num(ber)?|card ?(#|no|number))$/.test(n) || /number/.test(n)) return 'number';
+    if (/variant|printing|finish|treatment|edition|foil/.test(n)) return 'variant';
+    if (/rarity/.test(n)) return 'rarity';
+    if (/category|supertype/.test(n)) return 'category';
+    if (/^hp$/.test(n)) return 'hp';
+    if (/illus/.test(n)) return 'illustrator';
+    if (/name|card|pok[eé]mon/.test(n)) return 'name';
+    return '';
+  }
+
+  const norm = (v) => String(v == null ? '' : v).toLowerCase().replace(/[^a-z0-9]+/g, '');
+  // spellings a printing arrives in vs the keys the database speaks
+  const VSYN = {
+    '': 'normal', normal: 'normal', regular: 'normal', base: 'normal', nonholo: 'normal', unlimited: 'normal',
+    holo: 'holo', holofoil: 'holo', holographic: 'holo', foil: 'holo', cosmosholo: 'holo',
+    reverse: 'reverse', reverseholo: 'reverse', reversefoil: 'reverse', reversedholo: 'reverse', mirrorholo: 'reverse',
+    firstedition: 'firstEdition', '1stedition': 'firstEdition', '1sted': 'firstEdition', firsted: 'firstEdition',
+    '1st': 'firstEdition', '1steditionholo': 'firstEdition',
+    wpromo: 'wPromo', wstamp: 'wPromo', wstamppromo: 'wPromo',
+  };
+
+  async function analyze(headers, dataRows, mapOf) {
+    const ix = await getIndex();
+    const setByNorm = new Map();
+    for (const st of ix.sets) { setByNorm.set(norm(st.id), st.id); setByNorm.set(norm(st.name), st.id); }
+    const setCache = new Map();
+    const getSetCards = async (sid) => {
+      if (!setCache.has(sid)) setCache.set(sid, (await getSet(sid)).cards || []);
+      return setCache.get(sid);
+    };
+
+    const plan = { newSets: new Map(), newCards: new Map(), addVariants: [], addCustoms: [], fieldDiffs: [], problems: [], dupes: 0, matched: 0 };
+    const seen = new Set();
+
+    for (let r = 0; r < dataRows.length; r++) {
+      const val = (f) => { const i = mapOf[f]; return i === undefined ? '' : String(dataRows[r][i] == null ? '' : dataRows[r][i]).trim(); };
+      const rowNo = r + 2;   // 1-based, after the header row
+      const setRaw = val('set'), numRaw = val('number'), nameRaw = val('name'), varRaw = val('variant');
+      if (!setRaw && !numRaw && !nameRaw) continue;
+      if (!setRaw || !numRaw) { plan.problems.push(`Row ${rowNo}: needs both a set and a card number`); continue; }
+
+      const dupeKey = norm(setRaw) + '|' + norm(numRaw) + '|' + (VSYN[norm(varRaw)] || norm(varRaw));
+      if (seen.has(dupeKey)) { plan.dupes++; continue; }
+      seen.add(dupeKey);
+
+      let sid = setByNorm.get(norm(setRaw));
+      if (!sid) {
+        // a set the database has never heard of: propose it once, keyed by its normalized name
+        const k = norm(setRaw);
+        if (!plan.newSets.has(k)) {
+          const slug = setRaw.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+          plan.newSets.set(k, { name: setRaw, id: slug });
+        }
+        sid = plan.newSets.get(k).id;
+      }
+
+      const cards = plan.newSets.size && !setByNorm.get(norm(setRaw)) ? [] : await getSetCards(sid);
+      const card = cards.find((c) => norm(c.localId) === norm(numRaw));
+      const stdKey = VSYN[norm(varRaw)] || (Object.keys(VARIANT_LABELS).find((k) => norm(VARIANT_LABELS[k]) === norm(varRaw)) || null);
+
+      if (!card) {
+        // one proposal per new card; every row for it contributes a printing
+        const ck = sid + '|' + norm(numRaw);
+        if (!plan.newCards.has(ck)) {
+          if (!nameRaw) { plan.problems.push(`Row ${rowNo}: new card ${sid} #${numRaw} needs a name column`); continue; }
+          plan.newCards.set(ck, { set: sid, number: numRaw, name: nameRaw, rarity: val('rarity') || undefined,
+            category: val('category') || undefined, hp: val('hp') || undefined, illustrator: val('illustrator') || undefined,
+            variants: {}, customs: [] });
+        }
+        const nc = plan.newCards.get(ck);
+        if (stdKey) nc.variants[stdKey] = true;
+        else if (varRaw) nc.customs.push(varRaw);
+        else nc.variants.normal = true;
+        continue;
+      }
+
+      // the card exists — cross-reference the printing against what it has
+      const have = realVariants(card).filter((k) => !k.startsWith('my-'));
+      const labels = card.printings || {};
+      const hit = have.find((k) => (stdKey && k === stdKey) || norm(k) === norm(varRaw) || norm(labels[k] || '') === norm(varRaw)
+        || norm(variantLabel(card, k)) === norm(varRaw));
+      if (hit) plan.matched++;
+      else if (stdKey) plan.addVariants.push({ card, key: stdKey, label: VARIANT_LABELS[stdKey] });
+      else if (varRaw) plan.addCustoms.push({ card, label: varRaw });
+      else plan.matched++;
+
+      // mapped fields that disagree with the database go up for review
+      const diffs = [];
+      if (mapOf.name !== undefined && nameRaw && nameRaw !== card.name) diffs.push(['name', card.name, nameRaw]);
+      if (mapOf.rarity !== undefined && val('rarity') && val('rarity') !== (card.rarity || '')) diffs.push(['rarity', card.rarity || '(none)', val('rarity')]);
+      if (mapOf.category !== undefined && val('category') && val('category') !== (card.category || '')) diffs.push(['category', card.category || '(none)', val('category')]);
+      if (mapOf.illustrator !== undefined && val('illustrator') && val('illustrator') !== (card.illustrator || '')) diffs.push(['illustrator', card.illustrator || '(none)', val('illustrator')]);
+      if (mapOf.hp !== undefined && val('hp') && parseInt(val('hp'), 10) !== (card.hp || 0)) diffs.push(['hp', String(card.hp || 0), val('hp')]);
+      for (const [f, from, to] of diffs) {
+        if (!plan.fieldDiffs.some((d) => d.card.id === card.id && d.field === f)) {
+          plan.fieldDiffs.push({ card, field: f, from, to });
+        }
+      }
+    }
+    // the same printing proposed twice through different rows collapses too
+    plan.addVariants = plan.addVariants.filter((p, i, a) => a.findIndex((x) => x.card.id === p.card.id && x.key === p.key) === i);
+    plan.addCustoms = plan.addCustoms.filter((p, i, a) => a.findIndex((x) => x.card.id === p.card.id && norm(x.label) === norm(p.label)) === i);
+    return plan;
+  }
+
+  function renderPlan(plan) {
+    const boxes = [];
+    const section = (title, items, describe, tag) => {
+      if (!items.length) return null;
+      const rows = items.map((it) => {
+        const cb = h('input', { type: 'checkbox', checked: '' });
+        boxes.push({ cb, it, tag });
+        return h('label', { class: 'row', style: 'gap:8px; align-items:center; margin:3px 0; cursor:pointer' }, cb, h('span', {}, describe(it)));
+      });
+      return h('div', { style: 'margin-top:10px' }, h('h4', { class: 'muted small', style: 'margin:0 0 4px' }, `${title} (${items.length})`), ...rows);
+    };
+    const sections = [
+      section('New sets', [...plan.newSets.values()], (x) => `${x.name} (${x.id})`, 'set'),
+      section('New cards', [...plan.newCards.values()], (x) => {
+        const pr = [...Object.keys(x.variants).map((k) => VARIANT_LABELS[k] || k), ...x.customs];
+        return `${x.set} #${x.number} — ${x.name}${pr.length ? ' · ' + pr.join(', ') : ''}`;
+      }, 'card'),
+      section('New printings', plan.addVariants, (x) => `${x.card.name} (${x.card.id}) — ${x.label}`, 'variant'),
+      section('New custom printings', plan.addCustoms, (x) => `${x.card.name} (${x.card.id}) — "${x.label}"`, 'custom'),
+      section('Field differences', plan.fieldDiffs, (x) => `${x.card.name} (${x.card.id}) ${x.field}: "${x.from}" → "${x.to}"`, 'diff'),
+    ].filter(Boolean);
+
+    const notes = [];
+    if (plan.matched) notes.push(`${plan.matched} row(s) already match the database — nothing to do for them.`);
+    if (plan.dupes) notes.push(`${plan.dupes} duplicate row(s) in the sheet were collapsed.`);
+    for (const p of plan.problems) notes.push('⚠ ' + p);
+
+    if (!sections.length) {
+      stage.replaceChildren(
+        h('p', { id: 'cur-sheet-clean', style: 'margin:10px 0 0' }, '✅ Nothing to import — the database already matches the sheet.'),
+        ...notes.map((n) => h('p', { class: 'muted small', style: 'margin:4px 0 0' }, n)));
+      return;
+    }
+
+    const applyBtn = h('button', { class: 'btn small', id: 'cur-sheet-apply', style: 'margin-top:12px' }, 'Apply the ticked changes');
+    const progress = h('p', { class: 'muted small', style: 'margin:6px 0 0' });
+    applyBtn.addEventListener('click', async () => {
+      const todo = boxes.filter((b) => b.cb.checked);
+      if (!todo.length) { toast('Nothing ticked'); return; }
+      applyBtn.disabled = true;
+      let done = 0, failed = 0;
+      const step = (label) => { progress.textContent = `${++done + failed} / ${todo.length} — ${label}`; };
+      // order matters: sets before their cards, cards before their printings
+      const byTag = (t) => todo.filter((b) => b.tag === t);
+      try {
+        for (const b of byTag('set')) {
+          step('set ' + b.it.name);
+          try { await apiCall('set-create', { method: 'POST', body: JSON.stringify({ lang, id: b.it.id, name: b.it.name }) }); }
+          catch (e) { failed++; done--; toast(e.message); }
+        }
+        for (const b of byTag('card')) {
+          step('card ' + b.it.name);
+          try {
+            const body = { new: true, lang, set: b.it.set, localId: b.it.number, name: b.it.name, variants: b.it.variants };
+            if (b.it.rarity) body.rarity = b.it.rarity;
+            if (b.it.category) body.category = b.it.category;
+            if (b.it.hp) body.hp = parseInt(b.it.hp, 10);
+            if (b.it.illustrator) body.illustrator = b.it.illustrator;
+            await apiCall('card', { method: 'POST', body: JSON.stringify(body) });
+            for (const label of b.it.customs) {
+              await apiCall('custom-variant', { method: 'POST', body: JSON.stringify({ cardId: `${b.it.set}-${b.it.number}`.replace(/\s+/g, ''), label, lang }) });
+            }
+          } catch (e) { failed++; done--; toast(e.message); }
+        }
+        for (const b of byTag('variant')) {
+          step(b.it.card.name + ' ' + b.it.label);
+          try {
+            const fresh = await getCard(b.it.card.id);
+            const variants = {};
+            for (const k of realVariants(fresh).filter((x) => !x.startsWith('my-'))) variants[k] = true;
+            variants[b.it.key] = true;
+            await apiCall('card', { method: 'POST', body: JSON.stringify({ lang, cardId: b.it.card.id, variants }) });
+          } catch (e) { failed++; done--; toast(e.message); }
+        }
+        for (const b of byTag('custom')) {
+          step(b.it.card.name + ' "' + b.it.label + '"');
+          try { await apiCall('custom-variant', { method: 'POST', body: JSON.stringify({ cardId: b.it.card.id, label: b.it.label, lang }) }); }
+          catch (e) { failed++; done--; toast(e.message); }
+        }
+        for (const b of byTag('diff')) {
+          step(b.it.card.name + ' ' + b.it.field);
+          try {
+            const body = { lang, cardId: b.it.card.id };
+            body[b.it.field] = b.it.field === 'hp' ? parseInt(b.it.to, 10) : b.it.to;
+            await apiCall('card', { method: 'POST', body: JSON.stringify(body) });
+          } catch (e) { failed++; done--; toast(e.message); }
+        }
+      } finally {
+        clearDataCaches();
+        progress.textContent = '';
+        stage.replaceChildren(h('p', { id: 'cur-sheet-done', style: 'margin:10px 0 0' },
+          `✅ Applied ${done} change(s)${failed ? ` — ${failed} failed (see toasts)` : ''}. Upload the sheet again to verify it comes back clean.`));
+        if (onApplied) onApplied();
+      }
+    });
+    stage.replaceChildren(
+      ...sections,
+      ...notes.map((n) => h('p', { class: 'muted small', style: 'margin:8px 0 0' }, n)),
+      applyBtn, progress);
+  }
+
+  const fileIn = h('input', { type: 'file', accept: '.csv,.tsv,text/csv,text/tab-separated-values', hidden: '', id: 'cur-sheet-file' });
+  fileIn.addEventListener('change', async (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    let rows;
+    try { rows = parseDelimited(await f.text()); } catch (err) { toast('Could not read that file: ' + err.message); return; }
+    e.target.value = '';
+    if (rows.length < 2) { toast('That file has no data rows'); return; }
+    const headers = rows[0].map((x) => String(x == null ? '' : x).trim());
+    const dataRows = rows.slice(1);
+    const mapKey = 'ptcg.sheetMap.' + headers.join('|').slice(0, 180);
+    const savedMap = lsGet(mapKey);
+
+    // column mapping: guessed from the headers, corrected by hand, remembered
+    const sels = headers.map((hd, i) => {
+      const sel = h('select', { class: 'chip', 'data-col': String(i) },
+        ...FIELD_DEFS.map(([id, label]) => {
+          const o = h('option', { value: id }, label);
+          const want = savedMap && savedMap[i] !== undefined ? savedMap[i] : guessField(hd);
+          if (id === want) o.setAttribute('selected', '');
+          return o;
+        }));
+      return { header: hd, sel };
+    });
+    const goBtn = h('button', { class: 'btn small', id: 'cur-sheet-analyze', style: 'margin-top:10px' }, `Check ${dataRows.length} row(s) against the database`);
+    goBtn.addEventListener('click', async () => {
+      const mapOf = {};
+      const chosen = sels.map((x) => x.sel.value);
+      chosen.forEach((f, i) => { if (f && mapOf[f] === undefined) mapOf[f] = i; });
+      if (mapOf.set === undefined || mapOf.number === undefined || mapOf.variant === undefined) {
+        toast('Map at least Set, Card number and Printing/variant'); return;
+      }
+      lsSet(mapKey, chosen);
+      goBtn.disabled = true;
+      stage.replaceChildren(spinner());
+      try { renderPlan(await analyze(headers, dataRows, mapOf)); }
+      catch (err) { stage.replaceChildren(h('p', { class: 'muted small' }, 'Analysis failed: ' + err.message)); }
+      goBtn.disabled = false;
+    });
+    stage.replaceChildren(
+      h('h4', { class: 'muted small', style: 'margin:10px 0 4px' }, 'Which column is which?'),
+      ...sels.map((x) => h('div', { class: 'row', style: 'gap:8px; align-items:center; margin:3px 0' },
+        h('span', { style: 'min-width:140px' }, x.header || '(unnamed)'), x.sel)),
+      goBtn);
+  });
+
+  return settingsCard(
+    h('h3', { style: 'margin:0 0 6px' }, 'Consultant sheet'),
+    h('p', { class: 'muted small', style: 'margin:0 0 10px' },
+      'The Google Sheet is tracked elsewhere; the database is curated here. Open the sheet, File → Download → ' +
+      'Comma-separated values (.csv), then upload it below. Every row is checked against the catalog first: ' +
+      'printings that already exist are skipped (never duplicated), variant names are matched by meaning ' +
+      '("1st Ed" is 1st Edition, "Reverse Foil" is Reverse Holo), and nothing applies without your tick.'),
+    h('div', { class: 'row', style: 'gap:8px; flex-wrap:wrap; align-items:center' },
+      urlIn, openA,
+      h('button', { class: 'btn ghost small', id: 'cur-sheet-upload', onclick: () => fileIn.click() }, '⬆ Upload the downloaded CSV'),
+      fileIn),
+    stage,
+  );
+}
+
 /** Curation: every master-database tool, in the one place they belong.
  * Deliberately denser than the rest of the app — this tab is for whoever
  * runs the install, and nobody else ever sees it. Regular pages (and the
@@ -3772,7 +4093,7 @@ function adminCurateTab() {
 
   renderSetOptions(selId ? setIdOf(selId) : undefined);
   renderCard();
-  content.append(workbench, setsCard);
+  content.append(workbench, setsCard, sheetImportCard(() => { renderCard(); renderHidden(); }));
   return content;
 }
 

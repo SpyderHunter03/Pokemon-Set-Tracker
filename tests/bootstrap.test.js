@@ -397,6 +397,71 @@ const { chromium } = require('playwright');
   check('editor: a typed-but-not-added custom printing still saves',
     (await page.locator('.tcg-card[data-card-id="test-promos-4"] .fx-label').textContent()) === 'Gold Stamp');
 
+  // ---- the consultant sheet: CSV in, cross-referenced, nothing duplicated ----
+  await gotoCurate();
+  await page.fill('#cur-sheet-url', 'https://docs.google.com/spreadsheets/d/EXAMPLE/edit');
+  check('sheet card: the link button points at the sheet',
+    await page.locator('#cur-sheet-open').isVisible() &&
+    (await page.locator('#cur-sheet-open').getAttribute('href')).includes('docs.google.com'));
+  await page.setInputFiles('#cur-sheet-file', require('path').join(__dirname, 'fixtures', 'consultant.csv'));
+  await page.waitForSelector('#cur-sheet-analyze');
+  check('sheet: columns are guessed from the headers',
+    (await page.locator('select[data-col="0"]').inputValue()) === 'set' &&
+    (await page.locator('select[data-col="1"]').inputValue()) === 'number' &&
+    (await page.locator('select[data-col="3"]').inputValue()) === 'variant');
+  await page.click('#cur-sheet-analyze');
+  await page.waitForSelector('#cur-sheet-apply');
+  const stageText = await page.textContent('#cur-sheet-stage');
+  check('sheet: rows already in the database produce NO proposals (no duplicates)',
+    stageText.includes('3 row(s) already match the database'));
+  check('sheet: duplicate rows inside the sheet are collapsed', stageText.includes('1 duplicate row(s)'));
+  check('sheet: a new set is proposed', stageText.includes('New sets (1)') && stageText.includes('Consultant Promos'));
+  check('sheet: new cards are proposed with their printings',
+    stageText.includes('New cards (2)') && stageText.includes('Brand New Mon') && stageText.includes('Sheetmon'));
+  check('sheet: a standard variant is matched through its synonym (Reverse Foil)',
+    stageText.includes('New printings (1)') && stageText.includes('Reverse Holo'));
+  check('sheet: an unknown printing becomes a custom-printing proposal',
+    stageText.includes('New custom printings (1)') && stageText.includes('Prerelease Stamp'));
+  check('sheet: a differing field goes up for review, not silently applied',
+    stageText.includes('Field differences (1)') && stageText.includes('Eevee Star Prime'));
+
+  await page.click('#cur-sheet-apply');
+  await page.waitForSelector('#cur-sheet-done', { timeout: 30000 });
+  const applied = await page.evaluate(async () => {
+    const tp = await (await fetch('api/catalog/set?lang=en&id=test-promos')).json();
+    const cp = await (await fetch('api/catalog/set?lang=en&id=consultant-promos')).json();
+    const c1 = (tp.cards || []).find((c) => c.id === 'test-promos-1');
+    const c2 = (tp.cards || []).find((c) => c.id === 'test-promos-2');
+    const c9 = (tp.cards || []).find((c) => c.id === 'test-promos-9');
+    const s1 = (cp.cards || []).find((c) => c.id === 'consultant-promos-1');
+    return {
+      reverse: !!(c1 && c1.variants && c1.variants.reverse),
+      stamp: !!(c1 && c1.printings && Object.values(c1.printings).includes('Prerelease Stamp')),
+      renamed: c2 && c2.name,
+      newCard: !!(c9 && c9.variants && c9.variants.holo && c9.rarity === 'Rare Holo'),
+      newSetCard: !!(s1 && s1.name === 'Sheetmon' && s1.variants && s1.variants.firstEdition),
+    };
+  });
+  check('sheet: applied — the synonym variant landed on the card', applied.reverse);
+  check('sheet: applied — the custom printing landed with its label', applied.stamp);
+  check('sheet: applied — the reviewed field difference was written', applied.renamed === 'Eevee Star Prime');
+  check('sheet: applied — the new card exists with its printing and rarity', applied.newCard);
+  check('sheet: applied — the new set exists and holds its card', applied.newSetCard);
+
+  // the proof of idempotence: the same sheet again finds nothing to do
+  await gotoCurate();
+  await page.setInputFiles('#cur-sheet-file', require('path').join(__dirname, 'fixtures', 'consultant.csv'));
+  await page.waitForSelector('#cur-sheet-analyze');
+  await page.click('#cur-sheet-analyze');
+  await page.waitForSelector('#cur-sheet-clean');
+  check('sheet: uploading the same sheet again imports nothing (idempotent)', true);
+
+  // tidy the stage for the main suite: the consultant set proved its point —
+  // hide it so the home page holds the sets the smoke checks expect
+  await page.evaluate(async () => {
+    await fetch('api/set-hide', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: 'consultant-promos', hidden: true, lang: 'en' }) });
+  });
+
   // sign the admin out so the main suite's fresh user is a clean non-admin test
   await page.click('#account-btn');
   await page.waitForSelector('#account-page button:has-text("Sign out")');
