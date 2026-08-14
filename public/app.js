@@ -3636,18 +3636,22 @@ function sheetImportCard(onApplied) {
     wpromo: 'wPromo', wstamp: 'wPromo', wstamppromo: 'wPromo',
   };
 
-  async function analyze(headers, dataRows, mapOf) {
+  async function analyze(headers, dataRows, mapOf, choices) {
     const ix = await getIndex();
     const setByNorm = new Map();
     for (const st of ix.sets) { setByNorm.set(norm(st.id), st.id); setByNorm.set(norm(st.name), st.id); }
     const setNames = new Map(ix.sets.map((st) => [st.id, st.name]));
+    // matches made in earlier imports: the consultant's names for our sets
+    const aliases = new Map();
+    try { for (const a of (await apiCall('import-aliases?lang=' + encodeURIComponent(lang))).aliases) aliases.set(a.alias, a.setId); } catch { /* fine */ }
     const setCache = new Map();
     const getSetCards = async (sid) => {
       if (!setCache.has(sid)) setCache.set(sid, (await getSet(sid)).cards || []);
       return setCache.get(sid);
     };
 
-    const plan = { newSets: new Map(), newCards: new Map(), addVariants: [], addCustoms: [], fieldDiffs: [], problems: [], missing: [], dupes: 0, matched: 0 };
+    const plan = { newSets: new Map(), newCards: new Map(), addVariants: [], addCustoms: [], fieldDiffs: [], problems: [], missing: [], unmatched: new Map(), ignored: 0, dupes: 0, matched: 0 };
+    plan.existingSets = ix.sets.map((st) => ({ id: st.id, name: st.name }));
     const seen = new Set();
     // what the sheet DOES cover, so its silences can be reported too
     const coveredSets = new Set();
@@ -3668,24 +3672,38 @@ function sheetImportCard(onApplied) {
       seen.add(dupeKey);
 
       let sid = setByNorm.get(norm(setRaw));
-      if (sid) {
+      let isNewSet = false;
+      if (!sid) {
+        // the highest level first: a set name the database does not know is
+        // resolved through the saved matches, this session's choices, or —
+        // failing both — parked for the admin to match before its rows count
+        const nk = norm(setRaw);
+        const al = aliases.get(nk);
+        if (al === '') { plan.ignored++; continue; }
+        if (al && setNames.has(al)) sid = al;
+        else if (choices && choices.creates.has(nk)) {
+          if (!plan.newSets.has(nk)) {
+            const slug = setRaw.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+            plan.newSets.set(nk, { name: setRaw, id: slug });
+          }
+          sid = plan.newSets.get(nk).id;
+          isNewSet = true;
+        } else {
+          const u = plan.unmatched.get(nk) || { raw: setRaw, rows: 0 };
+          u.rows += 1;
+          plan.unmatched.set(nk, u);
+          continue;
+        }
+      }
+      if (!isNewSet) {
         coveredSets.add(sid);
         if (mapOf.setsize !== undefined && !setSizes.has(sid)) {
           const sz = parseInt(val('setsize').replace(/[^0-9]/g, ''), 10);
           if (sz > 0) setSizes.set(sid, sz);
         }
       }
-      if (!sid) {
-        // a set the database has never heard of: propose it once, keyed by its normalized name
-        const k = norm(setRaw);
-        if (!plan.newSets.has(k)) {
-          const slug = setRaw.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
-          plan.newSets.set(k, { name: setRaw, id: slug });
-        }
-        sid = plan.newSets.get(k).id;
-      }
 
-      const cards = plan.newSets.size && !setByNorm.get(norm(setRaw)) ? [] : await getSetCards(sid);
+      const cards = isNewSet ? [] : await getSetCards(sid);
       const card = cards.find((c) => norm(c.localId) === norm(numRaw));
       const stdKey = VSYN[norm(varRaw)] || (Object.keys(VARIANT_LABELS).find((k) => norm(VARIANT_LABELS[k]) === norm(varRaw)) || null);
 
@@ -3773,6 +3791,9 @@ function sheetImportCard(onApplied) {
     return plan;
   }
 
+  let _rerun = null;       // re-run the current analysis (after a set match)
+  let _choices = null;     // this upload's create-as-new-set decisions
+
   function renderPlan(plan) {
     /* A real sheet is a hundred rows per set: the review must stay one screen
      * tall until asked. Everything renders as collapsed groups — per set, per
@@ -3810,8 +3831,43 @@ function sheetImportCard(onApplied) {
     if (plan.dupes) notes.push(`${plan.dupes} duplicate row(s) in the sheet were collapsed.`);
     for (const p of plan.problems) notes.push('⚠ ' + p);
 
+    if (plan.ignored) notes.push(`${plan.ignored} row(s) ignored via saved matches.`);
+
+    // the highest level first: sheet sets nobody has matched yet
+    let matchEl = null;
+    if (plan.unmatched.size) {
+      const rows = [...plan.unmatched.entries()].map(([nk, u]) => {
+        const sel = h('select', { class: 'chip', 'data-alias': u.raw },
+          h('option', { value: '' }, '— match to —'),
+          h('option', { value: '::create' }, 'Create as a new set'),
+          h('option', { value: '::ignore' }, 'Ignore rows from this set'),
+          ...plan.existingSets.map((st) => h('option', { value: st.id }, st.name)));
+        sel.addEventListener('change', async () => {
+          const v = sel.value;
+          if (!v) return;
+          try {
+            if (v === '::create') _choices.creates.add(nk);
+            else {
+              _choices.creates.delete(nk);
+              // remembered on the server: next month's upload resolves itself
+              await apiCall('import-aliases', { method: 'POST', body: JSON.stringify({ lang, alias: u.raw, setId: v === '::ignore' ? '' : v }) });
+            }
+            if (_rerun) _rerun();
+          } catch (e) { toast(e.message); }
+        });
+        return h('div', { class: 'row', style: 'gap:10px; align-items:center; margin:4px 0; flex-wrap:wrap' },
+          h('span', {}, `"${u.raw}" — ${u.rows} row(s)`), sel);
+      });
+      matchEl = h('div', { id: 'cur-sheet-match', style: 'margin-top:10px' },
+        h('h4', { class: 'muted small', style: 'margin:0 0 4px' }, `Match the sheet's sets first (${plan.unmatched.size})`),
+        h('p', { class: 'muted small', style: 'margin:0 0 6px' },
+          'The sheet uses set names this database does not know. Match each one to your set (remembered for every future upload — several sheet sets may map to the same set), create it, or ignore its rows.'),
+        ...rows);
+      notes.push(`⚠ Rows from ${plan.unmatched.size} unmatched sheet set(s) are not part of this review yet.`);
+    }
+
     const adds = plan.newSets.size + plan.newCards.size + plan.addVariants.length + plan.addCustoms.length;
-    if (!items.length) {
+    if (!items.length && !plan.unmatched.size) {
       stage.replaceChildren(
         h('p', { id: 'cur-sheet-clean', style: 'margin:10px 0 0' }, '✅ Nothing to import — the database already matches the sheet.'),
         ...notes.map((n) => h('p', { class: 'muted small', style: 'margin:4px 0 0' }, n)));
@@ -3954,11 +4010,12 @@ function sheetImportCard(onApplied) {
     });
     updateApply();
     stage.replaceChildren(
-      ...(adds || plan.fieldDiffs.length ? [] : [h('p', { id: 'cur-sheet-clean', style: 'margin:10px 0 0' }, '✅ Nothing to import — the database already matches the sheet.')]),
+      ...(adds || plan.fieldDiffs.length || plan.unmatched.size ? [] : [h('p', { id: 'cur-sheet-clean', style: 'margin:10px 0 0' }, '✅ Nothing to import — the database already matches the sheet.')]),
+      ...(matchEl ? [matchEl] : []),
       totals,
       ...groupEls,
       ...notes.map((n) => h('p', { class: 'muted small', style: 'margin:8px 0 0' }, n)),
-      applyBtn, progress);
+      ...(items.length ? [applyBtn, progress] : []));
   }
 
   const fileIn = h('input', { type: 'file', accept: '.csv,.tsv,text/csv,text/tab-separated-values', hidden: '', id: 'cur-sheet-file' });
@@ -3995,9 +4052,13 @@ function sheetImportCard(onApplied) {
       }
       lsSet(mapKey, chosen);
       goBtn.disabled = true;
-      stage.replaceChildren(spinner());
-      try { renderPlan(await analyze(headers, dataRows, mapOf)); }
-      catch (err) { stage.replaceChildren(h('p', { class: 'muted small' }, 'Analysis failed: ' + err.message)); }
+      _choices = { creates: new Set() };
+      _rerun = async () => {
+        stage.replaceChildren(spinner());
+        try { renderPlan(await analyze(headers, dataRows, mapOf, _choices)); }
+        catch (err) { stage.replaceChildren(h('p', { class: 'muted small' }, 'Analysis failed: ' + err.message)); }
+      };
+      await _rerun();
       goBtn.disabled = false;
     });
     stage.replaceChildren(
@@ -4005,6 +4066,25 @@ function sheetImportCard(onApplied) {
       ...sels.map((x) => h('div', { class: 'row', style: 'gap:8px; align-items:center; margin:3px 0' },
         h('span', { style: 'min-width:140px' }, x.header || '(unnamed)'), x.sel)),
       goBtn);
+  });
+
+  const savedBody = h('div', { style: 'margin:6px 0 0' });
+  const savedDet = h('details', { id: 'cur-sheet-aliases', style: 'margin-top:10px' },
+    h('summary', { class: 'muted small', style: 'cursor:pointer' }, 'Saved set matches'),
+    savedBody);
+  savedDet.addEventListener('toggle', async () => {
+    if (!savedDet.open) return;
+    savedBody.replaceChildren(spinner());
+    try {
+      const d = await apiCall('import-aliases?lang=' + encodeURIComponent(lang));
+      if (!d.aliases.length) { savedBody.replaceChildren(h('p', { class: 'muted small', style: 'margin:0' }, 'None yet — they appear when you match a sheet set during an import.')); return; }
+      savedBody.replaceChildren(...d.aliases.map((a) => h('div', { class: 'row', style: 'gap:10px; align-items:center; margin:3px 0' },
+        h('span', {}, `"${a.raw}" → ${a.setId === '' ? '(ignored)' : a.setId}`),
+        h('button', { class: 'btn ghost small', onclick: async (e) => {
+          try { await apiCall('import-aliases', { method: 'POST', body: JSON.stringify({ lang, alias: a.raw, remove: true }) }); e.target.closest('.row').remove(); }
+          catch (err) { toast(err.message); }
+        } }, 'Forget'))));
+    } catch (e) { savedBody.replaceChildren(h('p', { class: 'muted small' }, e.message)); }
   });
 
   return settingsCard(
@@ -4021,6 +4101,7 @@ function sheetImportCard(onApplied) {
       h('button', { class: 'btn ghost small', id: 'cur-sheet-upload', onclick: () => fileIn.click() }, '⬆ Upload the downloaded CSV'),
       fileIn),
     stage,
+    savedDet,
   );
 }
 

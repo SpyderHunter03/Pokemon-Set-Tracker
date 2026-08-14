@@ -218,6 +218,21 @@ db.exec(`
   );
 `);
 
+/* Sheet-import aliases: the consultant's set names, matched to this install's
+ * sets once and remembered. Many aliases may point at one set ("Base Set (E)",
+ * "Base Set (C)" both -> base1); an empty set_id means "ignore rows from this
+ * sheet set". Install-local curation state — never published, never pulled. */
+db.exec(`
+  CREATE TABLE IF NOT EXISTS import_aliases (
+    lang    TEXT NOT NULL DEFAULT 'en',
+    alias   TEXT NOT NULL,
+    raw     TEXT NOT NULL,
+    set_id  TEXT NOT NULL,
+    created TEXT NOT NULL,
+    PRIMARY KEY (lang, alias)
+  );
+`);
+
 /* One-shot links: verify this address, reset this password. Only the SHA-256
  * of each token is kept — the raw value exists in the email and nowhere else,
  * so a copy of the database is not a set of skeleton keys. Every one carries
@@ -403,6 +418,15 @@ const _userPrintPut = db.prepare(`INSERT INTO user_printings (user_id, lang, car
     img_low=COALESCE(excluded.img_low, img_low), img_high=COALESCE(excluded.img_high, img_high)`);
 const _userPrintDel = db.prepare('DELETE FROM user_printings WHERE user_id = ? AND lang = ? AND card_id = ? AND variant = ?');
 const _userPrintCount = db.prepare('SELECT COUNT(*) AS n FROM user_printings WHERE user_id = ?');
+const _aliasList = db.prepare('SELECT alias, raw, set_id FROM import_aliases WHERE lang = ? ORDER BY raw');
+const _aliasPut = db.prepare(`INSERT INTO import_aliases (lang, alias, raw, set_id, created) VALUES (?,?,?,?,?)
+  ON CONFLICT(lang, alias) DO UPDATE SET raw=excluded.raw, set_id=excluded.set_id`);
+const _aliasDel = db.prepare('DELETE FROM import_aliases WHERE lang = ? AND alias = ?');
+/** the same normalization the importer applies to set names: accent-folded alnum */
+function aliasKeyOf(s) {
+  return String(s == null ? '' : s).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
 /** remove a personal row's image files from disk (they are per-row, never shared) */
 function dropUserImages(row) {
   for (const u of [row && row.img_low, row && row.img_high]) {
@@ -3472,6 +3496,28 @@ async function handleApi(req, res, pathname, ip, url) {
     const lang = LANG_RE.test(body.lang || '') ? body.lang : 'en';
     _localPrintingLabel.run(lang, cardId, key, label);
     return sendJSON(res, 200, { ok: true, cardId, key, label });
+  }
+
+  // ---- admin: the sheet-import set matches (alias -> set), remembered ----
+  if (pathname === '/api/import-aliases' && req.method === 'GET') {
+    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    const lang = LANG_RE.test(url.searchParams.get('lang') || '') ? url.searchParams.get('lang') : 'en';
+    return sendJSON(res, 200, { aliases: _aliasList.all(lang).map((r) => ({ alias: r.alias, raw: r.raw, setId: r.set_id })) });
+  }
+  if (pathname === '/api/import-aliases' && req.method === 'POST') {
+    if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
+    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    const body = await readBody(req);
+    const aLang = LANG_RE.test(body.lang || '') ? body.lang : 'en';
+    const raw = typeof body.alias === 'string' ? body.alias.trim().slice(0, 120) : '';
+    const key = aliasKeyOf(raw);
+    if (!key) return sendJSON(res, 400, { error: 'alias must be the sheet set name' });
+    if (body.remove) { _aliasDel.run(aLang, key); return sendJSON(res, 200, { ok: true, removed: key }); }
+    const setId = typeof body.setId === 'string' ? body.setId : null;
+    if (setId === null) return sendJSON(res, 400, { error: 'setId is required (\'\' means ignore rows from this sheet set)' });
+    if (setId !== '' && !_setRow.get(aLang, setId)) return sendJSON(res, 404, { error: `Set ${setId} not found in the ${aLang} database` });
+    _aliasPut.run(aLang, key, raw, setId, new Date().toISOString());
+    return sendJSON(res, 200, { ok: true, alias: key, setId });
   }
 
   // ---- admin: create a whole new card, or edit any card's details ----

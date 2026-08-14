@@ -417,8 +417,22 @@ const { chromium } = require('playwright');
   // the review arrives folded: only the totals line and group summaries show
   check('sheet: the review is one screen — totals + collapsed groups, no row lists',
     (await page.locator('#cur-sheet-stage label').count()) === 0 &&
-    (await page.textContent('#cur-sheet-totals')).includes('5 to add') &&
+    (await page.textContent('#cur-sheet-totals')).includes('3 to add') &&
     (await page.textContent('#cur-sheet-totals')).includes('3 absent'));
+
+  // ---- the highest level first: unknown sheet sets are matched, not guessed ----
+  await page.waitForSelector('#cur-sheet-match');
+  const matchText = await page.textContent('#cur-sheet-match');
+  check('sheet: unknown set names park in a match-first step, rows excluded until resolved',
+    matchText.includes('Base Set (E)') && matchText.includes('Consultant Promos'));
+  // "Base Set (E)" IS Base Set — match it; the pairing is remembered server-side
+  await page.selectOption('select[data-alias="Base Set (E)"]', 'base1');
+  await page.waitForFunction(() => (document.querySelector('#cur-sheet-totals') || {}).textContent?.includes('5 matched'));
+  check('sheet: an aliased set folds its rows into the matched set (5 matched now)', true);
+  // "Consultant Promos" is genuinely new — create it
+  await page.selectOption('select[data-alias="Consultant Promos"]', '::create');
+  await page.waitForFunction(() => (document.querySelector('#cur-sheet-totals') || {}).textContent?.includes('5 to add'));
+  check('sheet: choosing create turns the unknown set into a reviewed proposal', true);
   const expandAll = async () => {
     await page.evaluate(() => document.querySelectorAll('#cur-sheet-stage details').forEach((d) => { d.open = true; }));
     await page.waitForTimeout(200);   // toggle events render the rows lazily
@@ -426,7 +440,7 @@ const { chromium } = require('playwright');
   await expandAll();
   const stageText = await page.textContent('#cur-sheet-stage');
   check('sheet: rows already in the database produce NO proposals (no duplicates)',
-    stageText.includes('4 row(s) already match the database'));
+    stageText.includes('5 row(s) already match the database'));
   check('sheet: "Holo Rare"/"Pokémon"/"Fire" match "Rare Holo"/"Pokemon"/["Fire"] — no phantom differences',
     !stageText.includes('Charizard'));
   check('sheet: duplicate rows inside the sheet are collapsed', stageText.includes('1 duplicate row(s)'));
@@ -483,6 +497,12 @@ const { chromium } = require('playwright');
   const cleanText = await page.textContent('#cur-sheet-stage');
   check('sheet: deleted rows are still reported alongside a clean import',
     (await page.textContent('#cur-sheet-totals')).includes('3 absent') && cleanText.includes('Pika Promo'));
+  check('sheet: the saved match resolves "Base Set (E)" by itself next time',
+    (await page.locator('#cur-sheet-match').count()) === 0);
+  await page.click('#cur-sheet-aliases summary');
+  await page.waitForSelector('#cur-sheet-aliases .row');
+  check('sheet: the saved match is listed and forgettable',
+    (await page.textContent('#cur-sheet-aliases')).includes('"Base Set (E)" → base1'));
   check('sheet: every deletion box starts unticked',
     (await page.locator('#cur-sheet-stage input[type=checkbox]:checked').count()) === 0);
   // acting on a deletion is an explicit tick — and surgical: Pika Promo also
