@@ -1,9 +1,10 @@
-Set,Card Number,Card Name,Printing,Rarity
-Test Promos,1,Eevee Star EX,Normal,Rare
-Test Promos,1,Eevee Star EX,Sparkle Foil,Rare
-Test Promos,1,Eevee Star EX,Reverse Foil,Rare
-Test Promos,1,Eevee Star EX,Prerelease Stamp,Rare
-Test Promos,1,Eevee Star EX,Prerelease Stamp,Rare
-Test Promos,2,Eevee Star Prime,Normal,
-Test Promos,9,Brand New Mon,Holo,Rare Holo
-Consultant Promos,1,Sheetmon,1st Ed,Common
+Series,Expansion,Card Name,Set number,Set size,Rarity,Category,Type,Variant
+Original,Base Set,Charizard,4,/102,Holo Rare,Pokémon,Fire,1st edition
+Original,Test Promos,Eevee Star EX,1,,Rare,,,Normal
+Original,Test Promos,Eevee Star EX,1,,Rare,,,Sparkle Foil
+Original,Test Promos,Eevee Star EX,1,,Rare,,,Reverse Foil
+Original,Test Promos,Eevee Star EX,1,,Rare,,,Prerelease Stamp
+Original,Test Promos,Eevee Star EX,1,,Rare,,,Prerelease Stamp
+Original,Test Promos,Eevee Star Prime,2,,,,,Normal
+Original,Test Promos,Brand New Mon,9,,Rare Holo,,,Holo
+Original,Consultant Promos,Sheetmon,1,,Common,,,1st Ed

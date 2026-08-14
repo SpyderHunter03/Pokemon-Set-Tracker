@@ -405,15 +405,20 @@ const { chromium } = require('playwright');
     (await page.locator('#cur-sheet-open').getAttribute('href')).includes('docs.google.com'));
   await page.setInputFiles('#cur-sheet-file', require('path').join(__dirname, 'fixtures', 'consultant.csv'));
   await page.waitForSelector('#cur-sheet-analyze');
-  check('sheet: columns are guessed from the headers',
-    (await page.locator('select[data-col="0"]').inputValue()) === 'set' &&
-    (await page.locator('select[data-col="1"]').inputValue()) === 'number' &&
-    (await page.locator('select[data-col="3"]').inputValue()) === 'variant');
+  check('sheet: columns guessed right, including the treacherous ones',
+    (await page.locator('select[data-col="0"]').inputValue()) === '' &&          // Series is a grouping, not the set
+    (await page.locator('select[data-col="1"]').inputValue()) === 'set' &&       // Expansion IS the set
+    (await page.locator('select[data-col="3"]').inputValue()) === 'number' &&    // "Set number" is a number
+    (await page.locator('select[data-col="4"]').inputValue()) === 'setsize' &&   // "Set si[ze]" is the /102 column
+    (await page.locator('select[data-col="7"]').inputValue()) === 'types' &&
+    (await page.locator('select[data-col="8"]').inputValue()) === 'variant');
   await page.click('#cur-sheet-analyze');
   await page.waitForSelector('#cur-sheet-apply');
   const stageText = await page.textContent('#cur-sheet-stage');
   check('sheet: rows already in the database produce NO proposals (no duplicates)',
-    stageText.includes('3 row(s) already match the database'));
+    stageText.includes('4 row(s) already match the database'));
+  check('sheet: "Holo Rare"/"Pokémon"/"Fire" match "Rare Holo"/"Pokemon"/["Fire"] — no phantom differences',
+    !stageText.includes('Charizard'));
   check('sheet: duplicate rows inside the sheet are collapsed', stageText.includes('1 duplicate row(s)'));
   check('sheet: a new set is proposed', stageText.includes('New sets (1)') && stageText.includes('Consultant Promos'));
   check('sheet: new cards are proposed with their printings',
@@ -426,7 +431,11 @@ const { chromium } = require('playwright');
     stageText.includes('Field differences (1)') && stageText.includes('Eevee Star Prime'));
   check('sheet: rows deleted from the sheet are reported, never auto-applied',
     stageText.includes('In the database but not in the sheet (3)') &&
-    stageText.includes('Pika Promo') && stageText.includes('Solo Promo') && stageText.includes('Sparkle Foil is absent'));
+    stageText.includes('Pika Promo') && stageText.includes('Sparkle Foil is absent'));
+  check('sheet: the skipped 1st Edition row surfaces by name (the Machamp case)',
+    stageText.includes('Pikachu') && stageText.includes('1st Edition is absent'));
+  check('sheet: printings outside the sheet\'s vocabulary are NOT flagged as deleted',
+    !stageText.includes('Solo Promo') && !stageText.includes('Cracked Ice'));
 
   await page.click('#cur-sheet-apply');
   await page.waitForSelector('#cur-sheet-done', { timeout: 30000 });
@@ -465,15 +474,19 @@ const { chromium } = require('playwright');
     cleanText.includes('In the database but not in the sheet (3)') && cleanText.includes('Pika Promo'));
   check('sheet: every deletion box starts unticked',
     (await page.locator('#cur-sheet-stage input[type=checkbox]:checked').count()) === 0);
-  // acting on a deletion is an explicit tick: hide the whole absent card
-  await page.check('#cur-sheet-stage label:has-text("Solo Promo") input');
+  // acting on a deletion is an explicit tick — and surgical: Pika Promo also
+  // has a 1st Edition printing the sheet says nothing about, so what's on
+  // offer is removing its Normal printing, not hiding the card
+  await page.check('#cur-sheet-stage label:has-text("Pika Promo") input');
   await page.click('#cur-sheet-apply');
   await page.waitForSelector('#cur-sheet-done');
-  const soloGone = await page.evaluate(async () => {
+  const pika = await page.evaluate(async () => {
     const d = await (await fetch('api/catalog/set?lang=en&id=test-promos')).json();
-    return !(d.cards || []).some((c) => c.id === 'test-promos-4');
+    const c = (d.cards || []).find((x) => x.id === 'test-promos-3');
+    return { exists: !!c, normal: !!(c && c.variants && c.variants.normal) };
   });
-  check('sheet: a ticked whole-card deletion hides the card', soloGone);
+  check('sheet: a ticked deletion removes exactly that printing, and the card survives',
+    pika.exists && !pika.normal);
 
   // tidy the stage for the main suite: the consultant set proved its point —
   // hide it so the home page holds the sets the smoke checks expect

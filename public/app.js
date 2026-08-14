@@ -3604,22 +3604,28 @@ function sheetImportCard(onApplied) {
   const FIELD_DEFS = [
     ['set', 'Set (name or id)'], ['number', 'Card number'], ['name', 'Card name'],
     ['variant', 'Printing / variant'], ['rarity', 'Rarity'], ['category', 'Category'],
-    ['hp', 'HP'], ['illustrator', 'Illustrator'], ['', '— ignore —'],
+    ['types', 'Type(s)'], ['hp', 'HP'], ['illustrator', 'Illustrator'],
+    ['setsize', 'Set size (checked, never written)'], ['', '— ignore —'],
   ];
   function guessField(header) {
     const n = header.trim().toLowerCase();
-    if (/set|expansion|series/.test(n)) return 'set';
-    if (/^(#|no\.?|num(ber)?|card ?(#|no|number))$/.test(n) || /number/.test(n)) return 'number';
+    if (/series/.test(n)) return '';                      // a grouping label, not the set
+    if (/size|total/.test(n)) return 'setsize';           // "Set size" — even truncated to "Set si"
+    if (/number|^(#|no\.?)$/.test(n)) return 'number';    // BEFORE set: "Set number" is a number
     if (/variant|printing|finish|treatment|edition|foil/.test(n)) return 'variant';
+    if (/expansion|set/.test(n)) return 'set';
     if (/rarity/.test(n)) return 'rarity';
     if (/category|supertype/.test(n)) return 'category';
     if (/^hp$/.test(n)) return 'hp';
     if (/illus/.test(n)) return 'illustrator';
+    if (/^types?$|energy/.test(n)) return 'types';
     if (/name|card|pok[eé]mon/.test(n)) return 'name';
     return '';
   }
 
-  const norm = (v) => String(v == null ? '' : v).toLowerCase().replace(/[^a-z0-9]+/g, '');
+  const norm = (v) => String(v == null ? '' : v).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+  // "Holo Rare" and "Rare Holo" are the same rarity wearing different word orders
+  const tokensOf = (v) => String(v == null ? '' : v).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean).sort().join(' ');
   // spellings a printing arrives in vs the keys the database speaks
   const VSYN = {
     '': 'normal', normal: 'normal', regular: 'normal', base: 'normal', nonholo: 'normal', unlimited: 'normal',
@@ -3645,6 +3651,9 @@ function sheetImportCard(onApplied) {
     // what the sheet DOES cover, so its silences can be reported too
     const coveredSets = new Set();
     const covered = new Set();          // 'cardId|printingKey'
+    const coveredKinds = new Map();     // setId -> Set of printing keys the sheet speaks of
+    const kindsOf = (sid) => { if (!coveredKinds.has(sid)) coveredKinds.set(sid, new Set()); return coveredKinds.get(sid); };
+    const setSizes = new Map();         // setId -> the sheet's claimed printed size
 
     for (let r = 0; r < dataRows.length; r++) {
       const val = (f) => { const i = mapOf[f]; return i === undefined ? '' : String(dataRows[r][i] == null ? '' : dataRows[r][i]).trim(); };
@@ -3658,7 +3667,13 @@ function sheetImportCard(onApplied) {
       seen.add(dupeKey);
 
       let sid = setByNorm.get(norm(setRaw));
-      if (sid) coveredSets.add(sid);
+      if (sid) {
+        coveredSets.add(sid);
+        if (mapOf.setsize !== undefined && !setSizes.has(sid)) {
+          const sz = parseInt(val('setsize').replace(/[^0-9]/g, ''), 10);
+          if (sz > 0) setSizes.set(sid, sz);
+        }
+      }
       if (!sid) {
         // a set the database has never heard of: propose it once, keyed by its normalized name
         const k = norm(setRaw);
@@ -3694,18 +3709,24 @@ function sheetImportCard(onApplied) {
       const labels = card.printings || {};
       const hit = have.find((k) => (stdKey && k === stdKey) || norm(k) === norm(varRaw) || norm(labels[k] || '') === norm(varRaw)
         || norm(variantLabel(card, k)) === norm(varRaw));
-      if (hit) { plan.matched++; covered.add(card.id + '|' + hit); }
-      else if (stdKey) { plan.addVariants.push({ card, key: stdKey, label: VARIANT_LABELS[stdKey] }); covered.add(card.id + '|' + stdKey); }
+      if (hit) { plan.matched++; covered.add(card.id + '|' + hit); kindsOf(sid).add(hit); }
+      else if (stdKey) { plan.addVariants.push({ card, key: stdKey, label: VARIANT_LABELS[stdKey] }); covered.add(card.id + '|' + stdKey); kindsOf(sid).add(stdKey); }
       else if (varRaw) plan.addCustoms.push({ card, label: varRaw });
       else plan.matched++;
 
       // mapped fields that disagree with the database go up for review
       const diffs = [];
-      if (mapOf.name !== undefined && nameRaw && nameRaw !== card.name) diffs.push(['name', card.name, nameRaw]);
-      if (mapOf.rarity !== undefined && val('rarity') && val('rarity') !== (card.rarity || '')) diffs.push(['rarity', card.rarity || '(none)', val('rarity')]);
-      if (mapOf.category !== undefined && val('category') && val('category') !== (card.category || '')) diffs.push(['category', card.category || '(none)', val('category')]);
-      if (mapOf.illustrator !== undefined && val('illustrator') && val('illustrator') !== (card.illustrator || '')) diffs.push(['illustrator', card.illustrator || '(none)', val('illustrator')]);
+      if (mapOf.name !== undefined && nameRaw && norm(nameRaw) !== norm(card.name)) diffs.push(['name', card.name, nameRaw]);
+      if (mapOf.rarity !== undefined && val('rarity') && tokensOf(val('rarity')) !== tokensOf(card.rarity || '')) diffs.push(['rarity', card.rarity || '(none)', val('rarity')]);
+      if (mapOf.category !== undefined && val('category') && norm(val('category')) !== norm(card.category || '')) diffs.push(['category', card.category || '(none)', val('category')]);
+      if (mapOf.illustrator !== undefined && val('illustrator') && norm(val('illustrator')) !== norm(card.illustrator || '')) diffs.push(['illustrator', card.illustrator || '(none)', val('illustrator')]);
       if (mapOf.hp !== undefined && val('hp') && parseInt(val('hp'), 10) !== (card.hp || 0)) diffs.push(['hp', String(card.hp || 0), val('hp')]);
+      if (mapOf.types !== undefined && val('types')) {
+        const sheetTypes = val('types').split(/[,;/&+]/).map((t) => t.trim()).filter(Boolean);
+        const dbTypes = card.types || [];
+        const same = sheetTypes.length === dbTypes.length && sheetTypes.every((t) => dbTypes.some((d) => norm(d) === norm(t)));
+        if (!same) diffs.push(['types', dbTypes.join(', ') || '(none)', sheetTypes.join(', ')]);
+      }
       for (const [f, from, to] of diffs) {
         if (!plan.fieldDiffs.some((d) => d.card.id === card.id && d.field === f)) {
           plan.fieldDiffs.push({ card, field: f, from, to });
@@ -3717,17 +3738,32 @@ function sheetImportCard(onApplied) {
     plan.addCustoms = plan.addCustoms.filter((p, i, a) => a.findIndex((x) => x.card.id === p.card.id && norm(x.label) === norm(p.label)) === i);
 
     // the sheet's silences: database printings the sheet no longer carries.
-    // Scoped to sets the sheet actually covers, and NEVER applied by default —
-    // a deleted row is a report first, a removal only by explicit tick.
+    // Scoped twice: to sets the sheet covers, AND to the printing KINDS the
+    // sheet speaks of in that set — a 1st-Edition-only sheet says nothing
+    // about Holo printings, so their absence means nothing. NEVER applied by
+    // default: a deleted row is a report first, a removal only by explicit tick.
     for (const sid of coveredSets) {
+      const kinds = coveredKinds.get(sid) || new Set();
+      if (!kinds.size) continue;
       for (const card of await getSetCards(sid)) {
         const keys = realVariants(card).filter((k) => !k.startsWith('my-'));
-        const absent = keys.filter((k) => !covered.has(card.id + '|' + k));
+        const scoped = keys.filter((k) => kinds.has(k));
+        const absent = scoped.filter((k) => !covered.has(card.id + '|' + k));
         if (!absent.length) continue;
         if (absent.length === keys.length) {
           plan.missing.push({ card, whole: true });
         } else {
           for (const k of absent) plan.missing.push({ card, key: k, label: variantLabel(card, k) });
+        }
+      }
+    }
+    // the sheet's claimed set size is checked but never written from an import
+    if (mapOf.setsize !== undefined) {
+      for (const [sid, sz] of setSizes) {
+        const st = ix.sets.find((x) => x.id === sid);
+        const official = st && st.cardCount && (st.cardCount.official || st.cardCount.total);
+        if (official && sz !== official) {
+          plan.problems.push(`Sheet says ${st.name} is /${sz} but the database says ${official} — set sizes aren't imported; fix it in the workbench if the sheet is right`);
         }
       }
     }
@@ -3823,7 +3859,8 @@ function sheetImportCard(onApplied) {
           step(b.it.card.name + ' ' + b.it.field);
           try {
             const body = { lang, cardId: b.it.card.id };
-            body[b.it.field] = b.it.field === 'hp' ? parseInt(b.it.to, 10) : b.it.to;
+            if (b.it.field === 'types') body.types = b.it.to.split(/[,;/&+]/).map((t) => t.trim()).filter(Boolean);
+            else body[b.it.field] = b.it.field === 'hp' ? parseInt(b.it.to, 10) : b.it.to;
             await apiCall('card', { method: 'POST', body: JSON.stringify(body) });
           } catch (e) { failed++; done--; toast(e.message); }
         }
