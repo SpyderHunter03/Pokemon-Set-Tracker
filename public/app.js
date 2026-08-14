@@ -739,34 +739,7 @@ async function ensureMe() {
   if (!auth || !serverAvailable) return null;
   if (_meCache && _meCache.username === auth.username) return _meCache;
   try { _meCache = await apiCall('me'); } catch { _meCache = null; }
-  refreshCurationBadge();
   return _meCache;
-}
-
-/* ---------- curation mode ----------
- * Off (the default), an administrator's app is indistinguishable from a
- * regular user's — personal printings, personal scans, and none of the master
- * editing tools. On, the master tools (edit card, master images, new sets,
- * hidden-row restore) appear in place until it is turned off again. The
- * switch lives on the Administration page; the badge below is the way back. */
-function curationOn() { return !!lsGet('ptcg.curation'); }
-function setCuration(on) {
-  lsSet('ptcg.curation', on ? true : null);
-  refreshCurationBadge();
-}
-function refreshCurationBadge() {
-  let el = document.getElementById('curation-badge');
-  const show = !!auth && !!(_meCache && _meCache.admin) && curationOn();
-  if (!show) { if (el) el.remove(); return; }
-  if (el) return;
-  el = h('button', {
-    id: 'curation-badge',
-    class: 'btn small',
-    style: 'position:fixed; left:12px; bottom:12px; z-index:60; opacity:0.92',
-    title: 'Curation mode is on — master editing tools are showing. Click to turn it off.',
-    onclick: () => { setCuration(false); toast('Curation mode off — back to being a regular user'); route(); },
-  }, '🛠️ Curating');
-  document.body.append(el);
 }
 
 /* ---------- personal printings (your own layer over the catalog) ----------
@@ -1203,7 +1176,6 @@ async function openCardModal(brief, { variant, onOwnershipChange, onCardChanged 
   const chipsWrap = h('div', { class: 'chips', style: 'margin:12px 0 4px; justify-content:center' });
   const counterWrap = h('div', {});
   const mineWrap = h('div', {});
-  const adminWrap = h('div', {});
   const imgWrap = h('div', { class: 'card-img-wrap' });
 
   function renderModalImage() {
@@ -1240,7 +1212,6 @@ async function openCardModal(brief, { variant, onOwnershipChange, onCardChanged 
           h('button', { class: 'btn small', onclick: () => { cardModal.close(); goToAccount(); } },
             serverAvailable ? '🔑 Sign in to track your collection' : 'Tracking needs the server')),
       );
-      renderAdminControls();
       return;
     }
     const qty = variantQty(card.id, active);
@@ -1259,7 +1230,6 @@ async function openCardModal(brief, { variant, onOwnershipChange, onCardChanged 
       h('div', { class: 'muted small', style: 'text-align:center' }, `copies of ${variantLabel(card, active)}`),
     );
     renderMineControls();
-    renderAdminControls();
   }
 
   /* ---- yours alone: personal printings and your own scans ----
@@ -1323,88 +1293,6 @@ async function openCardModal(brief, { variant, onOwnershipChange, onCardChanged 
     );
   }
 
-  // ---- admin: add custom printings & upload your own variant images ----
-  function renderAdminControls() {
-    adminWrap.replaceChildren();
-    // editing writes to the server's database (this install's own copy) —
-    // and only shows when the admin has deliberately put the curator hat on
-    if (!isAdmin || !curationOn() || appConfig.readonly) return;
-    const fileInput = h('input', { type: 'file', accept: 'image/*', hidden: '', 'data-master-upload': '' });
-    fileInput.addEventListener('change', async (e) => {
-      const f = e.target.files[0];
-      if (!f) return;
-      try {
-        const res = await fetch(`api/variant-image?cardId=${encodeURIComponent(card.id)}&variant=${encodeURIComponent(active)}&lang=${encodeURIComponent(lang)}`, {
-          method: 'POST',
-          headers: { ...authHeaders(), 'Content-Type': f.type || 'application/octet-stream' },
-          body: f,
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || 'Upload failed');
-        toast(`Image saved for ${variantLabel(card, active)}`);
-        clearDataCaches(); // pick up the new image from the database
-        card = await getCard(card.id);
-        renderVariantUI();
-        refreshBehind(); // the page behind picks up the new image
-      } catch (err) {
-        toast(err.message);
-      }
-      e.target.value = '';
-    });
-    adminWrap.append(
-      h('div', { class: 'row', style: 'justify-content:center; margin-top:10px' },
-        h('button', { type: 'button', class: 'btn ghost small', onclick: async () => {
-          const label = prompt('Name of the printing (e.g. "Cracked Ice Holo"):');
-          if (!label || label.trim().length < 2) return;
-          try {
-            const res = await apiCall('custom-variant', { method: 'POST', body: JSON.stringify({ cardId: card.id, label: label.trim() }) });
-            clearDataCaches();
-            card = await getCard(card.id);
-            active = res.key;
-            toast(`Added printing: ${res.label}`);
-            renderVariantUI();
-            refreshBehind(); // the new printing shows up on the page behind
-          } catch (err) {
-            toast(err.message);
-          }
-        } }, '＋ Add printing (master)'),
-        h('button', { type: 'button', class: 'btn ghost small', onclick: () => fileInput.click() }, `⬆ Master image for ${variantLabel(card, active)}`),
-        (realVariants(card).includes(active) && realVariants(card).length > 1)
-          ? h('button', { type: 'button', class: 'btn ghost small', onclick: async () => {
-              if (!await confirmDestructive({
-                title: `Remove the ${variantLabel(card, active)} printing?`,
-                body: `${card.name} keeps its other printings — only ${variantLabel(card, active)} goes.\n` +
-                  (appConfig.master
-                    ? 'This is the master workspace: publishing afterwards removes it from every install.'
-                    : 'Only this install is affected; master updates will not bring it back. Restore it any time: re-tick it in \u270e Edit card, or re-add a printing with the same name.'),
-                confirmLabel: 'Remove printing',
-              })) return;
-              try {
-                await apiCall('variant-remove', { method: 'POST', body: JSON.stringify({ cardId: card.id, variant: active, lang }) });
-                clearDataCaches();
-                card = await getCard(card.id);
-                active = avail()[0];
-                toast('Printing removed');
-                renderVariantUI();
-                refreshBehind(); // it disappears from the page behind
-              } catch (err) { toast(err.message); }
-            } }, `✕ Remove ${variantLabel(card, active)}`)
-          : null,
-        h('button', { type: 'button', class: 'btn ghost small', onclick: () => {
-          cardModal.close();   // dialogs sit in the browser's top layer — the editor overlay must replace it
-          openCardEditor({ card, onSaved: () => { clearDataCaches(); refreshBehind(); } });
-        } }, '✎ Edit card'),
-        h('button', { type: 'button', class: 'btn ghost small', onclick: () => {
-          cardModal.close();
-          openCardEditor({ duplicateOf: card, onSaved: () => { clearDataCaches(); refreshBehind(); } });
-        } }, '⧉ Duplicate'),
-        fileInput,
-      ),
-      h('p', { class: 'muted small', style: 'text-align:center; margin:6px 0 0' },
-        'Admin — master database: these edits are for everyone' + (appConfig.master ? ', and reach every install when you publish.' : '.') +
-        ' For things only you own, use "just for you" above.'),
-    );
-  }
   renderVariantUI();
 
   body.replaceChildren(
@@ -1414,7 +1302,6 @@ async function openCardModal(brief, { variant, onOwnershipChange, onCardChanged 
     chipsWrap,
     counterWrap,
     mineWrap,
-    adminWrap,
     h('div', { class: 'row', style: 'margin-top:14px; justify-content:flex-end; gap:8px' },
       auth ? h('button', { class: 'btn ghost', onclick: async (e) => {
         const btn = e.target;
@@ -1708,42 +1595,13 @@ async function renderHome() {
     (v) => { setSort = v; lsSet('ptcg.sort.sets', v); ordered = orderedSets(); renderSetCards(filterInput.value.trim().toLowerCase()); },
   );
 
-  const homeMe = await ensureMe();
-  const homeAdmin = !!(homeMe && homeMe.admin) && curationOn() && !appConfig.readonly;
-  const newSetBtn = homeAdmin
-    ? h('button', { class: 'chip', onclick: () => openSetCreator(() => renderHome()) }, '＋ New set')
-    : null;
-
-  // admins can see and restore hidden (bypassed) sets
-  const hiddenSetsWrap = h('div', {});
-  if (homeAdmin) {
-    (async () => {
-      let hs;
-      try { hs = await apiCall('hidden-sets?lang=' + encodeURIComponent(lang)); } catch { return; }
-      if (!hs.sets || !hs.sets.length) return;
-      hiddenSetsWrap.append(
-        h('h3', { class: 'muted', style: 'margin:20px 0 6px' }, `Hidden sets (${hs.sets.length})`),
-        ...hs.sets.map((x) => h('div', { class: 'row', style: 'gap:10px; align-items:center; margin:4px 0' },
-          h('span', {}, x.name),
-          h('button', { class: 'btn ghost small', onclick: async () => {
-            try {
-              await apiCall('set-hide', { method: 'POST', body: JSON.stringify({ id: x.id, hidden: false, lang }) });
-              clearDataCaches();
-              toast(`${x.name} restored`);
-              renderHome();
-            } catch (e) { toast(e.message); }
-          } }, 'Restore'))));
-    })();
-  }
-
   view.replaceChildren(...(runningBanner ? [runningBanner] : []),
     stickyHead(
       banner,
       h('div', { class: 'set-filter' }, filterInput),
-      h('div', { class: 'chips' }, ...[sortCtl, newSetBtn].filter(Boolean)),
+      h('div', { class: 'chips' }, sortCtl),
     ),
-    grid,
-    hiddenSetsWrap);
+    grid);
 }
 
 function updateStatsBanner() {
@@ -2113,8 +1971,6 @@ async function renderSetPage(setId) {
 
   const cards = set.cards || [];
   const officialTotal = (set.cardCount && (set.cardCount.official || set.cardCount.total)) || cards.length;
-  const me = await ensureMe();
-  const isAdmin = !!(me && me.admin) && curationOn() && !appConfig.readonly;
   let filter = 'all';
   let query = '';
   let cardSort = lsGet('ptcg.sort.cards') || 'number';
@@ -2163,18 +2019,6 @@ async function renderSetPage(setId) {
       }
     }
     if (!grid.children.length) grid.append(h('div', { class: 'center' }, 'No cards match.'));
-    // admins get a "new card" tile at the end of the plain set view
-    if (isAdmin && filter === 'all' && !q) {
-      const nums = cards.map((c) => parseInt(c.localId, 10)).filter(Number.isFinite);
-      const next = nums.length ? String(Math.max(...nums) + 1) : '1';
-      const addCard = () => openCardEditor({ set: setId, nextNumber: next, onSaved: () => renderSetPage(setId) });
-      // a card-shaped tile among rows is a card-shaped hole: in the list views
-      // the same door is a button the size of the thing it opens
-      grid.append(cardView === 'grid'
-        ? h('button', { class: 'add-card-tile', onclick: addCard },
-          h('div', { class: 'act-plus' }, '＋'), h('div', { class: 'muted small' }, 'Add card'))
-        : h('button', { class: 'btn ghost small add-card-row', onclick: addCard }, '＋ Add card'));
-    }
   }
 
   const chipsWrap = h('div', { class: 'chips' });
@@ -2192,28 +2036,6 @@ async function renderSetPage(setId) {
     oninput: (e) => { query = e.target.value.trim(); renderGrid(); },
   });
 
-  // admins can see and restore hidden (tombstoned) cards of this set
-  const hiddenWrap = h('div', {});
-  async function renderHiddenSection() {
-    if (!isAdmin) return;
-    let hid;
-    try { hid = await apiCall(`hidden-cards?set=${encodeURIComponent(setId)}&lang=${encodeURIComponent(lang)}`); } catch { return; }
-    if (!hid.cards || !hid.cards.length) { hiddenWrap.replaceChildren(); return; }
-    hiddenWrap.replaceChildren(
-      h('h3', { class: 'muted', style: 'margin:20px 0 6px' }, `Hidden cards (${hid.cards.length})`),
-      ...hid.cards.map((c) => h('div', { class: 'row', style: 'gap:10px; align-items:center; margin:4px 0' },
-        h('span', { class: 'muted small' }, `#${c.localId}`), h('span', {}, c.name),
-        h('button', { class: 'btn ghost small', onclick: async () => {
-          try {
-            await apiCall('card-hide', { method: 'POST', body: JSON.stringify({ cardId: c.id, hidden: false, lang }) });
-            clearDataCaches();
-            toast(`${c.name} restored`);
-            renderSetPage(setId);
-          } catch (e) { toast(e.message); }
-        } }, 'Restore'))),
-    );
-  }
-
   view.replaceChildren(
     stickyHead(
       stickyTop('#/', '\u2190 All sets', set.name),
@@ -2228,12 +2050,10 @@ async function renderSetPage(setId) {
       chipsWrap,
     ),
     grid,
-    hiddenWrap,
   );
   renderChips();
   if (canTrack()) updateProgress();
   renderGrid();
-  renderHiddenSection();
 }
 
 /* ============================================================
@@ -3695,7 +3515,7 @@ function renderAccountPage(tab) {
 function adminTabList() {
   const tabs = [['cards', 'Card database']];
   // nothing to configure on an install whose data is managed elsewhere
-  if (!appConfig.readonly) tabs.push(['mail', 'Mail'], ['signon', 'Sign-on']);
+  if (!appConfig.readonly) tabs.push(['curate', 'Curation'], ['mail', 'Mail'], ['signon', 'Sign-on']);
   tabs.push(['server', 'Server']);
   return tabs;
 }
@@ -3724,13 +3544,236 @@ function renderAdminPage(tab) {
       appConfig.master ? h('p', { class: 'muted small', style: 'border:1px solid var(--owned); border-radius:8px; padding:8px 10px' },
         '🛠️ Master curation workspace \u2014 edits made here become the master database when you publish (scripts/publish-images.js). This is not a personal install.') : null,
       settingsTabs('admin', tabs, tab),
-      tab === 'mail' ? settingsCard(mailSettingsSection())
-        : tab === 'signon' ? settingsCard(providerSettingsSection())
-          : tab === 'server' ? adminServerTab()
-            : adminCardsTab(),
+      tab === 'curate' ? adminCurateTab()
+        : tab === 'mail' ? settingsCard(mailSettingsSection())
+          : tab === 'signon' ? settingsCard(providerSettingsSection())
+            : tab === 'server' ? adminServerTab()
+              : adminCardsTab(),
       pageFooter('#/account', '\u2190 Account'),
     ].filter(Boolean));
   })();
+}
+
+
+/** Curation: every master-database tool, in the one place they belong.
+ * Deliberately denser than the rest of the app — this tab is for whoever
+ * runs the install, and nobody else ever sees it. Regular pages (and the
+ * admin's own browsing) carry no editing tools at all. */
+function adminCurateTab() {
+  const content = h('div', {});
+  if (appConfig.readonly) {
+    content.append(settingsCard(
+      h('h3', { style: 'margin:0 0 6px' }, 'Curation'),
+      h('p', { class: 'muted small', style: 'margin:0' },
+        'This server runs in read-only mode (PTCG_READONLY): the card database is managed centrally and cannot be edited here.'),
+    ));
+    return content;
+  }
+
+  /* ---- the card workbench: one card on the table at a time ---- */
+  const cardBox = h('div', { id: 'cur-card' });
+  let selId = lsGet('ptcg.curSel') || null;
+
+  async function pickCard() {
+    let cards = [], setNames = new Map();
+    try {
+      const [sx, ix] = await Promise.all([getSearchIndex(), getIndex()]);
+      cards = sx.cards.slice().sort((a, b) => a.name.localeCompare(b.name) || String(a.localId).localeCompare(String(b.localId), undefined, { numeric: true }));
+      setNames = new Map(ix.sets.map((x) => [x.id, x.name]));
+    } catch { toast('Could not load the card list'); return; }
+    const input = h('input', { type: 'text', placeholder: 'Search cards by name…' });
+    const results = h('div', { class: 'picker-results' });
+    const rowOf = (c) => h('div', { class: 'picker-row', onclick: () => { ov.remove(); selId = c.id; lsSet('ptcg.curSel', selId); renderSetOptions(setIdOf(selId)); renderCard(); } },
+      cardImg(c, 'low') ? h('img', { src: cardImg(c, 'low'), loading: 'lazy' }) : h('div', { class: 'picker-thumb' }, '🃏'),
+      h('div', { class: 'picker-info' }, h('div', {}, c.name),
+        h('div', { class: 'muted small' }, (setNames.get(setIdOf(c.id)) || setIdOf(c.id)) + ' · #' + c.localId)));
+    const render = () => {
+      const q = input.value.trim().toLowerCase();
+      chunkedList(results, q ? cards.filter((c) => c.name.toLowerCase().includes(q) || c.id.includes(q)) : cards, rowOf, 'No cards match.');
+    };
+    input.addEventListener('input', render);
+    const ov = h('div', { class: 'picker-overlay' },
+      h('div', { class: 'picker-panel' },
+        h('div', { class: 'row', style: 'gap:8px' }, input,
+          h('button', { class: 'btn ghost small', onclick: () => ov.remove() }, 'Close')),
+        results,
+      ));
+    render();
+    view.append(ov);
+    input.focus();
+  }
+
+  async function renderCard() {
+    if (!selId) {
+      cardBox.replaceChildren(h('p', { class: 'muted small', style: 'margin:0' }, 'No card on the table — pick one.'));
+      return;
+    }
+    cardBox.replaceChildren(spinner());
+    let card;
+    try { card = await getCard(selId); }
+    catch (e) { cardBox.replaceChildren(h('p', { class: 'muted small' }, 'Could not load ' + selId + ': ' + e.message)); return; }
+    const refresh = () => { clearDataCaches(); renderCard(); renderHidden(); };
+    // master printings only: the personal layer has no business on this page
+    const printKeys = realVariants(card).filter((k) => !k.startsWith('my-'));
+    const rows = printKeys.map((vk) => {
+      const hasOwn = !!(card.variantImages && card.variantImages[vk]);
+      const up = h('input', { type: 'file', accept: 'image/*', hidden: '', 'data-master-upload': '', 'data-variant': vk });
+      up.addEventListener('change', async (e) => {
+        const f = e.target.files[0];
+        if (!f) return;
+        try {
+          const res = await fetch(`api/variant-image?cardId=${encodeURIComponent(card.id)}&variant=${encodeURIComponent(vk)}&lang=${encodeURIComponent(lang)}`, {
+            method: 'POST',
+            headers: { ...authHeaders(), 'Content-Type': f.type || 'application/octet-stream' },
+            body: f,
+          });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || 'Upload failed');
+          toast(`Master image saved for ${variantLabel(card, vk)}`);
+          refresh();
+        } catch (err) { toast(err.message); }
+        e.target.value = '';
+      });
+      return h('div', { class: 'row cur-print-row', style: 'gap:8px; align-items:center; margin:4px 0' },
+        h('span', { style: 'min-width:150px' }, variantLabel(card, vk)),
+        h('span', { class: 'muted small', style: 'min-width:80px' }, hasOwn ? '· own image' : ''),
+        h('button', { class: 'btn ghost small', onclick: () => up.click() }, '⬆ Image'),
+        printKeys.length > 1 ? h('button', { class: 'btn ghost small', onclick: async () => {
+          if (!await confirmDestructive({
+            title: `Remove the ${variantLabel(card, vk)} printing?`,
+            body: `${card.name} keeps its other printings — only ${variantLabel(card, vk)} goes.\n` +
+              (appConfig.master
+                ? 'This is the master workspace: publishing afterwards removes it from every install.'
+                : 'Only this install is affected; master updates will not bring it back. Restore it any time: re-tick it in ✎ Edit card, or re-add a printing with the same name.'),
+            confirmLabel: 'Remove printing',
+          })) return;
+          try {
+            await apiCall('variant-remove', { method: 'POST', body: JSON.stringify({ cardId: card.id, variant: vk, lang }) });
+            toast('Printing removed');
+            refresh();
+          } catch (err) { toast(err.message); }
+        } }, '✕ Remove') : null,
+        up);
+    });
+    cardBox.replaceChildren(
+      h('div', { class: 'row', style: 'gap:14px; align-items:flex-start; flex-wrap:wrap' },
+        cardImg(card, 'low') ? h('img', { src: cardImg(card, 'low'), style: 'width:90px; border-radius:6px' }) : null,
+        h('div', { style: 'flex:1; min-width:220px' },
+          h('h4', { style: 'margin:0' }, card.name),
+          h('p', { class: 'muted small', style: 'margin:2px 0 8px' },
+            `${setNameOf(card.id)} · #${card.localId} · ${card.id}` + (card.rarity ? ` · ${card.rarity}` : '')),
+          h('div', { class: 'row', style: 'gap:8px; flex-wrap:wrap' },
+            h('button', { class: 'btn ghost small', onclick: () => openCardEditor({ card, onSaved: refresh }) }, '✎ Edit card'),
+            h('button', { class: 'btn ghost small', onclick: () => openCardEditor({ duplicateOf: card, onSaved: refresh }) }, '⧉ Duplicate'),
+            h('button', { class: 'btn ghost small', id: 'cur-add-printing', onclick: async () => {
+              const label = prompt('Name of the printing (e.g. "Cracked Ice Holo"):');
+              if (!label || label.trim().length < 2) return;
+              try {
+                const res = await apiCall('custom-variant', { method: 'POST', body: JSON.stringify({ cardId: card.id, label: label.trim(), lang }) });
+                toast(`Added printing: ${res.label}`);
+                refresh();
+              } catch (err) { toast(err.message); }
+            } }, '＋ Add printing'))),
+      ),
+      h('div', { style: 'margin-top:12px' },
+        h('h4', { class: 'muted small', style: 'margin:0 0 4px' }, 'Master printings'),
+        ...rows),
+    );
+  }
+
+  const workbench = settingsCard(
+    h('h3', { style: 'margin:0 0 6px' }, 'Card workbench'),
+    h('p', { class: 'muted small', style: 'margin:0 0 10px' },
+      'Master-database surgery, one card at a time: fields, printings, images, duplicates. Everything here is for everyone' +
+      (appConfig.master ? ' and reaches every install when you publish below.' : '.')),
+    h('div', { class: 'row', style: 'gap:8px; margin-bottom:10px' },
+      h('button', { class: 'btn small', id: 'cur-pick', onclick: pickCard }, '🔍 Pick a card')),
+    cardBox,
+  );
+
+  /* ---- sets: creation, new cards, and the way back for hidden rows ---- */
+  const hiddenBox = h('div', { id: 'cur-hidden', style: 'margin-top:10px' });
+  const setSel = h('select', { class: 'chip', id: 'cur-set-select' });
+  setSel.addEventListener('change', renderHidden);
+
+  async function renderSetOptions(selectId) {
+    let ix;
+    try { ix = await getIndex(); } catch { return; }
+    setSel.replaceChildren(...ix.sets.map((s) => {
+      const o = h('option', { value: s.id }, s.name);
+      if (s.id === selectId) o.setAttribute('selected', '');
+      return o;
+    }));
+    renderHidden();
+  }
+
+  async function renderHidden() {
+    const rows = [];
+    try {
+      const hid = await apiCall(`hidden-cards?set=${encodeURIComponent(setSel.value)}&lang=${encodeURIComponent(lang)}`);
+      if (hid.cards && hid.cards.length) {
+        rows.push(h('h4', { class: 'muted small', style: 'margin:8px 0 4px' }, `Hidden cards (${hid.cards.length})`));
+        for (const c of hid.cards) {
+          rows.push(h('div', { class: 'row', style: 'gap:10px; align-items:center; margin:4px 0' },
+            h('span', { class: 'muted small' }, `#${c.localId}`), h('span', {}, c.name),
+            h('button', { class: 'btn ghost small', onclick: async () => {
+              try {
+                await apiCall('card-hide', { method: 'POST', body: JSON.stringify({ cardId: c.id, hidden: false, lang }) });
+                clearDataCaches();
+                toast(`${c.name} restored`);
+                renderHidden();
+              } catch (e) { toast(e.message); }
+            } }, 'Restore')));
+        }
+      }
+    } catch { /* fine — the list just stays empty */ }
+    try {
+      const hs = await apiCall('hidden-sets?lang=' + encodeURIComponent(lang));
+      if (hs.sets && hs.sets.length) {
+        rows.push(h('h4', { class: 'muted small', style: 'margin:8px 0 4px' }, `Hidden sets (${hs.sets.length})`));
+        for (const x of hs.sets) {
+          rows.push(h('div', { class: 'row', style: 'gap:10px; align-items:center; margin:4px 0' },
+            h('span', {}, x.name),
+            h('button', { class: 'btn ghost small', onclick: async () => {
+              try {
+                await apiCall('set-hide', { method: 'POST', body: JSON.stringify({ id: x.id, hidden: false, lang }) });
+                clearDataCaches();
+                toast(`${x.name} restored`);
+                renderSetOptions(setSel.value);
+              } catch (e) { toast(e.message); }
+            } }, 'Restore')));
+        }
+      }
+    } catch { /* same */ }
+    hiddenBox.replaceChildren(...rows);
+  }
+
+  const setsCard = settingsCard(
+    h('h3', { style: 'margin:0 0 6px' }, 'Sets'),
+    h('p', { class: 'muted small', style: 'margin:0 0 10px' },
+      'New sets, new cards, and the way back for anything hidden. Hiding itself lives in ✎ Edit card (cards) and the master-update review (sets).'),
+    h('div', { class: 'row', style: 'gap:8px; flex-wrap:wrap; align-items:center' },
+      setSel,
+      h('button', { class: 'btn ghost small', id: 'cur-add-card', onclick: async () => {
+        const sid = setSel.value;
+        if (!sid) return;
+        let next = '1';
+        try {
+          const st = await getSet(sid);
+          const nums = (st.cards || []).map((c) => parseInt(c.localId, 10)).filter(Number.isFinite);
+          next = nums.length ? String(Math.max(...nums) + 1) : '1';
+        } catch { /* the editor asks anyway */ }
+        openCardEditor({ set: sid, nextNumber: next, onSaved: () => { clearDataCaches(); renderHidden(); } });
+      } }, '＋ Add card'),
+      h('button', { class: 'btn ghost small', id: 'cur-new-set', onclick: () => openSetCreator((newId) => renderSetOptions(newId)) }, '＋ New set'),
+    ),
+    hiddenBox,
+  );
+
+  renderSetOptions(selId ? setIdOf(selId) : undefined);
+  renderCard();
+  content.append(workbench, setsCard);
+  return content;
 }
 
 /** Card database: what is here, whether the master has moved on, and the
@@ -3863,29 +3906,6 @@ function adminCardsTab() {
       } }, '🔍 Rebuild scanner index'));
     }
 
-    // The admin's two hats, made explicit: this switch is the only thing that
-    // ever puts master-editing tools into the ordinary pages. Off, the app
-    // treats the admin exactly like anybody else.
-    const curationCard = (() => {
-      const cb = h('input', { type: 'checkbox', id: 'curation-toggle' });
-      cb.checked = curationOn();
-      cb.addEventListener('change', () => {
-        setCuration(cb.checked);
-        toast(cb.checked
-          ? 'Curation mode on — master editing tools now show on cards and sets'
-          : 'Curation mode off — back to being a regular user');
-      });
-      return settingsCard(
-        h('h3', { style: 'margin:0 0 6px' }, 'Curation mode'),
-        h('p', { class: 'muted small', style: 'margin:0 0 10px' },
-          'Off, the app treats you exactly like a regular user — personal printings and all. ' +
-          'On, the master editing tools (edit card, master images, new sets and cards, hidden-row restore) ' +
-          'appear in place on cards and sets until you switch it off. A 🛠️ badge shows while it’s on.'),
-        h('label', { class: 'row', style: 'gap:8px; align-items:center; cursor:pointer' },
-          cb, h('span', {}, 'Show master editing tools in the app')),
-      );
-    })();
-
     // The other half of the workspace: nothing edited here reaches anyone
     // until it is published. Preview is the review step — it lists exactly
     // what would move, and moves nothing.
@@ -3928,7 +3948,6 @@ function adminCardsTab() {
         updateArea,
         autoArea.children.length ? autoArea : null,
       ),
-      curationCard,
       publishCard,
       jobs.length ? settingsCard(
         h('h3', { style: 'margin:0 0 6px' }, 'Jobs'),

@@ -8,13 +8,8 @@ const { chromium } = require('playwright');
   browser.newContext = async (opts) => {
     const ctx = await _newContext(opts);
     // the app sends brand-new visitors to /home; these tests target the app
-    // itself, so every context starts as a returning visitor. Curation mode
-    // starts on so the admin-flow tests see the master tools (bootstrap.test
-    // covers the off-by-default behaviour).
-    await ctx.addInitScript(() => {
-      localStorage.setItem('ptcg.visited', 'true');
-      localStorage.setItem('ptcg.curation', 'true');
-    });
+    // itself, so every context starts as a returning visitor
+    await ctx.addInitScript(() => localStorage.setItem('ptcg.visited', 'true'));
     return ctx;
   };
   const context = await browser.newContext({ serviceWorkers: 'block' });
@@ -1560,10 +1555,10 @@ const { chromium } = require('playwright');
     await ep.click('.binder-grid .pocket.filled .pocket-edit >> nth=0');
     await ep.waitForSelector('.pocket-actions');
     await ep.click('.pocket-actions button:has-text("Details")');
-    await ep.waitForSelector('#card-modal[open] button:has-text("Add printing (master)")');
+    await ep.waitForSelector('#card-modal[open] button:has-text("Add printing (just for you)")');
     const printing = 'Smoke Keepstate';
     ep.once('dialog', (d) => d.accept(printing));
-    await ep.click('#card-modal button:has-text("Add printing (master)")');
+    await ep.click('#card-modal button:has-text("Add printing (just for you)")');
     await ep.waitForSelector(`#card-modal .chip:has-text("${printing}")`);
     check('binder: adding a printing keeps edit mode on',
       (await ep.locator('.page-remove').count()) > 0);

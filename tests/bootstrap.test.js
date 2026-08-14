@@ -129,48 +129,47 @@ const { chromium } = require('playwright');
   await page.waitForSelector('#admin-page button:has-text("Update cards from TCGdex")', { timeout: 120000 });
   check('admin update completes', true);
 
-  // ---- curation mode: an admin's app is a regular user's until they flip it ----
-  await page.goto('http://localhost:3111/#/set/base1');
-  await page.waitForSelector('.tcg-card');
-  await page.click('.tcg-card[data-card-id="base1-4"] >> nth=0 >> .info-btn');
-  await page.waitForSelector('#card-modal[open] button:has-text("just for you")');
-  check('curation off: the modal offers personal tools but no master ones',
-    (await page.locator('#card-modal button:has-text("(master)")').count()) === 0);
-  check('curation off: no add-card tile in the set grid',
-    (await page.locator('.add-card-tile').count()) === 0);
-  await page.evaluate(() => document.getElementById('card-modal').close());
-  // the switch lives where admin things live: the Administration page
-  await page.goto('http://localhost:3111/#/admin');
-  await page.waitForSelector('#curation-toggle');
-  await page.click('#curation-toggle');
-  await page.waitForSelector('#curation-badge');
-  check('curation on: the badge shows the hat being worn', true);
-
-  // ---- custom printings + own variant images (admin) ----
+  // ---- no master tools outside Administration: ever, for anyone ----
   await page.goto('http://localhost:3111/#/set/base1');
   await page.waitForSelector('.tcg-card');
   const tilesBefore = await page.locator('.tcg-card').count();
-
-  // add a custom printing to Charizard via the modal
-  page.once('dialog', (d) => d.accept('Cracked Ice Holo'));
   await page.click('.tcg-card[data-card-id="base1-4"] >> nth=0 >> .info-btn');
-  await page.waitForSelector('#card-modal[open] button:has-text("Add printing (master)")');
-  check('the personal printing controls sit alongside the master ones',
-    (await page.locator('#card-modal button:has-text("just for you")').count()) === 1);
-  await page.click('#card-modal button:has-text("Add printing (master)")');
-  await page.waitForSelector('#card-modal .chips .chip:has-text("Cracked Ice Holo")');
-  check('admin can add a custom printing', true);
+  await page.waitForSelector('#card-modal[open] button:has-text("just for you")');
+  check('the card modal offers personal tools but never master ones',
+    (await page.locator('#card-modal button:has-text("(master)")').count()) === 0 &&
+    (await page.locator('#card-modal button:has-text("Edit card")').count()) === 0);
+  check('no add-card tile in the set grid, admin or not',
+    (await page.locator('.add-card-tile').count()) === 0);
+  await page.evaluate(() => document.getElementById('card-modal').close());
 
-  // upload our own image for that printing
-  await page.setInputFiles('#card-modal input[data-master-upload]', require('path').join(__dirname, 'fixtures', 'base1-4.png'));
-  await page.waitForFunction(() => {
-    const img = document.querySelector('#card-modal .card-img-wrap img');
-    return img && img.src.includes('cracked-ice-holo');
-  });
-  check('uploaded image is used for the custom printing', true);
-  await page.click('#card-modal button:has-text("Close")');
+  // the curation workbench: where ALL of the master tools now live
+  const gotoCurate = async () => {
+    await page.goto('http://localhost:3111/#/admin/curate');
+    await page.waitForSelector('#cur-pick');
+  };
+  const curePick = async (query, rowText) => {
+    await page.click('#cur-pick');
+    await page.waitForSelector('.picker-overlay input[placeholder="Search cards by name…"]');
+    await page.fill('.picker-overlay input[placeholder="Search cards by name…"]', query);
+    await page.waitForSelector(`.picker-overlay .picker-row:has-text("${rowText}")`);
+    await page.click(`.picker-overlay .picker-row:has-text("${rowText}") >> nth=0`);
+    await page.waitForSelector('#cur-card h4');
+  };
 
-  // the custom printing is now its own tile in the set grid
+  // ---- custom printings + master images, from the workbench ----
+  await gotoCurate();
+  await curePick('Charizard', 'Charizard');
+  page.once('dialog', (d) => d.accept('Cracked Ice Holo'));
+  await page.click('#cur-add-printing');
+  await page.waitForSelector('.cur-print-row:has-text("Cracked Ice Holo")');
+  check('workbench: admin can add a custom printing', true);
+
+  await page.setInputFiles('.cur-print-row:has-text("Cracked Ice Holo") input[data-master-upload]', require('path').join(__dirname, 'fixtures', 'base1-4.png'));
+  await page.waitForSelector('.cur-print-row:has-text("Cracked Ice Holo"):has-text("own image")');
+  check('workbench: master image lands on the printing', true);
+
+  // the set grid shows the custom printing as its own tile, wearing the image
+  await page.goto('http://localhost:3111/#/set/base1');
   await page.waitForFunction((n) => document.querySelectorAll('.tcg-card').length === n + 1, tilesBefore);
   const customTile = page.locator('.tcg-card[data-variant="cracked-ice-holo"]');
   check('custom printing appears as its own card tile', (await customTile.count()) === 1);
@@ -196,38 +195,45 @@ const { chromium } = require('playwright');
   })).status;
   check('unauthenticated custom-variant rejected', denied2 === 401 || denied2 === 403);
 
-  // ---- removing a printing from the modal, and bringing it back ----
-  await page.click('.tcg-card[data-variant="cracked-ice-holo"] .info-btn');
-  await page.waitForSelector('#card-modal[open] button:has-text("Remove Cracked Ice Holo")');
-  await page.click('#card-modal button:has-text("Remove Cracked Ice Holo")');
-  check('editor: removing a printing spells out what survives it',
+  // ---- removing a printing from the workbench, and bringing it back ----
+  await gotoCurate();   // the workbench remembers the card on the table
+  await page.waitForSelector('.cur-print-row:has-text("Cracked Ice Holo")');
+  await page.click('.cur-print-row:has-text("Cracked Ice Holo") button:has-text("Remove")');
+  check('workbench: removing a printing spells out what survives it',
     (await page.textContent('.confirm-panel')).includes('keeps its other printings'));
   await confirmYes();
+  await page.waitForFunction(() => ![...document.querySelectorAll('.cur-print-row')].some((r) => r.textContent.includes('Cracked Ice Holo')));
+  await page.goto('http://localhost:3111/#/set/base1');
   await page.waitForFunction((n) => document.querySelectorAll('.tcg-card').length === n, tilesBefore);
-  check('editor: removed printing drops its tile from the set', true);
+  check('workbench: removed printing drops its tile from the set', true);
   // re-adding a printing with the same name restores it, scan and all
+  await gotoCurate();
   page.once('dialog', (d) => d.accept('Cracked Ice Holo'));
-  await page.click('#card-modal button:has-text("Add printing (master)")');
-  await page.waitForSelector('#card-modal .chips .chip:has-text("Cracked Ice Holo")');
-  await page.click('#card-modal button:has-text("Close")');
+  await page.click('#cur-add-printing');
+  await page.waitForSelector('.cur-print-row:has-text("Cracked Ice Holo")');
+  await page.goto('http://localhost:3111/#/set/base1');
   await page.waitForFunction((n) => document.querySelectorAll('.tcg-card').length === n + 1, tilesBefore);
-  check('editor: re-adding the printing restores it (scan intact)',
+  check('workbench: re-adding the printing restores it (scan intact)',
     ((await page.locator('.tcg-card[data-variant="cracked-ice-holo"] img').getAttribute('src')) || '').includes('cracked-ice-holo-low.webp'));
 
   // ---- whole-card editor: new set → new card (with picture) → edit → hide → restore ----
-  await page.goto('http://localhost:3111/#/');
-  await page.waitForSelector('.chip:has-text("＋ New set")');
-  await page.click('.chip:has-text("＋ New set")');
+  await gotoCurate();
+  await page.click('#cur-new-set');
   await page.waitForSelector('.picker-panel input[placeholder="e.g. Eevee Promos"]');
   await page.fill('.picker-panel input[placeholder="e.g. Eevee Promos"]', 'Test Promos');
   await page.click('.picker-panel button:has-text("Create set")');
+  await page.waitForFunction(() => {
+    const sel = document.querySelector('#cur-set-select');
+    return sel && sel.value === 'test-promos';
+  });
+  check('workbench: brand-new set lands selected in the set list', true);
+  await page.goto('http://localhost:3111/#/');
   await page.waitForSelector('.set-card:has-text("Test Promos")');
   check('editor: brand-new set appears on the home page', true);
 
-  await page.goto('http://localhost:3111/#/set/test-promos');
-  await page.waitForSelector('.add-card-tile');
-  check('editor: empty new set offers the add-card tile', true);
-  await page.click('.add-card-tile');
+  await gotoCurate();
+  await page.selectOption('#cur-set-select', 'test-promos');
+  await page.click('#cur-add-card');
   await page.waitForSelector('.ce-panel');
   check('editor: card number pre-filled with the next free number',
     (await page.locator('.ce-panel input[placeholder="e.g. 51 or SWSH087"]').inputValue()) === '1');
@@ -244,15 +250,17 @@ const { chromium } = require('playwright');
   // make the scanner's own separation check measure the fixture, not the code.
   await page.setInputFiles('.ce-panel input[type=file]', require('path').join(__dirname, 'fixtures', 'promo-star.png'));
   await page.click('.ce-panel button:has-text("Add card")');
+  await page.waitForFunction(() => !document.querySelector('.ce-panel'));
+  await page.goto('http://localhost:3111/#/set/test-promos');
   await page.waitForSelector('.tcg-card[data-card-id="test-promos-1"]');
   check('editor: brand-new card appears in its set', true);
   check('editor: the card uses the uploaded picture',
     ((await page.locator('.tcg-card[data-card-id="test-promos-1"] img').getAttribute('src')) || '').includes('card-low.webp'));
 
-  // edit it through the card modal's Edit button
-  await page.click('.tcg-card[data-card-id="test-promos-1"] .info-btn');
-  await page.waitForSelector('#card-modal[open] button:has-text("Edit card")');
-  await page.click('#card-modal button:has-text("Edit card")');
+  // edit it through the workbench's Edit button
+  await gotoCurate();
+  await curePick('Eevee Star', 'Eevee Star');
+  await page.click('#cur-card button:has-text("Edit card")');
   await page.waitForSelector('.ce-panel');
   await page.fill('.ce-panel input[placeholder="e.g. Eevee"]', 'Eevee Star EX');
   await page.click('.ce-panel button:has-text("Save changes")');
@@ -263,55 +271,62 @@ const { chromium } = require('playwright');
   });
   check('editor: renaming keeps the other fields', true);
 
-  // hide it (tombstone), then restore it from the set page's hidden list
-  await page.waitForSelector('.tcg-card[data-card-id="test-promos-1"] .info-btn');
-  await page.click('.tcg-card[data-card-id="test-promos-1"] .info-btn');
-  await page.waitForSelector('#card-modal[open] button:has-text("Edit card")');
-  await page.click('#card-modal button:has-text("Edit card")');
+  // hide it (tombstone), then restore it from the workbench's hidden list
+  await page.waitForSelector('#cur-card button:has-text("Edit card")');
+  await page.click('#cur-card button:has-text("Edit card")');
   await page.waitForSelector('.ce-panel button:has-text("Hide card")');
   await page.click('.ce-panel button:has-text("Hide card")');
   check('editor: hiding a card asks first, by name',
-    (await page.textContent('.confirm-panel')).includes('"Renamed Test Card"') ||
     /Hide "[^"]+" from the database/.test(await page.textContent('.confirm-panel')));
   await confirmYes();
-  await page.waitForSelector('h3:has-text("Hidden cards (1)")');
-  check('editor: hidden card leaves the grid and lists under Hidden cards',
-    (await page.locator('.tcg-card[data-card-id="test-promos-1"]').count()) === 0);
-  await page.click('button:has-text("Restore")');
+  await page.waitForSelector('#cur-hidden h4:has-text("Hidden cards (1)")');
+  check('workbench: hidden card lists under Hidden cards', true);
+  await page.goto('http://localhost:3111/#/set/test-promos');
+  await page.waitForFunction(() => !document.querySelector('.tcg-card[data-card-id="test-promos-1"]'));
+  check('editor: hidden card leaves the grid', true);
+  await gotoCurate();
+  await page.waitForSelector('#cur-hidden button:has-text("Restore")');
+  await page.click('#cur-hidden button:has-text("Restore")');
+  await page.waitForFunction(() => !document.querySelector('#cur-hidden h4'));
+  await page.goto('http://localhost:3111/#/set/test-promos');
   await page.waitForSelector('.tcg-card[data-card-id="test-promos-1"]');
   check('editor: restoring brings it back', true);
 
   // ---- editor: your own printings in the form + duplicating a card ----
-  await page.click('.tcg-card[data-card-id="test-promos-1"] .info-btn');
-  await page.waitForSelector('#card-modal[open] button:has-text("Edit card")');
-  await page.click('#card-modal button:has-text("Edit card")');
+  await gotoCurate();
+  await page.waitForSelector('#cur-card button:has-text("Edit card")');
+  await page.click('#cur-card button:has-text("Edit card")');
   await page.waitForSelector('.ce-panel');
   await page.fill('.ce-panel input[placeholder="e.g. Cracked Ice Holo"]', 'Sparkle Foil');
   await page.click('.ce-panel button:has-text("＋ Add")');
   await page.waitForSelector('.ce-panel .chip:has-text("Sparkle Foil")');
   await page.click('.ce-panel button:has-text("Save changes")');
+  await page.waitForFunction(() => !document.querySelector('.ce-panel'));
+  await page.goto('http://localhost:3111/#/set/test-promos');
   await page.waitForSelector('.tcg-card[data-variant="sparkle-foil"]');
-  check('editor: your own printing added right in the card form', true);
+  check('editor: a printing added right in the card form', true);
 
   // duplicate it — details, printings, and the picture come along
-  await page.click('.tcg-card[data-card-id="test-promos-1"] >> nth=0 >> .info-btn');
-  await page.waitForSelector('#card-modal[open] button:has-text("Duplicate")');
-  await page.click('#card-modal button:has-text("Duplicate")');
+  await gotoCurate();
+  await page.waitForSelector('#cur-card button:has-text("Duplicate")');
+  await page.click('#cur-card button:has-text("Duplicate")');
   await page.waitForSelector('.ce-panel h3:has-text("Duplicate")');
   check('editor: duplicate pre-fills from the source card',
     (await page.locator('.ce-panel input[placeholder="e.g. Eevee"]').inputValue()) === 'Eevee Star EX' &&
     (await page.textContent('.ce-panel')).includes('Using the picture of'));
   await page.fill('.ce-panel input[placeholder="pick a free number"]', '2');
   await page.click('.ce-panel button:has-text("Add card")');
+  await page.waitForFunction(() => !document.querySelector('.ce-panel'));
+  await page.goto('http://localhost:3111/#/set/test-promos');
   await page.waitForSelector('.tcg-card[data-card-id="test-promos-2"]');
   check('editor: duplicated card reuses the source picture and printings',
     ((await page.locator('.tcg-card[data-card-id="test-promos-2"] >> nth=0 >> img').getAttribute('src')) || '').includes('test-promos/1/card-low.webp') &&
     (await page.locator('.tcg-card[data-card-id="test-promos-2"][data-variant="sparkle-foil"]').count()) === 1);
 
-  // ---- ＋ New card can copy everything from a card in ANOTHER set ----
-  await page.goto('http://localhost:3111/#/set/test-promos');
-  await page.waitForSelector('.add-card-tile');
-  await page.click('.add-card-tile');
+  // ---- ＋ Add card can copy everything from a card in ANOTHER set ----
+  await gotoCurate();
+  await page.selectOption('#cur-set-select', 'test-promos');
+  await page.click('#cur-add-card');
   await page.waitForSelector('.ce-panel');
   await page.click('.ce-panel button:has-text("Copy from a card")');
   await page.waitForSelector('.picker-overlay .picker-row');
@@ -324,11 +339,13 @@ const { chromium } = require('playwright');
     const n = document.querySelector('.ce-panel input[placeholder="e.g. Eevee"]');
     return n && n.value === 'Pikachu';
   });
-  check('editor: ＋ New card copies the whole form from a card in another set',
+  check('editor: ＋ Add card copies the whole form from a card in another set',
     (await page.textContent('.ce-panel')).includes('Using the picture of Pikachu'));
   await page.fill('.ce-panel input[placeholder="e.g. Eevee"]', 'Pika Promo');   // renamed copy
   await page.fill('.ce-panel input[placeholder="e.g. 51 or SWSH087"]', '3');
   await page.click('.ce-panel button:has-text("Add card")');
+  await page.waitForFunction(() => !document.querySelector('.ce-panel'));
+  await page.goto('http://localhost:3111/#/set/test-promos');
   await page.waitForSelector('.tcg-card[data-card-id="test-promos-3"]');
   check('editor: copied card lands in THIS set with the source picture',
     ((await page.locator('.tcg-card[data-card-id="test-promos-3"] >> nth=0 >> img').getAttribute('src')) || '').includes('base1/58/'));
@@ -336,9 +353,9 @@ const { chromium } = require('playwright');
   // ---- ⬆ From another card: borrow a picture for a card that already exists ----
   // Same picker as Copy-from, but it takes only the image, and it offers only
   // cards that HAVE one — an empty tile would be a picture you cannot borrow.
-  await page.click('.tcg-card[data-card-id="test-promos-3"] >> nth=0 >> .info-btn');
-  await page.waitForSelector('#card-modal[open] button:has-text("Edit card")');
-  await page.click('#card-modal button:has-text("Edit card")');
+  await gotoCurate();
+  await curePick('Pika Promo', 'Pika Promo');
+  await page.click('#cur-card button:has-text("Edit card")');
   await page.waitForSelector('.ce-panel');
   await page.click('.ce-panel button:has-text("From another card")');
   await page.waitForSelector('.picker-overlay .picker-row');
@@ -362,13 +379,17 @@ const { chromium } = require('playwright');
 
   // ---- his bug: uncheck every default variant + type a custom name WITHOUT
   //      clicking ＋Add — the card must save with ONLY the custom printing ----
-  await page.click('.add-card-tile');
+  await gotoCurate();
+  await page.selectOption('#cur-set-select', 'test-promos');
+  await page.click('#cur-add-card');
   await page.waitForSelector('.ce-panel');
   await page.fill('.ce-panel input[placeholder="e.g. Eevee"]', 'Solo Promo');
   await page.fill('.ce-panel input[placeholder="e.g. 51 or SWSH087"]', '4');
   await page.uncheck('.ce-panel label.ce-var:has-text("Normal") input');
   await page.fill('.ce-panel input[placeholder="e.g. Cracked Ice Holo"]', 'Gold Stamp');
   await page.click('.ce-panel button:has-text("Add card")');   // note: no ＋Add first
+  await page.waitForFunction(() => !document.querySelector('.ce-panel'));
+  await page.goto('http://localhost:3111/#/set/test-promos');
   await page.waitForSelector('.tcg-card[data-card-id="test-promos-4"]');
   check('editor: unchecking every default variant sticks (no phantom Normal)',
     (await page.locator('.tcg-card[data-card-id="test-promos-4"]').count()) === 1 &&
