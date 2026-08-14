@@ -424,6 +424,9 @@ const { chromium } = require('playwright');
     stageText.includes('New custom printings (1)') && stageText.includes('Prerelease Stamp'));
   check('sheet: a differing field goes up for review, not silently applied',
     stageText.includes('Field differences (1)') && stageText.includes('Eevee Star Prime'));
+  check('sheet: rows deleted from the sheet are reported, never auto-applied',
+    stageText.includes('In the database but not in the sheet (3)') &&
+    stageText.includes('Pika Promo') && stageText.includes('Solo Promo') && stageText.includes('Sparkle Foil is absent'));
 
   await page.click('#cur-sheet-apply');
   await page.waitForSelector('#cur-sheet-done', { timeout: 30000 });
@@ -440,6 +443,7 @@ const { chromium } = require('playwright');
       renamed: c2 && c2.name,
       newCard: !!(c9 && c9.variants && c9.variants.holo && c9.rarity === 'Rare Holo'),
       newSetCard: !!(s1 && s1.name === 'Sheetmon' && s1.variants && s1.variants.firstEdition),
+      unTickedSurvive: (tp.cards || []).some((c) => c.id === 'test-promos-3') && (tp.cards || []).some((c) => c.id === 'test-promos-4'),
     };
   });
   check('sheet: applied — the synonym variant landed on the card', applied.reverse);
@@ -447,6 +451,7 @@ const { chromium } = require('playwright');
   check('sheet: applied — the reviewed field difference was written', applied.renamed === 'Eevee Star Prime');
   check('sheet: applied — the new card exists with its printing and rarity', applied.newCard);
   check('sheet: applied — the new set exists and holds its card', applied.newSetCard);
+  check('sheet: applied — unticked deletions were left alone', applied.unTickedSurvive);
 
   // the proof of idempotence: the same sheet again finds nothing to do
   await gotoCurate();
@@ -455,6 +460,20 @@ const { chromium } = require('playwright');
   await page.click('#cur-sheet-analyze');
   await page.waitForSelector('#cur-sheet-clean');
   check('sheet: uploading the same sheet again imports nothing (idempotent)', true);
+  const cleanText = await page.textContent('#cur-sheet-stage');
+  check('sheet: deleted rows are still reported alongside a clean import',
+    cleanText.includes('In the database but not in the sheet (3)') && cleanText.includes('Pika Promo'));
+  check('sheet: every deletion box starts unticked',
+    (await page.locator('#cur-sheet-stage input[type=checkbox]:checked').count()) === 0);
+  // acting on a deletion is an explicit tick: hide the whole absent card
+  await page.check('#cur-sheet-stage label:has-text("Solo Promo") input');
+  await page.click('#cur-sheet-apply');
+  await page.waitForSelector('#cur-sheet-done');
+  const soloGone = await page.evaluate(async () => {
+    const d = await (await fetch('api/catalog/set?lang=en&id=test-promos')).json();
+    return !(d.cards || []).some((c) => c.id === 'test-promos-4');
+  });
+  check('sheet: a ticked whole-card deletion hides the card', soloGone);
 
   // tidy the stage for the main suite: the consultant set proved its point —
   // hide it so the home page holds the sets the smoke checks expect

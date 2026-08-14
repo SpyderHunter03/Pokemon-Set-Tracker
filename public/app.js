@@ -3640,8 +3640,11 @@ function sheetImportCard(onApplied) {
       return setCache.get(sid);
     };
 
-    const plan = { newSets: new Map(), newCards: new Map(), addVariants: [], addCustoms: [], fieldDiffs: [], problems: [], dupes: 0, matched: 0 };
+    const plan = { newSets: new Map(), newCards: new Map(), addVariants: [], addCustoms: [], fieldDiffs: [], problems: [], missing: [], dupes: 0, matched: 0 };
     const seen = new Set();
+    // what the sheet DOES cover, so its silences can be reported too
+    const coveredSets = new Set();
+    const covered = new Set();          // 'cardId|printingKey'
 
     for (let r = 0; r < dataRows.length; r++) {
       const val = (f) => { const i = mapOf[f]; return i === undefined ? '' : String(dataRows[r][i] == null ? '' : dataRows[r][i]).trim(); };
@@ -3655,6 +3658,7 @@ function sheetImportCard(onApplied) {
       seen.add(dupeKey);
 
       let sid = setByNorm.get(norm(setRaw));
+      if (sid) coveredSets.add(sid);
       if (!sid) {
         // a set the database has never heard of: propose it once, keyed by its normalized name
         const k = norm(setRaw);
@@ -3690,8 +3694,8 @@ function sheetImportCard(onApplied) {
       const labels = card.printings || {};
       const hit = have.find((k) => (stdKey && k === stdKey) || norm(k) === norm(varRaw) || norm(labels[k] || '') === norm(varRaw)
         || norm(variantLabel(card, k)) === norm(varRaw));
-      if (hit) plan.matched++;
-      else if (stdKey) plan.addVariants.push({ card, key: stdKey, label: VARIANT_LABELS[stdKey] });
+      if (hit) { plan.matched++; covered.add(card.id + '|' + hit); }
+      else if (stdKey) { plan.addVariants.push({ card, key: stdKey, label: VARIANT_LABELS[stdKey] }); covered.add(card.id + '|' + stdKey); }
       else if (varRaw) plan.addCustoms.push({ card, label: varRaw });
       else plan.matched++;
 
@@ -3711,15 +3715,31 @@ function sheetImportCard(onApplied) {
     // the same printing proposed twice through different rows collapses too
     plan.addVariants = plan.addVariants.filter((p, i, a) => a.findIndex((x) => x.card.id === p.card.id && x.key === p.key) === i);
     plan.addCustoms = plan.addCustoms.filter((p, i, a) => a.findIndex((x) => x.card.id === p.card.id && norm(x.label) === norm(p.label)) === i);
+
+    // the sheet's silences: database printings the sheet no longer carries.
+    // Scoped to sets the sheet actually covers, and NEVER applied by default —
+    // a deleted row is a report first, a removal only by explicit tick.
+    for (const sid of coveredSets) {
+      for (const card of await getSetCards(sid)) {
+        const keys = realVariants(card).filter((k) => !k.startsWith('my-'));
+        const absent = keys.filter((k) => !covered.has(card.id + '|' + k));
+        if (!absent.length) continue;
+        if (absent.length === keys.length) {
+          plan.missing.push({ card, whole: true });
+        } else {
+          for (const k of absent) plan.missing.push({ card, key: k, label: variantLabel(card, k) });
+        }
+      }
+    }
     return plan;
   }
 
   function renderPlan(plan) {
     const boxes = [];
-    const section = (title, items, describe, tag) => {
+    const section = (title, items, describe, tag, ticked = true) => {
       if (!items.length) return null;
       const rows = items.map((it) => {
-        const cb = h('input', { type: 'checkbox', checked: '' });
+        const cb = h('input', ticked ? { type: 'checkbox', checked: '' } : { type: 'checkbox' });
         boxes.push({ cb, it, tag });
         return h('label', { class: 'row', style: 'gap:8px; align-items:center; margin:3px 0; cursor:pointer' }, cb, h('span', {}, describe(it)));
       });
@@ -3735,13 +3755,19 @@ function sheetImportCard(onApplied) {
       section('New custom printings', plan.addCustoms, (x) => `${x.card.name} (${x.card.id}) — "${x.label}"`, 'custom'),
       section('Field differences', plan.fieldDiffs, (x) => `${x.card.name} (${x.card.id}) ${x.field}: "${x.from}" → "${x.to}"`, 'diff'),
     ].filter(Boolean);
+    // deletions are a report, not a default: every box here starts UNTICKED
+    const missingSection = section('In the database but not in the sheet', plan.missing,
+      (x) => x.whole
+        ? `${x.card.name} (${x.card.id}) — the whole card is absent from the sheet (tick to hide it)`
+        : `${x.card.name} (${x.card.id}) — ${x.label} is absent from the sheet (tick to remove the printing)`,
+      'missing', false);
 
     const notes = [];
     if (plan.matched) notes.push(`${plan.matched} row(s) already match the database — nothing to do for them.`);
     if (plan.dupes) notes.push(`${plan.dupes} duplicate row(s) in the sheet were collapsed.`);
     for (const p of plan.problems) notes.push('⚠ ' + p);
 
-    if (!sections.length) {
+    if (!sections.length && !missingSection) {
       stage.replaceChildren(
         h('p', { id: 'cur-sheet-clean', style: 'margin:10px 0 0' }, '✅ Nothing to import — the database already matches the sheet.'),
         ...notes.map((n) => h('p', { class: 'muted small', style: 'margin:4px 0 0' }, n)));
@@ -3801,6 +3827,14 @@ function sheetImportCard(onApplied) {
             await apiCall('card', { method: 'POST', body: JSON.stringify(body) });
           } catch (e) { failed++; done--; toast(e.message); }
         }
+        // removals go last, and only ever by explicit tick
+        for (const b of byTag('missing')) {
+          step('remove ' + b.it.card.name + (b.it.whole ? '' : ' ' + b.it.label));
+          try {
+            if (b.it.whole) await apiCall('card-hide', { method: 'POST', body: JSON.stringify({ cardId: b.it.card.id, hidden: true, lang }) });
+            else await apiCall('variant-remove', { method: 'POST', body: JSON.stringify({ cardId: b.it.card.id, variant: b.it.key, lang }) });
+          } catch (e) { failed++; done--; toast(e.message); }
+        }
       } finally {
         clearDataCaches();
         progress.textContent = '';
@@ -3810,7 +3844,9 @@ function sheetImportCard(onApplied) {
       }
     });
     stage.replaceChildren(
-      ...sections,
+      ...(sections.length ? sections
+        : [h('p', { id: 'cur-sheet-clean', style: 'margin:10px 0 0' }, '✅ Nothing to import — the database already matches the sheet.')]),
+      ...(missingSection ? [missingSection] : []),
       ...notes.map((n) => h('p', { class: 'muted small', style: 'margin:8px 0 0' }, n)),
       applyBtn, progress);
   }
@@ -3867,7 +3903,9 @@ function sheetImportCard(onApplied) {
       'The Google Sheet is tracked elsewhere; the database is curated here. Open the sheet, File → Download → ' +
       'Comma-separated values (.csv), then upload it below. Every row is checked against the catalog first: ' +
       'printings that already exist are skipped (never duplicated), variant names are matched by meaning ' +
-      '("1st Ed" is 1st Edition, "Reverse Foil" is Reverse Holo), and nothing applies without your tick.'),
+      '("1st Ed" is 1st Edition, "Reverse Foil" is Reverse Holo), and nothing applies without your tick. ' +
+      'Rows deleted from the sheet are reported under "In the database but not in the sheet" — unticked by ' +
+      'default, removed only if you tick them.'),
     h('div', { class: 'row', style: 'gap:8px; flex-wrap:wrap; align-items:center' },
       urlIn, openA,
       h('button', { class: 'btn ghost small', id: 'cur-sheet-upload', onclick: () => fileIn.click() }, '⬆ Upload the downloaded CSV'),
