@@ -3624,6 +3624,31 @@ function sheetImportCard(onApplied) {
   }
 
   const norm = (v) => String(v == null ? '' : v).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+  const numKey = (v) => norm(v).replace(/^0+(?=[0-9])/, '');   // "#015" and "15" are the same card
+  // "Base Set (E)" is Base Set wearing a printing qualifier, not another set
+  const SET_SUFFIX_RE = /\s*\((?:WC|PP|BA|ToT|TK|E|P|A|C|D)\)\s*$/;
+  // known dialect: sheet product names that differ from the database's names
+  const SET_DIALECT = {
+    rumble: 'pokemonrumble', pokemonfutsal: 'pokemonfutsal2020',
+    svbasicenergies: 'scarletvioletenergy', mebasicenergies: 'megaevolutionenergy',
+    meblackstarpromo: 'mepblackstarpromos',
+    latiashalfdeck: 'extrainerkitlatias', latioshalfdeck: 'extrainerkitlatios',
+    pluslehalfdeck: 'extrainerkit2plusle', minunhalfdeck: 'extrainerkit2minun',
+    lucariohalfdeck: 'dptrainerkitlucario', manaphyhalfdeck: 'dptrainerkitmanaphy',
+    raichuhalfdeck: 'hstrainerkitraichu', gyaradoshalfdeck: 'hstrainerkitgyarados',
+    zoroarkhalfdeck: 'bwtrainerkitzoroark', excadrillhalfdeck: 'bwtrainerkitexcadrill',
+    sylveonhalfdeck: 'xytrainerkitsylveon', noivernhalfdeck: 'xytrainerkitnoivern',
+    bisharphalfdeck: 'xytrainerkitbisharp', wigglytuffhalfdeck: 'xytrainerkitwigglytuff',
+    pikachulibrehalfdeck: 'xytrainerkitpikachulibre', suicunehalfdeck: 'xytrainerkitsuicune',
+    lycanrochalfdeck: 'smtrainerkitlycanroc', alolanraichuhalfdeck: 'smtrainerkitalolanraichu',
+    myfirstbattlebulbasaur: 'myfirstbattle', myfirstbattlecharmander: 'myfirstbattle',
+    myfirstbattlesquirtle: 'myfirstbattle', myfirstbattlepikachu: 'myfirstbattle',
+  };
+  // custom-printing spellings vs the labels the database already carries
+  const CUSTOM_SYN = {
+    pokeballparallelholo: 'pokeballpattern', masterballparallelholo: 'masterballpattern',
+    prereleasestamp: 'prerelease', staffstamp: 'staff',
+  };
   // "Holo Rare" and "Rare Holo" are the same rarity wearing different word orders
   const tokensOf = (v) => String(v == null ? '' : v).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean).sort().join(' ');
   // spellings a printing arrives in vs the keys the database speaks
@@ -3631,6 +3656,7 @@ function sheetImportCard(onApplied) {
     '': 'normal', normal: 'normal', regular: 'normal', base: 'normal', nonholo: 'normal', unlimited: 'normal',
     holo: 'holo', holofoil: 'holo', holographic: 'holo', foil: 'holo', cosmosholo: 'holo',
     reverse: 'reverse', reverseholo: 'reverse', reversefoil: 'reverse', reversedholo: 'reverse', mirrorholo: 'reverse',
+    parallelholo: 'reverse', unlimited: 'normal',
     firstedition: 'firstEdition', '1stedition': 'firstEdition', '1sted': 'firstEdition', firsted: 'firstEdition',
     '1st': 'firstEdition', '1steditionholo': 'firstEdition',
     wpromo: 'wPromo', wstamp: 'wPromo', wstamppromo: 'wPromo',
@@ -3667,7 +3693,7 @@ function sheetImportCard(onApplied) {
       if (!setRaw && !numRaw && !nameRaw) continue;
       if (!setRaw || !numRaw) { plan.problems.push(`Row ${rowNo}: needs both a set and a card number`); continue; }
 
-      const dupeKey = norm(setRaw) + '|' + norm(numRaw) + '|' + (VSYN[norm(varRaw)] || norm(varRaw));
+      const dupeKey = norm(setRaw) + '|' + numKey(numRaw) + '|' + (VSYN[norm(varRaw)] || norm(varRaw));
       if (seen.has(dupeKey)) { plan.dupes++; continue; }
       seen.add(dupeKey);
 
@@ -3678,9 +3704,16 @@ function sheetImportCard(onApplied) {
         // resolved through the saved matches, this session's choices, or —
         // failing both — parked for the admin to match before its rows count
         const nk = norm(setRaw);
+        // the dialect chain: "Promos" plurals, known renames, printing suffixes
+        sid = setByNorm.get(nk + 's') || setByNorm.get(SET_DIALECT[nk] || '');
+        if (!sid && SET_SUFFIX_RE.test(setRaw)) {
+          const bare = norm(setRaw.replace(SET_SUFFIX_RE, ''));
+          sid = setByNorm.get(bare) || setByNorm.get(bare + 's') || setByNorm.get(SET_DIALECT[bare] || '');
+        }
         const al = aliases.get(nk);
-        if (al === '') { plan.ignored++; continue; }
-        if (al && setNames.has(al)) sid = al;
+        if (!sid && al === '') { plan.ignored++; continue; }
+        if (!sid && al && setNames.has(al)) sid = al;
+        if (sid) { /* resolved through the dialect — fall through as a known set */ }
         else if (choices && choices.creates.has(nk)) {
           if (!plan.newSets.has(nk)) {
             const slug = setRaw.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
@@ -3704,12 +3737,15 @@ function sheetImportCard(onApplied) {
       }
 
       const cards = isNewSet ? [] : await getSetCards(sid);
-      const card = cards.find((c) => norm(c.localId) === norm(numRaw));
-      const stdKey = VSYN[norm(varRaw)] || (Object.keys(VARIANT_LABELS).find((k) => norm(VARIANT_LABELS[k]) === norm(varRaw)) || null);
+      const card = cards.find((c) => numKey(c.localId) === numKey(numRaw));
+      let stdKey = VSYN[norm(varRaw)] || (Object.keys(VARIANT_LABELS).find((k) => norm(VARIANT_LABELS[k]) === norm(varRaw)) || null);
+      if (card && stdKey === 'normal' && !(card.variants && card.variants.normal) && card.variants && card.variants.holo) {
+        stdKey = 'holo';   // a holo-only card's plain printing IS the holo
+      }
 
       if (!card) {
         // one proposal per new card; every row for it contributes a printing
-        const ck = sid + '|' + norm(numRaw);
+        const ck = sid + '|' + numKey(numRaw);
         if (!plan.newCards.has(ck)) {
           if (!nameRaw) { plan.problems.push(`Row ${rowNo}: new card ${sid} #${numRaw} needs a name column`); continue; }
           plan.newCards.set(ck, { set: sid, number: numRaw, name: nameRaw, rarity: val('rarity') || undefined,
@@ -3726,8 +3762,10 @@ function sheetImportCard(onApplied) {
       // the card exists — cross-reference the printing against what it has
       const have = realVariants(card).filter((k) => !k.startsWith('my-'));
       const labels = card.printings || {};
+      const synRaw = CUSTOM_SYN[norm(varRaw)] || null;
       const hit = have.find((k) => (stdKey && k === stdKey) || norm(k) === norm(varRaw) || norm(labels[k] || '') === norm(varRaw)
-        || norm(variantLabel(card, k)) === norm(varRaw));
+        || norm(variantLabel(card, k)) === norm(varRaw)
+        || (synRaw && (norm(k) === synRaw || norm(labels[k] || '') === synRaw)));
       if (hit) { plan.matched++; covered.add(card.id + '|' + hit); kindsOf(sid).add(hit); }
       else if (stdKey) { plan.addVariants.push({ card, key: stdKey, label: VARIANT_LABELS[stdKey] }); covered.add(card.id + '|' + stdKey); kindsOf(sid).add(stdKey); }
       else if (varRaw) plan.addCustoms.push({ card, label: varRaw });
