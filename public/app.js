@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.68.0';
+const APP_VERSION = '3.69.0';
 
 /* ============================================================
  * Storage helpers
@@ -1176,6 +1176,26 @@ async function openCardModal(brief, { variant, onOwnershipChange, onCardChanged 
   const chipsWrap = h('div', { class: 'chips', style: 'margin:12px 0 4px; justify-content:center' });
   const counterWrap = h('div', {});
   const mineWrap = h('div', {});
+  // provenance, for the curator: which masterlist row this printing IS
+  const sourceWrap = h('div', { id: 'card-source', class: 'muted small', style: 'text-align:center; margin-top:4px' });
+  let sourceLinks = null;
+  if (isAdmin && serverAvailable) {
+    try { sourceLinks = (await apiCall(`masterlist/links?lang=${encodeURIComponent(lang)}&cardId=${encodeURIComponent(card.id)}`)).links; } catch { sourceLinks = null; }
+  }
+  function renderSource() {
+    sourceWrap.replaceChildren();
+    if (!sourceLinks || !sourceLinks.length) return;
+    const mine = sourceLinks.filter((l) => l.variant === active);
+    if (!mine.length) return;
+    const sheetUrl = lsGet('ptcg.sheetUrl') || '';
+    const base = /^https:\/\/docs\.google\.com\/spreadsheets\//.test(sheetUrl) ? sheetUrl.replace(/[#?].*$/, '') : '';
+    sourceWrap.append(...mine.map((l, i) => {
+      const text = `Masterlist row ${l.rowNo}${l.gone ? ' (no longer in the sheet)' : ''}`;
+      const el = base ? h('a', { href: `${base}#gid=0&range=A${l.rowNo}`, target: '_blank', rel: 'noopener', title: `${l.sheetSet} — "${l.sheetVariant}"` }, text + ' ↗')
+        : h('span', { title: `${l.sheetSet} — "${l.sheetVariant}"` }, text);
+      return i ? h('span', {}, ' · ', el) : el;
+    }));
+  }
   const imgWrap = h('div', { class: 'card-img-wrap' });
 
   function renderModalImage() {
@@ -1192,6 +1212,7 @@ async function openCardModal(brief, { variant, onOwnershipChange, onCardChanged 
 
   function renderVariantUI() {
     renderModalImage(); // the picture reflects the selected printing
+    renderSource();
     const track = canTrack();
     const mineMap = myPrintingsFor(card.id) || {};
     chipsWrap.replaceChildren(...avail().map((vk) => {
@@ -1301,6 +1322,7 @@ async function openCardModal(brief, { variant, onOwnershipChange, onCardChanged 
     ...rows,
     chipsWrap,
     counterWrap,
+    sourceWrap,
     mineWrap,
     h('div', { class: 'row', style: 'margin-top:14px; justify-content:flex-end; gap:8px' },
       auth ? h('button', { class: 'btn ghost', onclick: async (e) => {
@@ -3605,11 +3627,13 @@ function sheetImportCard(onApplied) {
     ['set', 'Set (name or id)'], ['number', 'Card number'], ['name', 'Card name'],
     ['variant', 'Printing / variant'], ['rarity', 'Rarity'], ['category', 'Category'],
     ['types', 'Type(s)'], ['hp', 'HP'], ['illustrator', 'Illustrator'],
-    ['setsize', 'Set size (checked, never written)'], ['', '— ignore —'],
+    ['setsize', 'Set size (checked, never written)'], ['notes', 'Notes'], ['', '— ignore —'],
   ];
   function guessField(header) {
     const n = header.trim().toLowerCase();
     if (/series/.test(n)) return '';                      // a grouping label, not the set
+    if (/note|comment|remark/.test(n)) return 'notes';
+    if (/release|date/.test(n)) return '';                 // when it came out — not imported
     if (/size|total/.test(n)) return 'setsize';           // "Set size" — even truncated to "Set si"
     if (/number|^(#|no\.?)$/.test(n)) return 'number';    // BEFORE set: "Set number" is a number
     if (/variant|printing|finish|treatment|edition|foil/.test(n)) return 'variant';
@@ -3631,7 +3655,7 @@ function sheetImportCard(onApplied) {
   const SET_DIALECT = {
     rumble: 'pokemonrumble', pokemonfutsal: 'pokemonfutsal2020',
     svbasicenergies: 'scarletvioletenergy', mebasicenergies: 'megaevolutionenergy',
-    meblackstarpromo: 'mepblackstarpromos',
+    meblackstarpromo: 'mepblackstarpromos', svblackstarpromo: 'svpblackstarpromos',
     latiashalfdeck: 'extrainerkitlatias', latioshalfdeck: 'extrainerkitlatios',
     pluslehalfdeck: 'extrainerkit2plusle', minunhalfdeck: 'extrainerkit2minun',
     lucariohalfdeck: 'dptrainerkitlucario', manaphyhalfdeck: 'dptrainerkitmanaphy',
@@ -3662,7 +3686,13 @@ function sheetImportCard(onApplied) {
     wpromo: 'wPromo', wstamp: 'wPromo', wstamppromo: 'wPromo',
   };
 
-  async function analyze(headers, dataRows, mapOf, choices) {
+  /* The import is a diff, not a re-read. The sheet is mirrored on the server
+   * row by row (keyed by what each row SAYS — never by where it sits), and
+   * only rows the mirror has not settled come here: new rows, rows edited in
+   * place, rows whose details changed, rows nothing has linked yet. Every
+   * other row already knows which printing it is (sync.links) and counts as
+   * matched without another look. */
+  async function analyze(sync, choices) {
     const ix = await getIndex();
     const setByNorm = new Map();
     for (const st of ix.sets) { setByNorm.set(norm(st.id), st.id); setByNorm.set(norm(st.name), st.id); }
@@ -3676,25 +3706,53 @@ function sheetImportCard(onApplied) {
       return setCache.get(sid);
     };
 
-    const plan = { newSets: new Map(), newCards: new Map(), addVariants: [], addCustoms: [], fieldDiffs: [], problems: [], missing: [], unmatched: new Map(), ignored: 0, dupes: 0, matched: 0 };
+    const plan = { newSets: new Map(), newCards: new Map(), addVariants: [], addCustoms: [], fieldDiffs: [], problems: [], missing: [], unmatched: new Map(),
+      ignored: 0, dupes: 0, matched: 0, links: [], edited: sync.edited || [], sync: sync.counts || null };
     plan.existingSets = ix.sets.map((st) => ({ id: st.id, name: st.name }));
     const seen = new Set();
-    // what the sheet DOES cover, so its silences can be reported too
+    // what the sheet DOES cover, so its silences can be reported too —
+    // seeded from every settled row's link, then grown by the rows checked here
     const coveredSets = new Set();
     const covered = new Set();          // 'cardId|printingKey'
     const coveredKinds = new Map();     // setId -> Set of printing keys the sheet speaks of
     const kindsOf = (sid) => { if (!coveredKinds.has(sid)) coveredKinds.set(sid, new Set()); return coveredKinds.get(sid); };
+    for (const [, cardId, vk] of (sync.links || [])) {
+      covered.add(cardId + '|' + vk);
+      const sid = setIdOf(cardId);
+      coveredSets.add(sid);
+      kindsOf(sid).add(vk);
+      plan.matched++;
+    }
     const setSizes = new Map();         // setId -> the sheet's claimed printed size
+    const rows = sync.pending || [];
+    // proposals by identity, so forty thousand rows never scan a list of proposals
+    const variantProps = new Map(), customProps = new Map(), diffSeen = new Set();
 
-    for (let r = 0; r < dataRows.length; r++) {
-      const val = (f) => { const i = mapOf[f]; return i === undefined ? '' : String(dataRows[r][i] == null ? '' : dataRows[r][i]).trim(); };
-      const rowNo = r + 2;   // 1-based, after the header row
-      const setRaw = val('set'), numRaw = val('number'), nameRaw = val('name'), varRaw = val('variant');
+    // a printing's label: the sheet's variant, or variant + notes when the
+    // notes are what tells two rows apart ("Play! Pokémon Logo" comes in nine
+    // Prize Pack series, and only the notes column says which)
+    const rowsOfCard = new Map();     // 'set|number' -> the rows for that card (a twin check must not scan the sheet)
+    const cardKeyOfRow = (r) => norm(r.set) + '|' + numKey(r.number || '') + (r.number ? '' : '|' + norm(r.name));
+    for (const r of rows) { const k = cardKeyOfRow(r); if (!rowsOfCard.has(k)) rowsOfCard.set(k, []); rowsOfCard.get(k).push(r); }
+    const labelFor = (row, card) => {
+      const v = row.variant, n = row.notes;
+      if (!v || !n) return v;
+      const twin = (rowsOfCard.get(cardKeyOfRow(row)) || []).some((o) => o !== row && norm(o.variant) === norm(v) && norm(o.notes) !== norm(n));
+      const already = card && Object.values(card.printings || {}).some((l) => norm(l).startsWith(norm(v)) && norm(l) !== norm(v));
+      return twin || already ? `${v} - ${n}` : v;
+    };
+    const wantLink = (row, cardId, vk) => plan.links.push({ key: row.key, cardId, variant: vk });
+
+    for (const row of rows) {
+      const rowNo = row.rowNo;
+      const setRaw = row.set || '', numRaw = row.number || '', nameRaw = row.name || '', varRaw = row.variant || '';
       if (!setRaw && !numRaw && !nameRaw) continue;
-      if (!setRaw || !numRaw) { plan.problems.push(`Row ${rowNo}: needs both a set and a card number`); continue; }
+      if (!setRaw) { plan.problems.push(`Row ${rowNo}: needs a set`); continue; }
+      if (!numRaw && !nameRaw) { plan.problems.push(`Row ${rowNo}: needs a card number or a name`); continue; }
 
-      const dupeKey = norm(setRaw) + '|' + numKey(numRaw) + '|' + (VSYN[norm(varRaw)] || norm(varRaw));
-      if (seen.has(dupeKey)) { plan.dupes++; continue; }
+      const dupeKey = norm(setRaw) + '|' + (numRaw ? numKey(numRaw) : 'n:' + norm(nameRaw)) + '|' + (VSYN[norm(varRaw)] || norm(varRaw)) + '|' + norm(row.notes || '');
+      const isDupe = seen.has(dupeKey);
+      if (isDupe) plan.dupes++;      // counted, but still linked to whatever the first copy became
       seen.add(dupeKey);
 
       let sid = setByNorm.get(norm(setRaw));
@@ -3730,14 +3788,22 @@ function sheetImportCard(onApplied) {
       }
       if (!isNewSet) {
         coveredSets.add(sid);
-        if (mapOf.setsize !== undefined && !setSizes.has(sid)) {
-          const sz = parseInt(val('setsize').replace(/[^0-9]/g, ''), 10);
+        if (row.setsize && !setSizes.has(sid)) {
+          const sz = parseInt(String(row.setsize).replace(/[^0-9]/g, ''), 10);
           if (sz > 0) setSizes.set(sid, sz);
         }
       }
 
       const cards = isNewSet ? [] : await getSetCards(sid);
-      const card = cards.find((c) => numKey(c.localId) === numKey(numRaw));
+      let card = null;
+      if (numRaw) card = cards.find((c) => numKey(c.localId) === numKey(numRaw)) || null;
+      else {
+        // an unnumbered card (trophy cards, unnumbered energies) is found by name — when the name is unique in its set
+        const byName = cards.filter((c) => norm(c.name) === norm(nameRaw));
+        if (byName.length === 1) card = byName[0];
+        else if (byName.length > 1) { plan.problems.push(`Row ${rowNo}: "${nameRaw}" has no number and ${byName.length} cards in ${setNames.get(sid) || sid} carry that name`); continue; }
+        else { plan.problems.push(`Row ${rowNo}: "${nameRaw}" has no number and no card by that name exists in ${setNames.get(sid) || sid} — add it in the workbench first`); continue; }
+      }
       let stdKey = VSYN[norm(varRaw)] || (Object.keys(VARIANT_LABELS).find((k) => norm(VARIANT_LABELS[k]) === norm(varRaw)) || null);
       if (card && stdKey === 'normal' && !(card.variants && card.variants.normal) && card.variants && card.variants.holo) {
         stdKey = 'holo';   // a holo-only card's plain printing IS the holo
@@ -3748,14 +3814,16 @@ function sheetImportCard(onApplied) {
         const ck = sid + '|' + numKey(numRaw);
         if (!plan.newCards.has(ck)) {
           if (!nameRaw) { plan.problems.push(`Row ${rowNo}: new card ${sid} #${numRaw} needs a name column`); continue; }
-          plan.newCards.set(ck, { set: sid, number: numRaw, name: nameRaw, rarity: val('rarity') || undefined,
-            category: val('category') || undefined, hp: val('hp') || undefined, illustrator: val('illustrator') || undefined,
-            variants: {}, customs: [] });
+          plan.newCards.set(ck, { set: sid, number: numRaw, name: nameRaw, rarity: row.rarity || undefined,
+            category: row.category || undefined, hp: row.hp || undefined, illustrator: row.illustrator || undefined,
+            variants: {}, customs: [], rowKeys: [] });
         }
         const nc = plan.newCards.get(ck);
+        const label = stdKey ? null : (varRaw ? labelFor(row, null) : null);
         if (stdKey) nc.variants[stdKey] = true;
-        else if (varRaw) nc.customs.push(varRaw);
+        else if (label) { if (!nc.customs.includes(label)) nc.customs.push(label); }
         else nc.variants.normal = true;
+        nc.rowKeys.push({ key: row.key, std: stdKey || (label ? null : 'normal'), label });
         continue;
       }
 
@@ -3763,37 +3831,57 @@ function sheetImportCard(onApplied) {
       const have = realVariants(card).filter((k) => !k.startsWith('my-'));
       const labels = card.printings || {};
       const synRaw = CUSTOM_SYN[norm(varRaw)] || null;
+      const label = stdKey ? null : (varRaw ? labelFor(row, card) : null);
       const hit = have.find((k) => (stdKey && k === stdKey) || norm(k) === norm(varRaw) || norm(labels[k] || '') === norm(varRaw)
         || norm(variantLabel(card, k)) === norm(varRaw)
+        || (label && norm(labels[k] || '') === norm(label))
         || (synRaw && (norm(k) === synRaw || norm(labels[k] || '') === synRaw)));
-      if (hit) { plan.matched++; covered.add(card.id + '|' + hit); kindsOf(sid).add(hit); }
-      else if (stdKey) { plan.addVariants.push({ card, key: stdKey, label: VARIANT_LABELS[stdKey] }); covered.add(card.id + '|' + stdKey); kindsOf(sid).add(stdKey); }
-      else if (varRaw) plan.addCustoms.push({ card, label: varRaw });
-      else plan.matched++;
+      if (hit) { if (!isDupe) plan.matched++; covered.add(card.id + '|' + hit); kindsOf(sid).add(hit); wantLink(row, card.id, hit); }
+      else if (stdKey) {
+        const pk = card.id + '|' + stdKey;
+        let p = variantProps.get(pk);
+        if (!p) { p = { card, key: stdKey, label: VARIANT_LABELS[stdKey], rowKeys: [] }; variantProps.set(pk, p); plan.addVariants.push(p); }
+        p.rowKeys.push(row.key);
+        covered.add(card.id + '|' + stdKey); kindsOf(sid).add(stdKey);
+      } else if (label) {
+        const pk = card.id + '|' + norm(label);
+        let p = customProps.get(pk);
+        if (!p) { p = { card, label, rowKeys: [] }; customProps.set(pk, p); plan.addCustoms.push(p); }
+        p.rowKeys.push(row.key);
+      } else { if (!isDupe) plan.matched++; }
 
       // mapped fields that disagree with the database go up for review
       const diffs = [];
-      if (mapOf.name !== undefined && nameRaw && norm(nameRaw) !== norm(card.name)) diffs.push(['name', card.name, nameRaw]);
-      if (mapOf.rarity !== undefined && val('rarity') && tokensOf(val('rarity')) !== tokensOf(card.rarity || '')) diffs.push(['rarity', card.rarity || '(none)', val('rarity')]);
-      if (mapOf.category !== undefined && val('category') && norm(val('category')) !== norm(card.category || '')) diffs.push(['category', card.category || '(none)', val('category')]);
-      if (mapOf.illustrator !== undefined && val('illustrator') && norm(val('illustrator')) !== norm(card.illustrator || '')) diffs.push(['illustrator', card.illustrator || '(none)', val('illustrator')]);
-      if (mapOf.hp !== undefined && val('hp') && parseInt(val('hp'), 10) !== (card.hp || 0)) diffs.push(['hp', String(card.hp || 0), val('hp')]);
-      if (mapOf.types !== undefined && val('types')) {
-        const sheetTypes = val('types').split(/[,;/&+]/).map((t) => t.trim()).filter(Boolean);
+      if (nameRaw && norm(nameRaw) !== norm(card.name)) diffs.push(['name', card.name, nameRaw]);
+      if (row.rarity && tokensOf(row.rarity) !== tokensOf(card.rarity || '')) diffs.push(['rarity', card.rarity || '(none)', row.rarity]);
+      if (row.category && norm(row.category) !== norm(card.category || '')) diffs.push(['category', card.category || '(none)', row.category]);
+      if (row.illustrator && norm(row.illustrator) !== norm(card.illustrator || '')) diffs.push(['illustrator', card.illustrator || '(none)', row.illustrator]);
+      if (row.hp && parseInt(row.hp, 10) !== (card.hp || 0)) diffs.push(['hp', String(card.hp || 0), row.hp]);
+      if (row.types) {
+        const sheetTypes = String(row.types).split(/[,;/&+]/).map((t) => t.trim()).filter(Boolean);
         const dbTypes = card.types || [];
         const same = sheetTypes.length === dbTypes.length && sheetTypes.every((t) => dbTypes.some((d) => norm(d) === norm(t)));
         if (!same) diffs.push(['types', dbTypes.join(', ') || '(none)', sheetTypes.join(', ')]);
       }
       for (const [f, from, to] of diffs) {
-        if (!plan.fieldDiffs.some((d) => d.card.id === card.id && d.field === f)) {
-          plan.fieldDiffs.push({ card, field: f, from, to });
-        }
+        if (!diffSeen.has(card.id + '|' + f)) { diffSeen.add(card.id + '|' + f); plan.fieldDiffs.push({ card, field: f, from, to }); }
       }
     }
-    // the same printing proposed twice through different rows collapses too
-    plan.addVariants = plan.addVariants.filter((p, i, a) => a.findIndex((x) => x.card.id === p.card.id && x.key === p.key) === i);
-    plan.addCustoms = plan.addCustoms.filter((p, i, a) => a.findIndex((x) => x.card.id === p.card.id && norm(x.label) === norm(p.label)) === i);
 
+    // rows that LEFT the sheet and were linked to a printing: the exact
+    // signal. Reported like every other absence — a removal only by tick.
+    for (const r of (sync.removed || [])) {
+      if (!r.link) continue;
+      const sid = setIdOf(r.link.card_id);
+      const card = (await getSetCards(sid)).find((c) => c.id === r.link.card_id);
+      if (!card) continue;
+      const keys = realVariants(card).filter((k) => !k.startsWith('my-'));
+      if (!keys.includes(r.link.variant)) continue;   // already gone from the catalog
+      if (covered.has(card.id + '|' + r.link.variant)) continue;   // another row still carries it
+      if (!plan.missing.some((m) => m.card.id === card.id && (m.whole || m.key === r.link.variant))) {
+        plan.missing.push({ card, key: r.link.variant, label: variantLabel(card, r.link.variant), rowNo: r.rowNo, sheetVariant: r.variant });
+      }
+    }
     // the sheet's silences: database printings the sheet no longer carries.
     // Scoped twice: to sets the sheet covers, AND to the printing KINDS the
     // sheet speaks of in that set — a 1st-Edition-only sheet says nothing
@@ -3808,25 +3896,33 @@ function sheetImportCard(onApplied) {
         const absent = scoped.filter((k) => !covered.has(card.id + '|' + k));
         if (!absent.length) continue;
         if (absent.length === keys.length) {
-          plan.missing.push({ card, whole: true });
+          const exact = plan.missing.find((m) => m.card.id === card.id && m.rowNo);
+          plan.missing = plan.missing.filter((m) => m.card.id !== card.id);
+          plan.missing.push({ card, whole: true, rowNo: exact && exact.rowNo, sheetVariant: exact && exact.sheetVariant });
         } else {
-          for (const k of absent) plan.missing.push({ card, key: k, label: variantLabel(card, k) });
+          for (const k of absent) if (!plan.missing.some((m) => m.card.id === card.id && (m.whole || m.key === k))) plan.missing.push({ card, key: k, label: variantLabel(card, k) });
         }
       }
     }
     // the sheet's claimed set size is checked but never written from an import
-    if (mapOf.setsize !== undefined) {
-      for (const [sid, sz] of setSizes) {
-        const st = ix.sets.find((x) => x.id === sid);
-        const official = st && st.cardCount && (st.cardCount.official || st.cardCount.total);
-        if (official && sz !== official) {
-          plan.problems.push(`Sheet says ${st.name} is /${sz} but the database says ${official} — set sizes aren't imported; fix it in the workbench if the sheet is right`);
-        }
+    for (const [sid, sz] of setSizes) {
+      const st = ix.sets.find((x) => x.id === sid);
+      const official = st && st.cardCount && (st.cardCount.official || st.cardCount.total);
+      if (official && sz !== official) {
+        plan.problems.push(`Sheet says ${st.name} is /${sz} but the database says ${official} — set sizes aren't imported; fix it in the workbench if the sheet is right`);
       }
     }
     for (const ns of plan.newSets.values()) setNames.set(ns.id, ns.name);
     plan.setNames = setNames;
     return plan;
+  }
+
+  /** links are bookkeeping, not curation: a row that already IS a printing is
+   * remembered as such the moment we know, in batches the server takes in one go */
+  async function postLinks(links) {
+    for (let i = 0; i < links.length; i += 2000) {
+      await apiCall('masterlist/links', { method: 'POST', body: JSON.stringify({ lang, links: links.slice(i, i + 2000) }) });
+    }
   }
 
   let _rerun = null;       // re-run the current analysis (after a set match)
@@ -3861,11 +3957,15 @@ function sheetImportCard(onApplied) {
     // deletions start UNTICKED, always: a report first, a removal only by choice
     for (const x of plan.missing) addEntry(nameOf(setIdOf(x.card.id)), 'In the database but not in the sheet', 'missing', false, x,
       x.whole
-        ? `${x.card.name} (${x.card.id}) — the whole card is absent from the sheet (tick to hide it)`
-        : `${x.card.name} (${x.card.id}) — ${x.label} is absent from the sheet (tick to remove the printing)`);
+        ? `${x.card.name} (${x.card.id}) — the whole card is absent from the sheet${x.rowNo ? ` (was row ${x.rowNo}, "${x.sheetVariant}")` : ''} (tick to hide it)`
+        : `${x.card.name} (${x.card.id}) — ${x.label} is absent from the sheet${x.rowNo ? ` (was row ${x.rowNo}, "${x.sheetVariant}")` : ''} (tick to remove the printing)`);
 
     const notes = [];
     if (plan.matched) notes.push(`${plan.matched} row(s) already match the database — nothing to do for them.`);
+    if (plan.sync) {
+      const c = plan.sync;
+      notes.push(`Mirror: ${c.total} rows in the sheet — ${c.added} new, ${c.edited} edited in place, ${c.changed} with changed details, ${c.removed} left the sheet, ${c.moved} moved, ${c.unchanged} unchanged${c.returned ? `, ${c.returned} came back` : ''}.`);
+    }
     if (plan.dupes) notes.push(`${plan.dupes} duplicate row(s) in the sheet were collapsed.`);
     for (const p of plan.problems) notes.push('⚠ ' + p);
 
@@ -3904,10 +4004,18 @@ function sheetImportCard(onApplied) {
       notes.push(`⚠ Rows from ${plan.unmatched.size} unmatched sheet set(s) are not part of this review yet.`);
     }
 
+    // rows the consultant rewrote in place: shown so the review reads right,
+    // never acted on directly — the new wording is checked like any new row
+    const editedEl = plan.edited.length ? h('details', { id: 'cur-sheet-edited', class: 'cur-cat', style: 'margin-top:8px' },
+      h('summary', { class: 'muted small', style: 'cursor:pointer' }, `Rows edited in the sheet (${plan.edited.length})`),
+      h('div', { style: 'margin:4px 0 4px 22px' }, ...plan.edited.slice(0, 300).map((e) =>
+        h('div', { class: 'muted small', style: 'margin:3px 0' },
+          `Row ${e.to.rowNo}: ${e.from.set} #${e.from.number} ${e.from.name} "${e.from.variant}"${e.from.notes ? ` (${e.from.notes})` : ''} → ${e.to.set} #${e.to.number} ${e.to.name} "${e.to.variant}"${e.to.notes ? ` (${e.to.notes})` : ''}`)))) : null;
     const adds = plan.newSets.size + plan.newCards.size + plan.addVariants.length + plan.addCustoms.length;
     if (!items.length && !plan.unmatched.size) {
       stage.replaceChildren(
         h('p', { id: 'cur-sheet-clean', style: 'margin:10px 0 0' }, '✅ Nothing to import — the database already matches the sheet.'),
+        ...(editedEl ? [editedEl] : []),
         ...notes.map((n) => h('p', { class: 'muted small', style: 'margin:4px 0 0' }, n)));
       return;
     }
@@ -3976,6 +4084,7 @@ function sheetImportCard(onApplied) {
       if (!todo.length) { toast('Nothing ticked'); return; }
       applyBtn.disabled = true;
       let done = 0, failed = 0;
+      const links = [];
       const step = (label) => { progress.textContent = `${done + failed + 1} / ${todo.length} — ${label}`; };
       const byTag = (t) => todo.filter((b) => b.tag === t);
       try {
@@ -3995,8 +4104,15 @@ function sheetImportCard(onApplied) {
             if (b.it.hp) body.hp = parseInt(b.it.hp, 10);
             if (b.it.illustrator) body.illustrator = b.it.illustrator;
             await apiCall('card', { method: 'POST', body: JSON.stringify(body) });
+            const newId = `${b.it.set}-${b.it.number}`.replace(/\s+/g, '');
+            const customKey = new Map();
             for (const label of b.it.customs) {
-              await apiCall('custom-variant', { method: 'POST', body: JSON.stringify({ cardId: `${b.it.set}-${b.it.number}`.replace(/\s+/g, ''), label, lang }) });
+              const r = await apiCall('custom-variant', { method: 'POST', body: JSON.stringify({ cardId: newId, label, lang }) });
+              customKey.set(label, r.key);
+            }
+            for (const rk of (b.it.rowKeys || [])) {
+              const vk = rk.std || customKey.get(rk.label);
+              if (vk) links.push({ key: rk.key, cardId: newId, variant: vk });
             }
             done++;
           } catch (e) { failed++; toast(e.message); }
@@ -4009,13 +4125,15 @@ function sheetImportCard(onApplied) {
             for (const k of realVariants(fresh).filter((x) => !x.startsWith('my-'))) variants[k] = true;
             variants[b.it.key] = true;
             await apiCall('card', { method: 'POST', body: JSON.stringify({ lang, cardId: b.it.card.id, variants }) });
+            for (const k of (b.it.rowKeys || [])) links.push({ key: k, cardId: b.it.card.id, variant: b.it.key });
             done++;
           } catch (e) { failed++; toast(e.message); }
         }
         for (const b of byTag('custom')) {
           step(b.it.card.name + ' "' + b.it.label + '"');
           try {
-            await apiCall('custom-variant', { method: 'POST', body: JSON.stringify({ cardId: b.it.card.id, label: b.it.label, lang }) });
+            const r = await apiCall('custom-variant', { method: 'POST', body: JSON.stringify({ cardId: b.it.card.id, label: b.it.label, lang }) });
+            for (const k of (b.it.rowKeys || [])) links.push({ key: k, cardId: b.it.card.id, variant: r.key });
             done++;
           } catch (e) { failed++; toast(e.message); }
         }
@@ -4038,6 +4156,7 @@ function sheetImportCard(onApplied) {
             done++;
           } catch (e) { failed++; toast(e.message); }
         }
+        if (links.length) { step('remembering which sheet rows these are'); await postLinks(links).catch((e) => toast(e.message)); }
       } finally {
         clearDataCaches();
         progress.textContent = '';
@@ -4051,6 +4170,7 @@ function sheetImportCard(onApplied) {
       ...(adds || plan.fieldDiffs.length || plan.unmatched.size ? [] : [h('p', { id: 'cur-sheet-clean', style: 'margin:10px 0 0' }, '✅ Nothing to import — the database already matches the sheet.')]),
       ...(matchEl ? [matchEl] : []),
       totals,
+      ...(editedEl ? [editedEl] : []),
       ...groupEls,
       ...notes.map((n) => h('p', { class: 'muted small', style: 'margin:8px 0 0' }, n)),
       ...(items.length ? [applyBtn, progress] : []));
@@ -4091,10 +4211,37 @@ function sheetImportCard(onApplied) {
       lsSet(mapKey, chosen);
       goBtn.disabled = true;
       _choices = { creates: new Set() };
+      // the sheet, as rows the mirror understands — the sync happens ONCE per
+      // upload; a set match re-runs only the catalog check, on the same diff
+      const cell = (r, f) => { const i = mapOf[f]; return i === undefined ? '' : String(dataRows[r][i] == null ? '' : dataRows[r][i]).trim(); };
+      const rowsOut = [];
+      for (let r = 0; r < dataRows.length; r++) {
+        const o = { rowNo: r + 2 };
+        for (const f of ['set', 'number', 'name', 'variant', 'notes', 'rarity', 'category', 'types', 'hp', 'illustrator', 'setsize']) { const v = cell(r, f); if (v) o[f] = v; }
+        if (o.set || o.number || o.name) rowsOut.push(o);
+      }
+      stage.replaceChildren(spinner());
+      let sync = null;
+      try {
+        sync = await apiCall('masterlist/sync', { method: 'POST', body: JSON.stringify({ lang, rows: rowsOut }) });
+      } catch (err) {
+        stage.replaceChildren(h('p', { class: 'muted small' }, 'Sync failed: ' + err.message));
+        goBtn.disabled = false;
+        return;
+      }
+      const posted = new Set();   // links already sent for this upload
       _rerun = async () => {
         stage.replaceChildren(spinner());
-        try { renderPlan(await analyze(headers, dataRows, mapOf, _choices)); }
-        catch (err) { stage.replaceChildren(h('p', { class: 'muted small' }, 'Analysis failed: ' + err.message)); }
+        try {
+          const plan = await analyze(sync, _choices);
+          // rows that turned out to already be a printing are linked right away
+          const fresh = plan.links.filter((l) => !posted.has(l.key));
+          if (fresh.length) {
+            await postLinks(fresh).catch((e) => toast(e.message));
+            for (const l of fresh) posted.add(l.key);
+          }
+          renderPlan(plan);
+        } catch (err) { stage.replaceChildren(h('p', { class: 'muted small' }, 'Analysis failed: ' + err.message)); }
       };
       await _rerun();
       goBtn.disabled = false;
@@ -4125,15 +4272,28 @@ function sheetImportCard(onApplied) {
     } catch (e) { savedBody.replaceChildren(h('p', { class: 'muted small' }, e.message)); }
   });
 
+  // the mirror's state: how much of the sheet this install has seen, and when
+  const statusEl = h('p', { id: 'cur-sheet-status', class: 'muted small', style: 'margin:0 0 10px' }, '');
+  (async () => {
+    try {
+      const st = await apiCall('masterlist/status?lang=' + encodeURIComponent(lang));
+      statusEl.textContent = st.total
+        ? `Mirror: ${st.total} sheet rows on record (${st.linked} linked to a printing${st.gone ? `, ${st.gone} no longer in the sheet` : ''}), last synced ${new Date(st.lastSync).toLocaleString()}.`
+        : 'Mirror: no sheet synced yet — the first upload records every row.';
+    } catch { statusEl.textContent = ''; }
+  })();
+
   return settingsCard(
     h('h3', { style: 'margin:0 0 6px' }, 'Consultant sheet'),
-    h('p', { class: 'muted small', style: 'margin:0 0 10px' },
+    h('p', { class: 'muted small', style: 'margin:0 0 6px' },
       'The Google Sheet is tracked elsewhere; the database is curated here. Open the sheet, File → Download → ' +
-      'Comma-separated values (.csv), then upload it below. Every row is checked against the catalog first: ' +
-      'printings that already exist are skipped (never duplicated), variant names are matched by meaning ' +
-      '("1st Ed" is 1st Edition, "Reverse Foil" is Reverse Holo), and nothing applies without your tick. ' +
-      'Rows deleted from the sheet are reported under "In the database but not in the sheet" — unticked by ' +
-      'default, removed only if you tick them.'),
+      'Comma-separated values (.csv), then upload it below. The upload is mirrored row by row — each row is known ' +
+      'by what it says, never by where it sits, so the next upload is a diff: only rows that are new, rewritten, ' +
+      'or not yet linked are checked against the catalog. Printings that already exist are never duplicated, variant ' +
+      'names are matched by meaning ("1st Ed" is 1st Edition, "Parallel Holo" is Reverse Holo), and nothing applies ' +
+      'without your tick. Rows that left the sheet are reported under "In the database but not in the sheet" — ' +
+      'unticked by default, removed only if you tick them. Every printing the sheet accounts for remembers its sheet row.'),
+    statusEl,
     h('div', { class: 'row', style: 'gap:8px; flex-wrap:wrap; align-items:center' },
       urlIn, openA,
       h('button', { class: 'btn ghost small', id: 'cur-sheet-upload', onclick: () => fileIn.click() }, '⬆ Upload the downloaded CSV'),

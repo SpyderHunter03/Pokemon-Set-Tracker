@@ -1194,6 +1194,48 @@ function fail(msg) {
     nbCard && !(nbCard.variants && nbCard.variants.normal) &&
     nbCard.printings && nbCard.printings['special-stamp'] === 'Special Stamp');
 
+  // two long labels that agree on their first 24 characters must NOT share a
+  // key — the masterlist has two 2010 World Championships decks on one card
+  const wc1 = await ovH('/api/custom-variant', { cardId: 'promo-x-4', label: 'World Championships 2010 - Michael Pramawat', lang: 'en' });
+  const wc2 = await ovH('/api/custom-variant', { cardId: 'promo-x-4', label: 'World Championships 2010 - Yuta Komatsuda', lang: 'en' });
+  const wc1again = await ovH('/api/custom-variant', { cardId: 'promo-x-4', label: 'World Championships 2010 - Michael Pramawat', lang: 'en' });
+  const wcSet = await jfetch('http://localhost:3115/api/catalog/set?lang=en&id=promo-x');
+  const wcCard = (wcSet.cards || []).find((c) => c.id === 'promo-x-4');
+  check('editor: custom printings whose keys would collide get distinct keys, and the same label keeps its key',
+    wc1.key === 'world-championships-2010' && wc2.key === 'world-championships-2-2' && wc1again.key === wc1.key &&
+    wcCard && wcCard.printings[wc1.key] === 'World Championships 2010 - Michael Pramawat' && wcCard.printings[wc2.key] === 'World Championships 2010 - Yuta Komatsuda');
+
+  // ---- the masterlist mirror, at the API: fingerprints, twins, edits, gone rows ----
+  const mlRows = (rows) => ovH('/api/masterlist/sync', { lang: 'en', rows });
+  const ml1 = await mlRows([
+    { rowNo: 2, set: 'Base Set', number: '4', name: 'Charizard', variant: 'Holo', rarity: 'Rare Holo' },
+    { rowNo: 3, set: 'Base Set', number: '04', name: 'Charizard', variant: 'Holo', rarity: 'Rare Holo' },   // "04" IS "4": an exact twin
+    { rowNo: 4, set: 'Base Set', number: '58', name: 'Pikachu', variant: '' },
+  ]);
+  check('mirror API: the first sync is all new, and a zero-padded twin keeps its own (ordinal) key',
+    ml1.counts.total === 3 && ml1.counts.added === 3 && ml1.pending.length === 3 &&
+    ml1.pending[0].key !== ml1.pending[1].key && ml1.pending[1].key === ml1.pending[0].key + '#2');
+  const mlLink = await ovH('/api/masterlist/links', { lang: 'en', links: [{ key: ml1.pending[0].key, cardId: 'base1-4', variant: 'holo' }, { key: ml1.pending[1].key, cardId: 'base1-4', variant: 'holo' }] });
+  const ml2 = await mlRows([
+    { rowNo: 2, set: 'Base Set', number: '1', name: 'Alakazam', variant: 'Holo' },                        // inserted at the top
+    { rowNo: 3, set: 'Base Set', number: '4', name: 'Charizard', variant: 'Holo', rarity: 'Rare Holo' },  // moved
+    { rowNo: 4, set: 'Base Set', number: '04', name: 'Charizard', variant: 'Holo', rarity: 'Rare Holo' },  // moved
+    { rowNo: 5, set: 'Base Set', number: '58', name: 'Pikachu', variant: 'Non Holo' },                    // rewritten in place
+  ]);
+  const ml2Status = await jfetch('http://localhost:3115/api/masterlist/status?lang=en', { headers: ovAuth });
+  check('mirror API: a row inserted above moves the rest without changing them; a rewrite is an edit, not add+remove',
+    mlLink.linked === 2 && ml2.counts.added === 1 && ml2.counts.moved === 2 && ml2.counts.unchanged === 2 && ml2.counts.edited === 1 && ml2.counts.removed === 0 &&
+    ml2.edited.length === 1 && ml2.edited[0].from.variant === '' && ml2.edited[0].to.variant === 'Non Holo' &&
+    ml2.links.length === 2 && ml2.pending.every((r) => r.state !== 'unlinked' || r.key !== ml1.pending[0].key) &&
+    ml2Status.total === 5 && ml2Status.gone === 1 && ml2Status.linked === 2);
+  const ml3 = await mlRows([{ rowNo: 2, set: 'Base Set', number: '58', name: 'Pikachu', variant: 'Non Holo' }]);
+  const ml3Links = await jfetch('http://localhost:3115/api/masterlist/links?lang=en&cardId=base1-4', { headers: ovAuth });
+  check('mirror API: rows that leave are reported with their links and kept as gone — the link outlives the row',
+    ml3.counts.removed === 3 && ml3.removed.filter((r) => r.link && r.link.card_id === 'base1-4').length === 2 &&
+    ml3Links.links.length === 2 && ml3Links.links.every((l) => l.gone === true));
+  const mlNoAuth = (await fetch('http://localhost:3115/api/masterlist/status?lang=en')).status;
+  check('mirror API: the mirror is the administrator\'s alone', mlNoAuth === 401 || mlNoAuth === 403);
+
   // ---- removing printings (variants) of a card ----
   const vrCustom = await ovH('/api/variant-remove', { cardId: 'base1-4', variant: 'cosmos-holo', lang: 'en' });
   const vrSet = await jfetch('http://localhost:3115/api/catalog/set?lang=en&id=base1');

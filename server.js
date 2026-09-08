@@ -233,6 +233,42 @@ db.exec(`
   );
 `);
 
+/* The masterlist mirror: a copy of the consultant's sheet, one row per
+ * printing, kept so that an import is a diff against the LAST sheet rather
+ * than a fuzzy re-match of every row against the catalog. A row's identity is
+ * a fingerprint of its own content (set, number, name, variant, notes) — never
+ * its position — so inserting a row above it changes nothing; the row number
+ * is stored only as a pointer back into the sheet, refreshed on every sync.
+ * Rows that leave the sheet are marked gone, never deleted: the mirror keeps
+ * everything it has ever seen. Install-local; never published, never pulled. */
+db.exec(`
+  CREATE TABLE IF NOT EXISTS masterlist_rows (
+    lang       TEXT NOT NULL DEFAULT 'en',
+    key        TEXT NOT NULL,                 -- content fingerprint (+ "#n" for exact twins)
+    row_no     INTEGER NOT NULL,              -- 1-based sheet row at the last sync
+    set_name   TEXT NOT NULL,
+    number     TEXT NOT NULL,
+    name       TEXT NOT NULL,
+    variant    TEXT NOT NULL,
+    notes      TEXT NOT NULL,
+    extra      TEXT NOT NULL,                 -- the other mapped columns, JSON
+    first_seen TEXT NOT NULL,
+    last_seen  TEXT NOT NULL,
+    gone       INTEGER NOT NULL DEFAULT 0,    -- absent from the latest sheet
+    PRIMARY KEY (lang, key)
+  );
+  CREATE INDEX IF NOT EXISTS idx_mlrows_rowno ON masterlist_rows (lang, row_no);
+  -- which catalog printing a sheet row IS: the provenance every printing carries
+  CREATE TABLE IF NOT EXISTS masterlist_links (
+    lang    TEXT NOT NULL DEFAULT 'en',
+    key     TEXT NOT NULL,
+    card_id TEXT NOT NULL,
+    variant TEXT NOT NULL,
+    PRIMARY KEY (lang, key)
+  );
+  CREATE INDEX IF NOT EXISTS idx_mlinks_card ON masterlist_links (lang, card_id);
+`);
+
 /* One-shot links: verify this address, reset this password. Only the SHA-256
  * of each token is kept — the raw value exists in the email and nowhere else,
  * so a copy of the database is not a set of skeleton keys. Every one carries
@@ -425,6 +461,117 @@ const _aliasDel = db.prepare('DELETE FROM import_aliases WHERE lang = ? AND alia
 /** the same normalization the importer applies to set names: accent-folded alnum */
 function aliasKeyOf(s) {
   return String(s == null ? '' : s).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+/* ---------- the masterlist mirror ---------- */
+const _mlAll = db.prepare('SELECT key, row_no, set_name, number, name, variant, notes, extra, first_seen, last_seen, gone FROM masterlist_rows WHERE lang = ?');
+const _mlPut = db.prepare(`INSERT INTO masterlist_rows (lang, key, row_no, set_name, number, name, variant, notes, extra, first_seen, last_seen, gone)
+  VALUES (?,?,?,?,?,?,?,?,?,?,?,0)
+  ON CONFLICT(lang, key) DO UPDATE SET row_no = excluded.row_no, set_name = excluded.set_name, number = excluded.number,
+    name = excluded.name, variant = excluded.variant, notes = excluded.notes, extra = excluded.extra, last_seen = excluded.last_seen, gone = 0`);
+const _mlGone = db.prepare('UPDATE masterlist_rows SET gone = 1 WHERE lang = ? AND key = ?');
+const _mlCounts = db.prepare('SELECT COUNT(*) AS total, SUM(gone) AS gone, MAX(last_seen) AS last_seen FROM masterlist_rows WHERE lang = ?');
+const _mlLinkAll = db.prepare('SELECT key, card_id, variant FROM masterlist_links WHERE lang = ?');
+const _mlLinkPut = db.prepare(`INSERT INTO masterlist_links (lang, key, card_id, variant) VALUES (?,?,?,?)
+  ON CONFLICT(lang, key) DO UPDATE SET card_id = excluded.card_id, variant = excluded.variant`);
+const _mlLinkDel = db.prepare('DELETE FROM masterlist_links WHERE lang = ? AND key = ?');
+const _mlLinksOfCard = db.prepare(`SELECT l.key, l.variant, r.row_no, r.gone, r.variant AS sheet_variant, r.set_name
+  FROM masterlist_links l LEFT JOIN masterlist_rows r ON r.lang = l.lang AND r.key = l.key
+  WHERE l.lang = ? AND l.card_id = ? ORDER BY r.row_no`);
+const _mlLinkedCount = db.prepare('SELECT COUNT(*) AS n FROM masterlist_links WHERE lang = ?');
+
+/** A sheet row's identity: what it says, not where it sits. Leading zeros on
+ * the number are dropped ("02" is "2"); everything else is accent-folded
+ * alphanumerics, so a re-spaced or re-cased row is still the same row. */
+function masterlistKeyOf(r) {
+  const n = (v) => aliasKeyOf(v);
+  const num = n(r.number).replace(/^0+(?=[0-9])/, '');
+  const text = [n(r.set), num, n(r.name), n(r.variant), n(r.notes)].join('|');
+  return crypto.createHash('sha1').update(text).digest('hex').slice(0, 20);
+}
+
+/** Diff a freshly uploaded sheet against the mirror, then make the mirror
+ * match the sheet (rows that left are flagged gone, never deleted). Returns
+ * the rows that still need the catalog's attention, and the links that say
+ * which printing each settled row already is. */
+function masterlistSync(lang, rows) {
+  const now = new Date().toISOString();
+  const old = new Map();
+  for (const r of _mlAll.all(lang)) old.set(r.key, r);
+  const oldByRowNo = new Map();
+  for (const r of old.values()) if (!r.gone) oldByRowNo.set(r.row_no, r);
+  const links = new Map();
+  for (const l of _mlLinkAll.all(lang)) links.set(l.key, l);
+
+  // fingerprints; exact twins (same content twice) get an ordinal so both survive
+  const twins = new Map();
+  const fresh = [];
+  for (const r of rows) {
+    let key = masterlistKeyOf(r);
+    const seen = twins.get(key) || 0;
+    twins.set(key, seen + 1);
+    if (seen) key = `${key}#${seen + 1}`;
+    fresh.push({ ...r, key });
+  }
+  const freshKeys = new Set(fresh.map((r) => r.key));
+
+  const counts = { total: fresh.length, unchanged: 0, moved: 0, changed: 0, added: 0, edited: 0, removed: 0, returned: 0 };
+  const pending = [];          // rows the catalog still has to be checked against
+  const edited = [];           // { from, to } \u2014 same row number, different content
+  const rowOut = (r, state) => ({ key: r.key, rowNo: r.rowNo, set: r.set, number: r.number, name: r.name, variant: r.variant, notes: r.notes, ...(r.extra || {}), state });
+
+  // which old rows vanished \u2014 candidates for "this row was edited in place"
+  const vanished = new Set([...old.values()].filter((r) => !r.gone && !freshKeys.has(r.key)).map((r) => r.key));
+  // an edit is recognized two ways: the same card (set, number, name) with
+  // exactly one vanished row \u2014 its variant or notes were rewritten \u2014 or,
+  // failing that, the row that used to sit at this very row number is gone
+  const cardKeyOf = (set, number, name) => aliasKeyOf(set) + '|' + aliasKeyOf(number).replace(/^0+(?=[0-9])/, '') + '|' + aliasKeyOf(name);
+  const vanishedByCard = new Map();
+  for (const key of vanished) {
+    const v = old.get(key);
+    const ck = cardKeyOf(v.set_name, v.number, v.name);
+    if (!vanishedByCard.has(ck)) vanishedByCard.set(ck, []);
+    vanishedByCard.get(ck).push(v);
+  }
+
+  for (const r of fresh) {
+    const prev = old.get(r.key);
+    const extra = JSON.stringify(r.extra || {});
+    let state = null;
+    if (!prev) {
+      let there = null;
+      const sameCard = (vanishedByCard.get(cardKeyOf(r.set, r.number, r.name)) || []).filter((v) => vanished.has(v.key));
+      if (sameCard.length === 1) there = sameCard[0];
+      else { const at = oldByRowNo.get(r.rowNo); if (at && vanished.has(at.key)) there = at; }
+      if (there) {
+        vanished.delete(there.key);
+        _mlGone.run(lang, there.key);   // its old wording left the sheet too
+        counts.edited++;
+        state = 'edited';
+        edited.push({ from: { key: there.key, rowNo: there.row_no, set: there.set_name, number: there.number, name: there.name, variant: there.variant, notes: there.notes },
+          to: rowOut(r, 'edited'), link: links.get(there.key) || null });
+      } else { counts.added++; state = 'added'; }
+    } else if (prev.gone) { counts.returned++; state = links.has(r.key) ? null : 'returned'; }
+    else {
+      counts.unchanged++;
+      if (prev.row_no !== r.rowNo) counts.moved++;
+      if (prev.extra !== extra) { counts.changed++; state = 'changed'; }
+      else if (!links.has(r.key)) state = 'unlinked';
+    }
+    _mlPut.run(lang, r.key, r.rowNo, r.set, r.number, r.name, r.variant, r.notes, extra, prev ? prev.first_seen : now, now);
+    if (state) pending.push(rowOut(r, state));
+  }
+  const removed = [];
+  for (const key of vanished) {
+    const r = old.get(key);
+    _mlGone.run(lang, key);
+    counts.removed++;
+    removed.push({ key, rowNo: r.row_no, set: r.set_name, number: r.number, name: r.name, variant: r.variant, notes: r.notes, link: links.get(key) || null });
+  }
+  // links for every row that is settled: the catalog's "covered" set
+  const settled = [];
+  for (const r of fresh) { const l = links.get(r.key); if (l) settled.push([r.key, l.card_id, l.variant]); }
+  return { counts, pending, edited, removed, links: settled };
 }
 
 /** remove a personal row's image files from disk (they are per-row, never shared) */
@@ -2279,6 +2426,7 @@ const _hideCardsOfSet = db.prepare("UPDATE cards SET hidden = 1, source = 'local
 const _unhideCardsOfSet = db.prepare("UPDATE cards SET hidden = 0 WHERE lang = ? AND set_id = ? AND hidden = 1 AND source = 'local'");
 const _hiddenSets = db.prepare('SELECT id, name FROM sets WHERE lang = ? AND hidden = 1 ORDER BY position, id');
 const _allPrints = db.prepare('SELECT variant, hidden FROM printings WHERE lang = ? AND card_id = ?');
+const _allPrintLabels = db.prepare('SELECT variant, label FROM printings WHERE lang = ? AND card_id = ?');
 const _printingUnhide = db.prepare("UPDATE printings SET hidden = 0, source = 'local' WHERE lang = ? AND card_id = ? AND variant = ? AND hidden = 1");
 const _hiddenOfSet = db.prepare('SELECT id, local_id, name FROM cards WHERE lang = ? AND set_id = ? AND hidden = 1 ORDER BY position, local_id');
 const _setCardBaseImg = db.prepare("UPDATE cards SET img_low = ?, img_high = ?, source = 'local' WHERE lang = ? AND id = ?");
@@ -3489,13 +3637,83 @@ async function handleApi(req, res, pathname, ip, url) {
     if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
     const body = await readBody(req);
     const cardId = typeof body.cardId === 'string' && CARD_ID_RE.test(body.cardId) ? body.cardId : null;
-    const label = typeof body.label === 'string' ? body.label.trim().slice(0, 40) : '';
+    const label = typeof body.label === 'string' ? body.label.trim().slice(0, 80) : '';
     if (!cardId || label.length < 2) return sendJSON(res, 400, { error: 'cardId and a printing name (2+ characters) are required' });
-    const key = slugifyVariant(label);
+    let key = slugifyVariant(label);
     if (!VARIANT_KEY_RE.test(key)) return sendJSON(res, 400, { error: 'That name produces an invalid key' });
     const lang = LANG_RE.test(body.lang || '') ? body.lang : 'en';
+    // a key is 24 characters; two long labels that agree on their first 24
+    // ("World Championships 2010 - A" / "... - B") must NOT share one — the
+    // second would silently rename the first. Same label, same key, always.
+    const taken = new Map(_allPrintLabels.all(lang, cardId).map((p) => [p.variant, p.label]));
+    if (taken.has(key) && taken.get(key) !== null && taken.get(key) !== label) {
+      const stem = key.slice(0, 21);
+      let n = 2;
+      while (taken.has(`${stem}-${n}`) && taken.get(`${stem}-${n}`) !== label) n++;
+      key = `${stem}-${n}`;
+    }
     _localPrintingLabel.run(lang, cardId, key, label);
     return sendJSON(res, 200, { ok: true, cardId, key, label });
+  }
+
+  // ---- admin: the masterlist mirror — sync a sheet, read its links ----
+  if (pathname === '/api/masterlist/sync' && req.method === 'POST') {
+    if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
+    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    // a whole masterlist is tens of thousands of rows — well past the usual body cap
+    const raw = await readRawBody(req, 64 * 1024 * 1024).catch(() => null);
+    if (!raw) return sendJSON(res, 413, { error: 'That sheet is too large to sync in one go' });
+    let body;
+    try { body = JSON.parse(raw.toString('utf8')); } catch { return sendJSON(res, 400, { error: 'invalid JSON' }); }
+    const mLang = LANG_RE.test(body.lang || '') ? body.lang : 'en';
+    if (!Array.isArray(body.rows)) return sendJSON(res, 400, { error: 'rows must be an array' });
+    const str = (v) => (typeof v === 'string' ? v.trim().slice(0, 200) : '');
+    const rows = [];
+    for (const r of body.rows) {
+      if (!r || typeof r !== 'object') continue;
+      const rowNo = parseInt(r.rowNo, 10);
+      if (!(rowNo > 0)) continue;
+      const set = str(r.set), number = str(r.number), name = str(r.name);
+      if (!set && !number && !name) continue;
+      const extra = {};
+      for (const f of ['rarity', 'category', 'types', 'hp', 'illustrator', 'setsize']) if (str(r[f])) extra[f] = str(r[f]);
+      rows.push({ rowNo, set, number, name, variant: str(r.variant), notes: str(r.notes), extra });
+    }
+    // one transaction: the mirror is either the new sheet or the old one, never half
+    let result;
+    db.exec('BEGIN');
+    try { result = masterlistSync(mLang, rows); db.exec('COMMIT'); }
+    catch (e) { try { db.exec('ROLLBACK'); } catch { /* nothing to roll back */ } throw e; }
+    return sendJSON(res, 200, { ok: true, ...result });
+  }
+  if (pathname === '/api/masterlist/status' && req.method === 'GET') {
+    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    const mLang = LANG_RE.test(url.searchParams.get('lang') || '') ? url.searchParams.get('lang') : 'en';
+    const c = _mlCounts.get(mLang);
+    return sendJSON(res, 200, { total: c.total || 0, gone: c.gone || 0, linked: _mlLinkedCount.get(mLang).n, lastSync: c.last_seen || null });
+  }
+  if (pathname === '/api/masterlist/links' && req.method === 'GET') {
+    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    const mLang = LANG_RE.test(url.searchParams.get('lang') || '') ? url.searchParams.get('lang') : 'en';
+    const cardId = url.searchParams.get('cardId') || '';
+    if (!CARD_ID_RE.test(cardId)) return sendJSON(res, 400, { error: 'cardId is required' });
+    return sendJSON(res, 200, { links: _mlLinksOfCard.all(mLang, cardId).map((l) => ({ key: l.key, variant: l.variant, rowNo: l.row_no, gone: !!l.gone, sheetVariant: l.sheet_variant, sheetSet: l.set_name })) });
+  }
+  if (pathname === '/api/masterlist/links' && req.method === 'POST') {
+    if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
+    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    const body = await readBody(req);
+    const mLang = LANG_RE.test(body.lang || '') ? body.lang : 'en';
+    if (!Array.isArray(body.links)) return sendJSON(res, 400, { error: 'links must be an array of {key, cardId, variant}' });
+    let n = 0;
+    for (const l of body.links) {
+      if (!l || typeof l.key !== 'string' || !/^[0-9a-f]{20}(#\d+)?$/.test(l.key)) continue;
+      if (l.remove) { _mlLinkDel.run(mLang, l.key); n++; continue; }
+      if (typeof l.cardId !== 'string' || !CARD_ID_RE.test(l.cardId) || typeof l.variant !== 'string' || !VARIANT_KEY_RE.test(l.variant)) continue;
+      _mlLinkPut.run(mLang, l.key, l.cardId, l.variant);
+      n++;
+    }
+    return sendJSON(res, 200, { ok: true, linked: n });
   }
 
   // ---- admin: the sheet-import set matches (alias -> set), remembered ----

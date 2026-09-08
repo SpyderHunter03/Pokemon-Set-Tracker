@@ -521,6 +521,59 @@ const { chromium } = require('playwright');
   check('sheet: a ticked deletion removes exactly that printing, and the card survives',
     pika.exists && !pika.normal);
 
+  // ---- the mirror: the second sheet is a DIFF against the first ----
+  // consultant-v2.csv = the same sheet with a row inserted at the top (every
+  // row below it shifts down one), one variant rewritten in place ("Reverse
+  // Foil" -> "Reverse Holo") and one row deleted (Eevee Star Prime).
+  const mirrorBefore = await page.evaluate(async () => (await (await fetch('api/masterlist/status?lang=en')).json()));
+  check('mirror: the first upload recorded every sheet row, each linked to a printing',
+    mirrorBefore.total === 11 && mirrorBefore.linked === 11 && mirrorBefore.gone === 0);
+  await gotoCurate();
+  await page.setInputFiles('#cur-sheet-file', require('path').join(__dirname, 'fixtures', 'consultant-v2.csv'));
+  await page.waitForSelector('#cur-sheet-analyze');
+  await page.click('#cur-sheet-analyze');
+  await page.waitForSelector('#cur-sheet-apply');
+  const v2Text = await page.textContent('#cur-sheet-stage');
+  check('mirror: an inserted row shifts everything below it, and NOTHING reads as changed',
+    /Mirror: 11 rows in the sheet — 1 new, 1 edited in place, 0 with changed details, 1 left the sheet, 7 moved, 9 unchanged/.test(v2Text));
+  check('mirror: only the new row is proposed — moved rows are not re-imported',
+    (await page.textContent('#cur-sheet-totals')).includes('1 to add') && v2Text.includes('New custom printings (1)'));
+  check('mirror: a rewritten variant is shown as an edit, from -> to',
+    (await page.locator('#cur-sheet-edited').count()) === 1 && v2Text.includes('"Reverse Foil"') && v2Text.includes('"Reverse Holo"'));
+  await page.evaluate(() => document.querySelectorAll('#cur-sheet-stage details').forEach((d) => { d.open = true; }));
+  await page.waitForSelector('#cur-sheet-stage label');
+  const v2Open = await page.textContent('#cur-sheet-stage');
+  check('mirror: a deleted row names the printing it was, with the row it sat on',
+    v2Open.includes('Eevee Star Prime') && v2Open.includes('"Jumbo"') && v2Open.includes('(was row 10, "Normal")'));
+  check('mirror: the deletion is a report — unticked', (await page.locator('#cur-sheet-stage input[type=checkbox]:checked').count()) >= 1 &&
+    !(await page.locator('#cur-sheet-stage label:has-text("Eevee Star Prime") input').isChecked()));
+  await page.click('#cur-sheet-apply');
+  await page.waitForSelector('#cur-sheet-done', { timeout: 30000 });
+  const mirrorAfter = await page.evaluate(async () => {
+    const st = await (await fetch('api/masterlist/status?lang=en')).json();
+    const l9 = (await (await fetch('api/masterlist/links?lang=en&cardId=test-promos-9')).json()).links;
+    const l1 = (await (await fetch('api/masterlist/links?lang=en&cardId=test-promos-1')).json()).links;
+    const l2 = (await (await fetch('api/masterlist/links?lang=en&cardId=test-promos-2')).json()).links;
+    return { st, l9, l1, l2 };
+  });
+  check('mirror: rows that left are kept as gone, never deleted (13 on record: 11 live + the deleted row + the edit\'s old wording)',
+    mirrorAfter.st.total === 13 && mirrorAfter.st.gone === 2);
+  check('mirror: the new printing remembers its sheet row (Jumbo = row 2)',
+    mirrorAfter.l9.some((l) => l.variant === 'jumbo' && l.rowNo === 2 && !l.gone) && mirrorAfter.l9.some((l) => l.variant === 'holo' && l.rowNo === 11));
+  check('mirror: the rewritten row links to the same printing under its new wording',
+    mirrorAfter.l1.some((l) => l.variant === 'reverse' && l.sheetVariant === 'Reverse Holo' && l.rowNo === 8));
+  check('mirror: the unticked deletion keeps both its printing and its (gone) link',
+    mirrorAfter.l2.some((l) => l.variant === 'normal' && l.gone === true && l.rowNo === 10));
+  // the curator sees where a printing came from, on the card itself
+  await page.goto('http://localhost:3111/#/set/test-promos');
+  await page.waitForSelector('.tcg-card[data-card-id="test-promos-9"]');
+  await page.click('.tcg-card[data-card-id="test-promos-9"] >> nth=0 >> .info-btn');
+  await page.waitForSelector('#card-modal[open] #card-source');
+  await page.waitForFunction(() => /Masterlist row/.test(document.querySelector('#card-source').textContent));
+  check('card modal: the admin sees which masterlist row the printing is',
+    /Masterlist row 11/.test(await page.textContent('#card-source')));
+  await page.evaluate(() => document.getElementById('card-modal').close());
+
   // tidy the stage for the main suite: the consultant set proved its point —
   // hide it so the home page holds the sets the smoke checks expect
   await page.evaluate(async () => {
