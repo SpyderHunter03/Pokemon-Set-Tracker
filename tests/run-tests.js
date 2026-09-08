@@ -1235,6 +1235,26 @@ function fail(msg) {
     ml3Links.links.length === 2 && ml3Links.links.every((l) => l.gone === true));
   const mlNoAuth = (await fetch('http://localhost:3115/api/masterlist/status?lang=en')).status;
   check('mirror API: the mirror is the administrator\'s alone', mlNoAuth === 401 || mlNoAuth === 403);
+  // the review can resume from the mirror: unlinked live rows, gone rows with their links, live links
+  const mlOpen = await jfetch('http://localhost:3115/api/masterlist/rows?lang=en', { headers: ovAuth });
+  check('mirror API: /rows hands the review what is still open — unlinked rows, removed rows with links, settled links',
+    mlOpen.pending.length === 1 && mlOpen.pending[0].state === 'unlinked' && mlOpen.pending[0].variant === 'Non Holo' &&
+    mlOpen.removed.length === 2 && mlOpen.removed.every((r) => r.link && r.link.card_id === 'base1-4') && mlOpen.links.length === 0);
+  // the curator's remembered matches
+  const caPut = await ovH('/api/import-card-aliases', { lang: 'en', key: 'celebrationsclassiccollection|15|venusaur', raw: 'Celebrations (Classic Collection) #15 Venusaur', cardId: 'base1-4' });
+  const caBad = (await fetch('http://localhost:3115/api/import-card-aliases', { method: 'POST', headers: ovAuth, body: JSON.stringify({ lang: 'en', key: 'x|1|y', cardId: 'nope-1' }) })).status;
+  const caList = await jfetch('http://localhost:3115/api/import-card-aliases?lang=en', { headers: ovAuth });
+  await ovH('/api/import-card-aliases', { lang: 'en', key: 'celebrationsclassiccollection|15|venusaur', remove: true });
+  const caGone = (await jfetch('http://localhost:3115/api/import-card-aliases?lang=en', { headers: ovAuth })).aliases.length;
+  check('aliases API: a card match is remembered, must name a real card, is listed and forgettable',
+    caPut.ok === true && caBad === 404 && caList.aliases.length === 1 && caList.aliases[0].cardId === 'base1-4' && caGone === 0);
+  const vaPut = await ovH('/api/import-variant-aliases', { lang: 'en', raw: 'Energy Parallel Holo', variant: 'reverse' });
+  const vaLabel = await ovH('/api/import-variant-aliases', { lang: 'en', raw: 'Cracked Ice Foil', variant: 'label:Cracked Ice Holo' });
+  const vaBad = (await fetch('http://localhost:3115/api/import-variant-aliases', { method: 'POST', headers: ovAuth, body: JSON.stringify({ lang: 'en', raw: 'X', variant: 'not a key!' }) })).status;
+  const vaList = await jfetch('http://localhost:3115/api/import-variant-aliases?lang=en', { headers: ovAuth });
+  check('aliases API: a wording is remembered as a standard key or a catalog label, keyed by its normalized form',
+    vaPut.key === 'energyparallelholo' && vaLabel.variant === 'label:Cracked Ice Holo' && vaBad === 400 &&
+    vaList.aliases.length === 2 && vaList.aliases.some((a) => a.raw === 'Energy Parallel Holo' && a.variant === 'reverse'));
 
   // ---- removing printings (variants) of a card ----
   const vrCustom = await ovH('/api/variant-remove', { cardId: 'base1-4', variant: 'cosmos-holo', lang: 'en' });

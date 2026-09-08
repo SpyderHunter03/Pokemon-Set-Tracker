@@ -267,6 +267,25 @@ db.exec(`
     PRIMARY KEY (lang, key)
   );
   CREATE INDEX IF NOT EXISTS idx_mlinks_card ON masterlist_links (lang, card_id);
+  -- the curator's own matches, remembered: a sheet card (set, number, name)
+  -- that IS a catalog card the numbers alone would not find, and a sheet
+  -- wording for a printing that means the same standard printing everywhere
+  CREATE TABLE IF NOT EXISTS import_card_aliases (
+    lang    TEXT NOT NULL DEFAULT 'en',
+    key     TEXT NOT NULL,                    -- norm(set)|number|norm(name)
+    raw     TEXT NOT NULL,                    -- "Celebrations (Classic Collection) #15 Venusaur"
+    card_id TEXT NOT NULL,
+    created TEXT NOT NULL,
+    PRIMARY KEY (lang, key)
+  );
+  CREATE TABLE IF NOT EXISTS import_variant_aliases (
+    lang    TEXT NOT NULL DEFAULT 'en',
+    key     TEXT NOT NULL,                    -- norm(sheet variant wording)
+    raw     TEXT NOT NULL,
+    variant TEXT NOT NULL,                    -- a standard key, or "label:<catalog label>"
+    created TEXT NOT NULL,
+    PRIMARY KEY (lang, key)
+  );
 `);
 
 /* One-shot links: verify this address, reset this password. Only the SHA-256
@@ -479,6 +498,32 @@ const _mlLinksOfCard = db.prepare(`SELECT l.key, l.variant, r.row_no, r.gone, r.
   FROM masterlist_links l LEFT JOIN masterlist_rows r ON r.lang = l.lang AND r.key = l.key
   WHERE l.lang = ? AND l.card_id = ? ORDER BY r.row_no`);
 const _mlLinkedCount = db.prepare('SELECT COUNT(*) AS n FROM masterlist_links WHERE lang = ?');
+const _mlUnlinked = db.prepare(`SELECT r.key, r.row_no, r.set_name, r.number, r.name, r.variant, r.notes, r.extra
+  FROM masterlist_rows r LEFT JOIN masterlist_links l ON l.lang = r.lang AND l.key = r.key
+  WHERE r.lang = ? AND r.gone = 0 AND l.key IS NULL ORDER BY r.row_no`);
+const _mlGoneLinked = db.prepare(`SELECT r.key, r.row_no, r.set_name, r.number, r.name, r.variant, r.notes, l.card_id, l.variant AS lvariant
+  FROM masterlist_rows r JOIN masterlist_links l ON l.lang = r.lang AND l.key = r.key
+  WHERE r.lang = ? AND r.gone = 1 ORDER BY r.row_no`);
+const _mlLiveLinks = db.prepare(`SELECT l.key, l.card_id, l.variant FROM masterlist_links l
+  JOIN masterlist_rows r ON r.lang = l.lang AND r.key = l.key WHERE l.lang = ? AND r.gone = 0`);
+const _cardAliasList = db.prepare('SELECT key, raw, card_id FROM import_card_aliases WHERE lang = ? ORDER BY raw');
+const _cardAliasPut = db.prepare(`INSERT INTO import_card_aliases (lang, key, raw, card_id, created) VALUES (?,?,?,?,?)
+  ON CONFLICT(lang, key) DO UPDATE SET raw = excluded.raw, card_id = excluded.card_id`);
+const _cardAliasDel = db.prepare('DELETE FROM import_card_aliases WHERE lang = ? AND key = ?');
+const _varAliasList = db.prepare('SELECT key, raw, variant FROM import_variant_aliases WHERE lang = ? ORDER BY raw');
+const _varAliasPut = db.prepare(`INSERT INTO import_variant_aliases (lang, key, raw, variant, created) VALUES (?,?,?,?,?)
+  ON CONFLICT(lang, key) DO UPDATE SET raw = excluded.raw, variant = excluded.variant`);
+const _varAliasDel = db.prepare('DELETE FROM import_variant_aliases WHERE lang = ? AND key = ?');
+
+/** what the review still has to look at, straight from the mirror — so the
+ * set-by-set work can be picked up again without re-uploading the sheet */
+function masterlistPending(lang) {
+  const rowOut = (r, state) => ({ key: r.key, rowNo: r.row_no, set: r.set_name, number: r.number, name: r.name, variant: r.variant, notes: r.notes, ...JSON.parse(r.extra || '{}'), state });
+  const pending = _mlUnlinked.all(lang).map((r) => rowOut(r, 'unlinked'));
+  const removed = _mlGoneLinked.all(lang).map((r) => ({ key: r.key, rowNo: r.row_no, set: r.set_name, number: r.number, name: r.name, variant: r.variant, notes: r.notes, link: { card_id: r.card_id, variant: r.lvariant } }));
+  const links = _mlLiveLinks.all(lang).map((l) => [l.key, l.card_id, l.variant]);
+  return { pending, removed, links, edited: [] };
+}
 
 /** A sheet row's identity: what it says, not where it sits. Leading zeros on
  * the number are dropped ("02" is "2"); everything else is accent-folded
@@ -3685,6 +3730,49 @@ async function handleApi(req, res, pathname, ip, url) {
     try { result = masterlistSync(mLang, rows); db.exec('COMMIT'); }
     catch (e) { try { db.exec('ROLLBACK'); } catch { /* nothing to roll back */ } throw e; }
     return sendJSON(res, 200, { ok: true, ...result });
+  }
+  if (pathname === '/api/masterlist/rows' && req.method === 'GET') {
+    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    const mLang = LANG_RE.test(url.searchParams.get('lang') || '') ? url.searchParams.get('lang') : 'en';
+    return sendJSON(res, 200, { ok: true, ...masterlistPending(mLang) });
+  }
+  // ---- admin: the curator's remembered matches (cards by identity, printings by wording) ----
+  if (pathname === '/api/import-card-aliases' && req.method === 'GET') {
+    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    const aLang = LANG_RE.test(url.searchParams.get('lang') || '') ? url.searchParams.get('lang') : 'en';
+    return sendJSON(res, 200, { aliases: _cardAliasList.all(aLang).map((r) => ({ key: r.key, raw: r.raw, cardId: r.card_id })) });
+  }
+  if (pathname === '/api/import-card-aliases' && req.method === 'POST') {
+    if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
+    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    const body = await readBody(req);
+    const aLang = LANG_RE.test(body.lang || '') ? body.lang : 'en';
+    const key = typeof body.key === 'string' ? body.key.trim().slice(0, 200) : '';
+    if (!key) return sendJSON(res, 400, { error: 'key is required' });
+    if (body.remove) { _cardAliasDel.run(aLang, key); return sendJSON(res, 200, { ok: true, removed: key }); }
+    const cardId = typeof body.cardId === 'string' && CARD_ID_RE.test(body.cardId) ? body.cardId : null;
+    if (!cardId || !_cardExists.get(aLang, cardId)) return sendJSON(res, 404, { error: 'cardId must name a card in the database' });
+    _cardAliasPut.run(aLang, key, typeof body.raw === 'string' ? body.raw.slice(0, 200) : key, cardId, new Date().toISOString());
+    return sendJSON(res, 200, { ok: true, key, cardId });
+  }
+  if (pathname === '/api/import-variant-aliases' && req.method === 'GET') {
+    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    const aLang = LANG_RE.test(url.searchParams.get('lang') || '') ? url.searchParams.get('lang') : 'en';
+    return sendJSON(res, 200, { aliases: _varAliasList.all(aLang).map((r) => ({ key: r.key, raw: r.raw, variant: r.variant })) });
+  }
+  if (pathname === '/api/import-variant-aliases' && req.method === 'POST') {
+    if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
+    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    const body = await readBody(req);
+    const aLang = LANG_RE.test(body.lang || '') ? body.lang : 'en';
+    const raw = typeof body.raw === 'string' ? body.raw.trim().slice(0, 120) : '';
+    const key = aliasKeyOf(raw);
+    if (!key) return sendJSON(res, 400, { error: 'raw must be the sheet\'s wording of the printing' });
+    if (body.remove) { _varAliasDel.run(aLang, key); return sendJSON(res, 200, { ok: true, removed: key }); }
+    const variant = typeof body.variant === 'string' ? body.variant.trim().slice(0, 100) : '';
+    if (!(VARIANT_KEY_RE.test(variant) || /^label:.{2,80}$/.test(variant))) return sendJSON(res, 400, { error: 'variant must be a printing key or label:<name>' });
+    _varAliasPut.run(aLang, key, raw, variant, new Date().toISOString());
+    return sendJSON(res, 200, { ok: true, key, variant });
   }
   if (pathname === '/api/masterlist/status' && req.method === 'GET') {
     if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });

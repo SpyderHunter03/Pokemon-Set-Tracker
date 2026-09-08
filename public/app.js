@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.69.0';
+const APP_VERSION = '3.70.0';
 
 /* ============================================================
  * Storage helpers
@@ -3692,22 +3692,38 @@ function sheetImportCard(onApplied) {
    * place, rows whose details changed, rows nothing has linked yet. Every
    * other row already knows which printing it is (sync.links) and counts as
    * matched without another look. */
+  const DOT_CODE_RE = /^[A-Z0-9]{3}-[A-Z0-9]{3}-[A-Z0-9]{3}$/;   // an e-Reader dot code names a print run of the plain card
+  // trainer sub-kinds the sheet spells out; the database keeps one category for all of them
+  const TRAINER_KINDS = new Set(['item', 'supporter', 'stadium', 'tool', 'pokemontool', 'trainersu', 'trainerst', 'traineritem', 'technicalmachine', 'rockets secret machine', 'rocketssecretmachine', 'acespec']);
+  const catKey = (v) => { const n = norm(v); return TRAINER_KINDS.has(n) || n.startsWith('trainer') ? 'trainer' : n; };
+  // a rarity, as meaning: subset prefixes (GG, TG) dropped, word order folded
+  const rarityKey = (v) => tokensOf(String(v == null ? '' : v).replace(/^\s*(GG|TG|SV)\s+/i, ''));
+
   async function analyze(sync, choices) {
     const ix = await getIndex();
     const setByNorm = new Map();
     for (const st of ix.sets) { setByNorm.set(norm(st.id), st.id); setByNorm.set(norm(st.name), st.id); }
     const setNames = new Map(ix.sets.map((st) => [st.id, st.name]));
-    // matches made in earlier imports: the consultant's names for our sets
-    const aliases = new Map();
+    const setOrder = new Map(ix.sets.map((st, i) => [st.id, i]));
+    // matches made in earlier imports: the consultant's names for our sets,
+    // their cards the numbers alone would not find, their wording for our printings
+    const aliases = new Map(), cardAliases = new Map(), varAliases = new Map();
     try { for (const a of (await apiCall('import-aliases?lang=' + encodeURIComponent(lang))).aliases) aliases.set(a.alias, a.setId); } catch { /* fine */ }
+    try { for (const a of (await apiCall('import-card-aliases?lang=' + encodeURIComponent(lang))).aliases) cardAliases.set(a.key, a.cardId); } catch { /* fine */ }
+    try { for (const a of (await apiCall('import-variant-aliases?lang=' + encodeURIComponent(lang))).aliases) varAliases.set(a.key, a.variant); } catch { /* fine */ }
     const setCache = new Map();
+    const rarityCanon = new Map();      // rarityKey -> the spelling this database already uses
     const getSetCards = async (sid) => {
-      if (!setCache.has(sid)) setCache.set(sid, (await getSet(sid)).cards || []);
+      if (!setCache.has(sid)) {
+        const cards = (await getSet(sid)).cards || [];
+        setCache.set(sid, cards);
+        for (const c of cards) if (c.rarity && !rarityCanon.has(rarityKey(c.rarity))) rarityCanon.set(rarityKey(c.rarity), c.rarity);
+      }
       return setCache.get(sid);
     };
 
     const plan = { newSets: new Map(), newCards: new Map(), addVariants: [], addCustoms: [], fieldDiffs: [], problems: [], missing: [], unmatched: new Map(),
-      ignored: 0, dupes: 0, matched: 0, links: [], edited: sync.edited || [], sync: sync.counts || null };
+      ignored: 0, dupes: 0, matched: 0, links: [], edited: sync.edited || [], sync: sync.counts || null, setCards: setCache, setNames, setOrder };
     plan.existingSets = ix.sets.map((st) => ({ id: st.id, name: st.name }));
     const seen = new Set();
     // what the sheet DOES cover, so its silences can be reported too —
@@ -3726,13 +3742,14 @@ function sheetImportCard(onApplied) {
     const setSizes = new Map();         // setId -> the sheet's claimed printed size
     const rows = sync.pending || [];
     // proposals by identity, so forty thousand rows never scan a list of proposals
-    const variantProps = new Map(), customProps = new Map(), diffSeen = new Set();
+    const variantProps = new Map(), customProps = new Map(), diffSeen = new Map();
 
     // a printing's label: the sheet's variant, or variant + notes when the
     // notes are what tells two rows apart ("Play! Pokémon Logo" comes in nine
     // Prize Pack series, and only the notes column says which)
     const rowsOfCard = new Map();     // 'set|number' -> the rows for that card (a twin check must not scan the sheet)
     const cardKeyOfRow = (r) => norm(r.set) + '|' + numKey(r.number || '') + (r.number ? '' : '|' + norm(r.name));
+    const aliasKeyOfRow = (r) => norm(r.set) + '|' + numKey(r.number || '') + '|' + norm(r.name || '');
     for (const r of rows) { const k = cardKeyOfRow(r); if (!rowsOfCard.has(k)) rowsOfCard.set(k, []); rowsOfCard.get(k).push(r); }
     const labelFor = (row, card) => {
       const v = row.variant, n = row.notes;
@@ -3757,6 +3774,9 @@ function sheetImportCard(onApplied) {
 
       let sid = setByNorm.get(norm(setRaw));
       let isNewSet = false;
+      // a card the curator matched by hand is that card, whatever its numbers say
+      const aliasedCard = cardAliases.get(aliasKeyOfRow(row)) || null;
+      if (aliasedCard) sid = setIdOf(aliasedCard);
       if (!sid) {
         // the highest level first: a set name the database does not know is
         // resolved through the saved matches, this session's choices, or —
@@ -3786,9 +3806,12 @@ function sheetImportCard(onApplied) {
           continue;
         }
       }
+      // the sheet keeps the Unown letters inside Unseen Forces; the database keeps them as their own set
+      if (sid === 'ex10' && /^[A-Za-z!?]$/.test(numRaw) && setNames.has('exu')) sid = 'exu';
       if (!isNewSet) {
         coveredSets.add(sid);
-        if (row.setsize && !setSizes.has(sid)) {
+        // the set's printed size, read only off plainly numbered rows — "H1/32" is a subset, not the set
+        if (row.setsize && !setSizes.has(sid) && /^\d+$/.test(numRaw)) {
           const sz = parseInt(String(row.setsize).replace(/[^0-9]/g, ''), 10);
           if (sz > 0) setSizes.set(sid, sz);
         }
@@ -3796,27 +3819,35 @@ function sheetImportCard(onApplied) {
 
       const cards = isNewSet ? [] : await getSetCards(sid);
       let card = null;
-      if (numRaw) card = cards.find((c) => numKey(c.localId) === numKey(numRaw)) || null;
-      else {
-        // an unnumbered card (trophy cards, unnumbered energies) is found by name — when the name is unique in its set
+      if (aliasedCard) card = cards.find((c) => c.id === aliasedCard) || null;
+      if (!card && numRaw) card = cards.find((c) => numKey(c.localId) === numKey(numRaw)) || null;
+      if (!aliasedCard && nameRaw && (!card || norm(card.name) !== norm(nameRaw))) {
+        // the number found nothing, or found a different card: a set that
+        // numbers its cards by their original printings (Celebrations Classic)
+        // is told apart by name, when the name is unique in the set
         const byName = cards.filter((c) => norm(c.name) === norm(nameRaw));
-        if (byName.length === 1) card = byName[0];
-        else if (byName.length > 1) { plan.problems.push(`Row ${rowNo}: "${nameRaw}" has no number and ${byName.length} cards in ${setNames.get(sid) || sid} carry that name`); continue; }
-        else { plan.problems.push(`Row ${rowNo}: "${nameRaw}" has no number and no card by that name exists in ${setNames.get(sid) || sid} — add it in the workbench first`); continue; }
+        if (byName.length === 1 && (!card || !numRaw || byName[0] !== card)) card = byName[0];
+        else if (!numRaw) {
+          if (byName.length > 1) { plan.problems.push(`Row ${rowNo}: "${nameRaw}" has no number and ${byName.length} cards in ${setNames.get(sid) || sid} carry that name`); continue; }
+          plan.problems.push(`Row ${rowNo}: "${nameRaw}" has no number and no card by that name exists in ${setNames.get(sid) || sid} — add it in the workbench first`); continue;
+        }
       }
-      let stdKey = VSYN[norm(varRaw)] || (Object.keys(VARIANT_LABELS).find((k) => norm(VARIANT_LABELS[k]) === norm(varRaw)) || null);
+      // the curator's remembered wording first, then the built-in vocabulary
+      const va = varAliases.get(norm(varRaw)) || null;
+      let stdKey = va && !va.startsWith('label:') ? va : (VSYN[norm(varRaw)] || (Object.keys(VARIANT_LABELS).find((k) => norm(VARIANT_LABELS[k]) === norm(varRaw)) || null));
       if (card && stdKey === 'normal' && !(card.variants && card.variants.normal) && card.variants && card.variants.holo) {
         stdKey = 'holo';   // a holo-only card's plain printing IS the holo
       }
+      const isDot = DOT_CODE_RE.test(varRaw);
 
       if (!card) {
         // one proposal per new card; every row for it contributes a printing
-        const ck = sid + '|' + numKey(numRaw);
+        const ck = sid + '|' + (numRaw ? numKey(numRaw) : 'n:' + norm(nameRaw));
         if (!plan.newCards.has(ck)) {
           if (!nameRaw) { plan.problems.push(`Row ${rowNo}: new card ${sid} #${numRaw} needs a name column`); continue; }
           plan.newCards.set(ck, { set: sid, number: numRaw, name: nameRaw, rarity: row.rarity || undefined,
             category: row.category || undefined, hp: row.hp || undefined, illustrator: row.illustrator || undefined,
-            variants: {}, customs: [], rowKeys: [] });
+            variants: {}, customs: [], rowKeys: [], aliasKey: aliasKeyOfRow(row), aliasRaw: `${setRaw} #${numRaw} ${nameRaw}`, rows: [] });
         }
         const nc = plan.newCards.get(ck);
         const label = stdKey ? null : (varRaw ? labelFor(row, null) : null);
@@ -3824,6 +3855,7 @@ function sheetImportCard(onApplied) {
         else if (label) { if (!nc.customs.includes(label)) nc.customs.push(label); }
         else nc.variants.normal = true;
         nc.rowKeys.push({ key: row.key, std: stdKey || (label ? null : 'normal'), label });
+        nc.rows.push(row);
         continue;
       }
 
@@ -3831,41 +3863,61 @@ function sheetImportCard(onApplied) {
       const have = realVariants(card).filter((k) => !k.startsWith('my-'));
       const labels = card.printings || {};
       const synRaw = CUSTOM_SYN[norm(varRaw)] || null;
+      const aliasLabel = va && va.startsWith('label:') ? norm(va.slice(6)) : null;
       const label = stdKey ? null : (varRaw ? labelFor(row, card) : null);
       const hit = have.find((k) => (stdKey && k === stdKey) || norm(k) === norm(varRaw) || norm(labels[k] || '') === norm(varRaw)
         || norm(variantLabel(card, k)) === norm(varRaw)
         || (label && norm(labels[k] || '') === norm(label))
+        || (aliasLabel && norm(labels[k] || '') === aliasLabel)
         || (synRaw && (norm(k) === synRaw || norm(labels[k] || '') === synRaw)));
-      if (hit) { if (!isDupe) plan.matched++; covered.add(card.id + '|' + hit); kindsOf(sid).add(hit); wantLink(row, card.id, hit); }
-      else if (stdKey) {
-        const pk = card.id + '|' + stdKey;
-        let p = variantProps.get(pk);
-        if (!p) { p = { card, key: stdKey, label: VARIANT_LABELS[stdKey], rowKeys: [] }; variantProps.set(pk, p); plan.addVariants.push(p); }
-        p.rowKeys.push(row.key);
-        covered.add(card.id + '|' + stdKey); kindsOf(sid).add(stdKey);
-      } else if (label) {
-        const pk = card.id + '|' + norm(label);
-        let p = customProps.get(pk);
-        if (!p) { p = { card, label, rowKeys: [] }; customProps.set(pk, p); plan.addCustoms.push(p); }
-        p.rowKeys.push(row.key);
-      } else { if (!isDupe) plan.matched++; }
-
-      // mapped fields that disagree with the database go up for review
+      // mapped fields that disagree with the database go up for review — as
+      // meaning, not spelling: "GG Holo Rare" IS "Rare Holo", "Supporter" IS a Trainer
       const diffs = [];
       if (nameRaw && norm(nameRaw) !== norm(card.name)) diffs.push(['name', card.name, nameRaw]);
-      if (row.rarity && tokensOf(row.rarity) !== tokensOf(card.rarity || '')) diffs.push(['rarity', card.rarity || '(none)', row.rarity]);
-      if (row.category && norm(row.category) !== norm(card.category || '')) diffs.push(['category', card.category || '(none)', row.category]);
+      // a rarity is the card's, read off its plain or standard rows — a stamped
+      // or dot-coded reprint may wear a rarity of its own without it being a difference
+      if (row.rarity && (stdKey || !varRaw) && rarityKey(row.rarity) !== rarityKey(card.rarity || '')) {
+        diffs.push(['rarity', card.rarity || '(none)', rarityCanon.get(rarityKey(row.rarity)) || row.rarity.replace(/^\s*(GG|TG)\s+/i, '')]);
+      }
+      if (row.category && catKey(row.category) !== catKey(card.category || '')) diffs.push(['category', card.category || '(none)', row.category]);
       if (row.illustrator && norm(row.illustrator) !== norm(card.illustrator || '')) diffs.push(['illustrator', card.illustrator || '(none)', row.illustrator]);
       if (row.hp && parseInt(row.hp, 10) !== (card.hp || 0)) diffs.push(['hp', String(card.hp || 0), row.hp]);
       if (row.types) {
-        const sheetTypes = String(row.types).split(/[,;/&+]/).map((t) => t.trim()).filter(Boolean);
+        const sheetTypes = String(row.types).replace(/^dual\s+/i, '').split(/[,;/&+]/).map((t) => t.trim()).filter(Boolean);
         const dbTypes = card.types || [];
         const same = sheetTypes.length === dbTypes.length && sheetTypes.every((t) => dbTypes.some((d) => norm(d) === norm(t)));
         if (!same) diffs.push(['types', dbTypes.join(', ') || '(none)', sheetTypes.join(', ')]);
       }
+      const diffItems = [];
       for (const [f, from, to] of diffs) {
-        if (!diffSeen.has(card.id + '|' + f)) { diffSeen.add(card.id + '|' + f); plan.fieldDiffs.push({ card, field: f, from, to }); }
+        const dk = card.id + '|' + f;
+        let d = diffSeen.get(dk);
+        if (!d) { d = { card, field: f, from, to, set: sid, rowKeys: [] }; diffSeen.set(dk, d); plan.fieldDiffs.push(d); }
+        diffItems.push(d);
       }
+
+      // a dot-code row is the plain card, one print run of it: the plain printing is spoken for
+      if (isDot && have.includes('normal')) { covered.add(card.id + '|normal'); kindsOf(sid).add('normal'); }
+      if (hit) {
+        if (!isDupe) plan.matched++;
+        covered.add(card.id + '|' + hit); kindsOf(sid).add(hit);
+        // a row that disagrees with its card is not settled until the curator
+        // has ruled on the difference — the link waits with the decision
+        if (diffItems.length) for (const d of diffItems) d.rowKeys.push({ key: row.key, cardId: card.id, variant: hit });
+        else wantLink(row, card.id, hit);
+      }
+      else if (stdKey) {
+        const pk = card.id + '|' + stdKey;
+        let p = variantProps.get(pk);
+        if (!p) { p = { card, key: stdKey, label: VARIANT_LABELS[stdKey], rowKeys: [], rows: [], set: sid }; variantProps.set(pk, p); plan.addVariants.push(p); }
+        p.rowKeys.push(row.key); p.rows.push(row);
+        covered.add(card.id + '|' + stdKey); kindsOf(sid).add(stdKey);
+      } else if (label) {
+        const pk = card.id + '|' + norm(label);
+        let p = customProps.get(pk);
+        if (!p) { p = { card, label, rowKeys: [], rows: [], set: sid }; customProps.set(pk, p); plan.addCustoms.push(p); }
+        p.rowKeys.push(row.key); p.rows.push(row);
+      } else { if (!isDupe) plan.matched++; }
     }
 
     // rows that LEFT the sheet and were linked to a printing: the exact
@@ -3879,7 +3931,7 @@ function sheetImportCard(onApplied) {
       if (!keys.includes(r.link.variant)) continue;   // already gone from the catalog
       if (covered.has(card.id + '|' + r.link.variant)) continue;   // another row still carries it
       if (!plan.missing.some((m) => m.card.id === card.id && (m.whole || m.key === r.link.variant))) {
-        plan.missing.push({ card, key: r.link.variant, label: variantLabel(card, r.link.variant), rowNo: r.rowNo, sheetVariant: r.variant });
+        plan.missing.push({ card, key: r.link.variant, label: variantLabel(card, r.link.variant), rowNo: r.rowNo, sheetVariant: r.variant, set: sid });
       }
     }
     // the sheet's silences: database printings the sheet no longer carries.
@@ -3898,9 +3950,9 @@ function sheetImportCard(onApplied) {
         if (absent.length === keys.length) {
           const exact = plan.missing.find((m) => m.card.id === card.id && m.rowNo);
           plan.missing = plan.missing.filter((m) => m.card.id !== card.id);
-          plan.missing.push({ card, whole: true, rowNo: exact && exact.rowNo, sheetVariant: exact && exact.sheetVariant });
+          plan.missing.push({ card, whole: true, rowNo: exact && exact.rowNo, sheetVariant: exact && exact.sheetVariant, set: sid });
         } else {
-          for (const k of absent) if (!plan.missing.some((m) => m.card.id === card.id && (m.whole || m.key === k))) plan.missing.push({ card, key: k, label: variantLabel(card, k) });
+          for (const k of absent) if (!plan.missing.some((m) => m.card.id === card.id && (m.whole || m.key === k))) plan.missing.push({ card, key: k, label: variantLabel(card, k), set: sid });
         }
       }
     }
@@ -3913,7 +3965,6 @@ function sheetImportCard(onApplied) {
       }
     }
     for (const ns of plan.newSets.values()) setNames.set(ns.id, ns.name);
-    plan.setNames = setNames;
     return plan;
   }
 
@@ -3925,40 +3976,26 @@ function sheetImportCard(onApplied) {
     }
   }
 
-  let _rerun = null;       // re-run the current analysis (after a set match)
+  let _rerun = null;       // re-run the current analysis (after a set match, after an apply)
   let _choices = null;     // this upload's create-as-new-set decisions
+  let _openSet = null;     // the set whose cards are on screen, kept across re-runs
 
+  /* The review is set by set. A real sheet is a thousand decisions; nobody
+   * takes them as one list. Each set shows what is settled, what the sheet
+   * proposes, and what the database has that the sheet does not — card by
+   * card, with the database's printings beside the sheet's rows — and the
+   * curator decides every proposal three ways: add it, say which existing
+   * printing it already IS (remembered, so the same wording never asks
+   * twice), or ignore it. Apply is per set; the list ticks off as you go. */
   function renderPlan(plan) {
-    /* A real sheet is a hundred rows per set: the review must stay one screen
-     * tall until asked. Everything renders as collapsed groups — per set, per
-     * category — with a tick-all box in each summary. Tick state lives on the
-     * data (not the DOM), so a group can be accepted without ever opening it,
-     * and detail rows only render on first expand. */
-    const items = [];                        // { it, tag, on }
-    const groups = new Map();                // groupTitle -> [ { title, tag, defaultOn, entries: [{item, text}] } ]
-    const addEntry = (groupTitle, catTitle, tag, defaultOn, it, text) => {
-      if (!groups.has(groupTitle)) groups.set(groupTitle, []);
-      let cat = groups.get(groupTitle).find((c) => c.title === catTitle);
-      if (!cat) { cat = { title: catTitle, tag, defaultOn, entries: [] }; groups.get(groupTitle).push(cat); }
-      const item = { it, tag, on: defaultOn };
-      items.push(item);
-      cat.entries.push({ item, text });
-    };
+    const items = [];                        // every decision, with its choice
     const nameOf = (sid) => (plan.setNames && plan.setNames.get(sid)) || sid;
-
-    for (const x of plan.newSets.values()) addEntry('New sets', 'New sets', 'set', true, x, `${x.name} (${x.id})`);
-    for (const x of plan.newCards.values()) {
-      const pr = [...Object.keys(x.variants).map((k) => VARIANT_LABELS[k] || k), ...x.customs];
-      addEntry(nameOf(x.set), 'New cards', 'card', true, x, `#${x.number} — ${x.name}${pr.length ? ' · ' + pr.join(', ') : ''}`);
-    }
-    for (const x of plan.addVariants) addEntry(nameOf(setIdOf(x.card.id)), 'New printings', 'variant', true, x, `${x.card.name} (${x.card.id}) — ${x.label}`);
-    for (const x of plan.addCustoms) addEntry(nameOf(setIdOf(x.card.id)), 'New custom printings', 'custom', true, x, `${x.card.name} (${x.card.id}) — "${x.label}"`);
-    for (const x of plan.fieldDiffs) addEntry(nameOf(setIdOf(x.card.id)), 'Field differences', 'diff', true, x, `${x.card.name} (${x.card.id}) ${x.field}: "${x.from}" → "${x.to}"`);
-    // deletions start UNTICKED, always: a report first, a removal only by choice
-    for (const x of plan.missing) addEntry(nameOf(setIdOf(x.card.id)), 'In the database but not in the sheet', 'missing', false, x,
-      x.whole
-        ? `${x.card.name} (${x.card.id}) — the whole card is absent from the sheet${x.rowNo ? ` (was row ${x.rowNo}, "${x.sheetVariant}")` : ''} (tick to hide it)`
-        : `${x.card.name} (${x.card.id}) — ${x.label} is absent from the sheet${x.rowNo ? ` (was row ${x.rowNo}, "${x.sheetVariant}")` : ''} (tick to remove the printing)`);
+    const add = (kind, setId, cardId, it, extra) => { const item = { kind, setId, cardId, it, ...extra }; items.push(item); return item; };
+    for (const x of plan.newCards.values()) add('card', x.set, null, x, { mode: 'add', target: '' });
+    for (const x of plan.addVariants) add('variant', x.set, x.card.id, x, { mode: 'add', target: '', remember: false });
+    for (const x of plan.addCustoms) add('custom', x.set, x.card.id, x, { mode: 'add', target: '', remember: false });
+    for (const x of plan.fieldDiffs) add('diff', x.set, x.card.id, x, { mode: 'write' });
+    for (const x of plan.missing) add('missing', x.set, x.card.id, x, { mode: 'keep' });
 
     const notes = [];
     if (plan.matched) notes.push(`${plan.matched} row(s) already match the database — nothing to do for them.`);
@@ -3968,7 +4005,6 @@ function sheetImportCard(onApplied) {
     }
     if (plan.dupes) notes.push(`${plan.dupes} duplicate row(s) in the sheet were collapsed.`);
     for (const p of plan.problems) notes.push('⚠ ' + p);
-
     if (plan.ignored) notes.push(`${plan.ignored} row(s) ignored via saved matches.`);
 
     // the highest level first: sheet sets nobody has matched yet
@@ -4003,7 +4039,6 @@ function sheetImportCard(onApplied) {
         ...rows);
       notes.push(`⚠ Rows from ${plan.unmatched.size} unmatched sheet set(s) are not part of this review yet.`);
     }
-
     // rows the consultant rewrote in place: shown so the review reads right,
     // never acted on directly — the new wording is checked like any new row
     const editedEl = plan.edited.length ? h('details', { id: 'cur-sheet-edited', class: 'cur-cat', style: 'margin-top:8px' },
@@ -4011,144 +4046,246 @@ function sheetImportCard(onApplied) {
       h('div', { style: 'margin:4px 0 4px 22px' }, ...plan.edited.slice(0, 300).map((e) =>
         h('div', { class: 'muted small', style: 'margin:3px 0' },
           `Row ${e.to.rowNo}: ${e.from.set} #${e.from.number} ${e.from.name} "${e.from.variant}"${e.from.notes ? ` (${e.from.notes})` : ''} → ${e.to.set} #${e.to.number} ${e.to.name} "${e.to.variant}"${e.to.notes ? ` (${e.to.notes})` : ''}`)))) : null;
+
     const adds = plan.newSets.size + plan.newCards.size + plan.addVariants.length + plan.addCustoms.length;
+    const totals = h('p', { id: 'cur-sheet-totals', style: 'margin:10px 0 0' },
+      `${adds} to add · ${plan.fieldDiffs.length} field difference(s) · ${plan.missing.length} absent from the sheet · ${plan.matched} matched`);
+    const onlyAbsent = items.length > 0 && items.every((x) => x.kind === 'missing');
     if (!items.length && !plan.unmatched.size) {
       stage.replaceChildren(
         h('p', { id: 'cur-sheet-clean', style: 'margin:10px 0 0' }, '✅ Nothing to import — the database already matches the sheet.'),
+        totals,
         ...(editedEl ? [editedEl] : []),
         ...notes.map((n) => h('p', { class: 'muted small', style: 'margin:4px 0 0' }, n)));
       return;
     }
 
-    const applyBtn = h('button', { class: 'btn small', id: 'cur-sheet-apply', style: 'margin-top:12px' }, 'Apply');
-    const progress = h('p', { class: 'muted small', style: 'margin:6px 0 0' });
-    const updateApply = () => {
-      const n = items.filter((x) => x.on).length;
-      applyBtn.textContent = `Apply ${n} ticked change(s)`;
+    // ---- the set list: one line per set, three counts, ticked off as sets are settled ----
+    const bySet = new Map();
+    for (const it of items) { if (!bySet.has(it.setId)) bySet.set(it.setId, []); bySet.get(it.setId).push(it); }
+    const setIds = [...bySet.keys()].sort((a, b) => {
+      const oa = plan.setOrder.has(a) ? plan.setOrder.get(a) : 1e9, ob = plan.setOrder.has(b) ? plan.setOrder.get(b) : 1e9;
+      return oa - ob || String(a).localeCompare(String(b));
+    });
+    const isNew = (sid) => [...plan.newSets.values()].some((ns) => ns.id === sid);
+    const listEl = h('div', { id: 'cur-sheet-sets', style: 'margin-top:10px' });
+    const detailEl = h('div', { id: 'cur-set-detail', hidden: '' });
+    const renderList = () => {
+      listEl.replaceChildren(
+        h('h4', { class: 'muted small', style: 'margin:0 0 4px' }, `Sets with something to decide (${setIds.length})`),
+        ...setIds.map((sid) => {
+          const its = bySet.get(sid);
+          const decide = its.filter((x) => x.kind !== 'missing' && x.kind !== 'diff').length;
+          const diffs = its.filter((x) => x.kind === 'diff').length;
+          const absent = its.filter((x) => x.kind === 'missing').length;
+          const bits = [];
+          if (decide) bits.push(`${decide} to decide`);
+          if (diffs) bits.push(`${diffs} field difference(s)`);
+          if (absent) bits.push(`${absent} absent from the sheet`);
+          return h('button', { type: 'button', class: 'btn ghost small cur-set-row', 'data-set': sid, style: 'display:block; width:100%; text-align:left; margin:2px 0',
+            onclick: () => openSet(sid) },
+            `${nameOf(sid)}${isNew(sid) ? ' (new set)' : ''} — ${bits.join(' · ')}`);
+        }));
     };
 
-    const catBlocks = [];
-    const catBlock = (cat) => {
-      const groupCb = h('input', { type: 'checkbox' });
-      groupCb.checked = cat.defaultOn;
-      groupCb.addEventListener('click', (e) => e.stopPropagation());
-      const body = h('div', { style: 'margin:4px 0 4px 22px' });
-      let rowCbs = null;
-      const renderRows = () => {
-        rowCbs = [];
-        const rowOf = ({ item, text }) => {
-          const cb = h('input', { type: 'checkbox' });
-          cb.checked = item.on;
-          cb.addEventListener('change', () => { item.on = cb.checked; syncGroup(); updateApply(); });
-          rowCbs.push({ cb, item });
-          return h('label', { class: 'row', style: 'gap:8px; align-items:center; margin:3px 0; cursor:pointer' }, cb, h('span', {}, text));
-        };
-        const CHUNK = 150;
-        body.replaceChildren(...cat.entries.slice(0, CHUNK).map(rowOf));
-        if (cat.entries.length > CHUNK) {
-          const more = h('button', { class: 'btn ghost small', style: 'margin-top:6px' }, `Show all ${cat.entries.length}`);
-          more.addEventListener('click', () => { body.replaceChildren(...cat.entries.map(rowOf)); syncGroup(); });
-          body.append(more);
+    // ---- one set: every card with a decision, the database's printings beside the sheet's rows ----
+    const openSet = (sid) => {
+      _openSet = sid;
+      const its = bySet.get(sid) || [];
+      const cards = plan.setCards.get(sid) || [];
+      const byCard = new Map();
+      for (const it of its) {
+        const ck = it.cardId || ('new:' + (it.it.number || it.it.name));
+        if (!byCard.has(ck)) byCard.set(ck, []);
+        byCard.get(ck).push(it);
+      }
+      const cardOf = (id) => cards.find((c) => c.id === id);
+      const ord = (ck) => { const c = cardOf(ck); return c ? numericLocalId(c.localId) : numericLocalId((byCard.get(ck)[0].it.number || '')); };
+      const cardKeys = [...byCard.keys()].sort((a, b) => (ord(a) - ord(b)) || String(a).localeCompare(String(b)));
+      const updateApply = () => {
+        const n = its.filter((x) => x.kind === 'diff' ? x.mode !== 'later' : x.kind === 'missing' ? x.mode !== 'keep' : x.mode !== 'ignore').length;
+        applyBtn.textContent = `Apply this set (${n} change${n === 1 ? '' : 's'})`;
+      };
+      const applyBtn = h('button', { type: 'button', class: 'btn small', id: 'cur-set-apply', style: 'margin-top:12px' }, 'Apply');
+      const progress = h('p', { class: 'muted small', style: 'margin:6px 0 0' });
+      applyBtn.addEventListener('click', () => applySet(sid, its, applyBtn, progress));
+
+      // the sheet's rows behind one proposal, for the curator's eyes
+      const rowsText = (rs) => rs && rs.length ? ` · sheet row${rs.length > 1 ? 's' : ''} ${rs.map((r) => r.rowNo).join(', ')}${rs[0].notes ? ` (${rs[0].notes})` : ''}` : '';
+      const itemEl = (it) => {
+        const rk0 = it.it.rowKeys && it.it.rowKeys[0];
+        const wrap = h('div', { class: 'cur-item', 'data-kind': it.kind, 'data-key': rk0 ? (rk0.key || rk0) : (it.it.card ? it.it.card.id + '|' + (it.it.key || it.it.field || it.it.label || '') : ''), style: 'margin:3px 0' });
+        if (it.kind === 'diff') {
+          const sel = h('select', { class: 'chip cur-choice' },
+            h('option', { value: 'write' }, `Write "${it.it.to}"`),
+            h('option', { value: 'keep' }, `Keep ours ("${it.it.from}")`),
+            h('option', { value: 'later' }, 'Decide later'));
+          sel.value = it.mode;
+          sel.addEventListener('change', () => { it.mode = sel.value; updateApply(); });
+          wrap.append(h('div', { class: 'row', style: 'gap:8px; align-items:center; flex-wrap:wrap' },
+            h('span', {}, `${it.it.field}: "${it.it.from}" → "${it.it.to}"`), sel));
+          return wrap;
         }
+        if (it.kind === 'missing') {
+          const sel = h('select', { class: 'chip cur-choice' },
+            h('option', { value: 'keep' }, 'Keep it (the sheet just does not list it)'),
+            h('option', { value: 'remove' }, it.it.whole ? 'Hide the whole card' : `Remove ${it.it.label}`));
+          sel.value = it.mode;
+          sel.addEventListener('change', () => { it.mode = sel.value; updateApply(); });
+          wrap.append(h('div', { class: 'row', style: 'gap:8px; align-items:center; flex-wrap:wrap' },
+            h('span', {}, it.it.whole ? `the whole card is absent from the sheet${it.it.rowNo ? ` (was row ${it.it.rowNo}, "${it.it.sheetVariant}")` : ''}` : `${it.it.label} is absent from the sheet${it.it.rowNo ? ` (was row ${it.it.rowNo}, "${it.it.sheetVariant}")` : ''}`), sel));
+          return wrap;
+        }
+        if (it.kind === 'card') {
+          const x = it.it;
+          const pr = [...Object.keys(x.variants).map((k) => VARIANT_LABELS[k] || k), ...x.customs];
+          const sel = h('select', { class: 'chip cur-choice' },
+            h('option', { value: 'add' }, 'Add as a new card'),
+            h('option', { value: 'ignore' }, 'Ignore'),
+            ...cards.map((c) => h('option', { value: 'match:' + c.id }, `This is → #${c.localId} ${c.name}`)));
+          sel.value = it.mode === 'match' ? 'match:' + it.target : it.mode;
+          sel.addEventListener('change', () => {
+            if (sel.value.startsWith('match:')) { it.mode = 'match'; it.target = sel.value.slice(6); } else { it.mode = sel.value; it.target = ''; }
+            updateApply();
+          });
+          wrap.append(h('div', { class: 'row', style: 'gap:8px; align-items:center; flex-wrap:wrap' },
+            h('span', {}, `New card: #${x.number || '(no number)'} ${x.name}${pr.length ? ' · ' + pr.join(', ') : ''}${rowsText(x.rows)}`), sel));
+          return wrap;
+        }
+        // a printing proposal: add it, say which existing printing it is, or ignore it
+        const x = it.it;
+        const have = realVariants(x.card).filter((k) => !k.startsWith('my-'));
+        const sel = h('select', { class: 'chip cur-choice' },
+          h('option', { value: 'add' }, it.kind === 'variant' ? `Add ${x.label}` : `Add custom printing "${x.label}"`),
+          h('option', { value: 'ignore' }, 'Ignore'),
+          ...have.map((k) => h('option', { value: 'match:' + k }, `This is → ${variantLabel(x.card, k)}`)));
+        const remember = h('input', { type: 'checkbox', class: 'cur-remember' });
+        remember.checked = it.remember;
+        remember.addEventListener('change', () => { it.remember = remember.checked; });
+        const rememberLbl = h('label', { class: 'row muted small', style: 'gap:4px; align-items:center; cursor:pointer' }, remember, 'remember for every card');
+        rememberLbl.hidden = it.mode !== 'match';
+        sel.value = it.mode === 'match' ? 'match:' + it.target : it.mode;
+        sel.addEventListener('change', () => {
+          if (sel.value.startsWith('match:')) { it.mode = 'match'; it.target = sel.value.slice(6); } else { it.mode = sel.value; it.target = ''; }
+          rememberLbl.hidden = it.mode !== 'match';
+          updateApply();
+        });
+        wrap.append(h('div', { class: 'row', style: 'gap:8px; align-items:center; flex-wrap:wrap' },
+          h('span', {}, `Sheet says "${x.rows && x.rows[0] ? x.rows[0].variant || '(plain)' : x.label}"${rowsText(x.rows)}`), sel, rememberLbl));
+        return wrap;
       };
-      const syncGroup = () => {
-        const on = cat.entries.filter((e) => e.item.on).length;
-        groupCb.checked = on === cat.entries.length && on > 0;
-        groupCb.indeterminate = on > 0 && on < cat.entries.length;
-      };
-      groupCb.addEventListener('change', () => {
-        for (const e of cat.entries) e.item.on = groupCb.checked;
-        if (rowCbs) for (const r of rowCbs) r.cb.checked = r.item.on;
-        updateApply();
+      const cardBlocks = cardKeys.map((ck) => {
+        const c = cardOf(ck);
+        const its2 = byCard.get(ck);
+        const title = c ? `#${c.localId} ${c.name}` : `#${its2[0].it.number || '—'} ${its2[0].it.name} (not in the database)`;
+        const have = c ? realVariants(c).filter((k) => !k.startsWith('my-')).map((k) => variantLabel(c, k)) : [];
+        return h('div', { class: 'cur-card', 'data-card': c ? c.id : '', style: 'margin:10px 0; padding:8px 10px; border:1px solid var(--border); border-radius:var(--radius)' },
+          h('div', { style: 'font-weight:600' }, title),
+          c ? h('div', { class: 'muted small', style: 'margin:2px 0 4px' }, `Database has: ${have.join(', ') || '(no printings)'}`) : null,
+          ...its2.map(itemEl));
       });
-      const det = h('details', { class: 'cur-cat' },
-        h('summary', { style: 'cursor:pointer; margin:4px 0' }, groupCb, ` ${cat.title} (${cat.entries.length})`),
-        body);
-      det.addEventListener('toggle', () => { if (det.open && !body.children.length) renderRows(); });
-      catBlocks.push(det);
-      return det;
+      detailEl.replaceChildren(
+        h('div', { class: 'row', style: 'gap:10px; align-items:center; margin-top:10px' },
+          h('button', { type: 'button', class: 'btn ghost small', id: 'cur-set-back', onclick: () => { _openSet = null; detailEl.hidden = true; listEl.hidden = false; } }, '← All sets'),
+          h('h4', { style: 'margin:0' }, `${nameOf(sid)}${isNew(sid) ? ' (new set — created when applied)' : ''}`)),
+        h('p', { class: 'muted small', style: 'margin:4px 0 0' }, `${cardKeys.length} card(s) with something to decide. Each proposal: add it, say which existing printing it already is, or ignore it.`),
+        ...cardBlocks,
+        applyBtn, progress);
+      updateApply();
+      listEl.hidden = true;
+      detailEl.hidden = false;
     };
 
-    const groupEls = [];
-    for (const [title, cats] of groups) {
-      groupEls.push(h('div', { style: 'margin-top:12px' },
-        h('h4', { class: 'muted small', style: 'margin:0 0 2px' }, title),
-        ...cats.map(catBlock)));
-    }
-
-    const totals = h('p', { id: 'cur-sheet-totals', style: 'margin:10px 0 0' },
-      `${adds} to add · ${plan.fieldDiffs.length} field difference(s) · ${plan.missing.length} absent from the sheet · ${plan.matched} matched`);
-
-    applyBtn.addEventListener('click', async () => {
-      const todo = items.filter((x) => x.on);
-      if (!todo.length) { toast('Nothing ticked'); return; }
+    // ---- apply one set: creates, matches (links + remembered aliases), diffs, removals ----
+    const applySet = async (sid, its, applyBtn, progress) => {
       applyBtn.disabled = true;
       let done = 0, failed = 0;
-      const links = [];
+      const todo = its.filter((x) => x.kind === 'diff' ? x.mode !== 'later' : x.kind === 'missing' ? x.mode !== 'keep' : x.mode !== 'ignore');
       const step = (label) => { progress.textContent = `${done + failed + 1} / ${todo.length} — ${label}`; };
-      const byTag = (t) => todo.filter((b) => b.tag === t);
+      const links = [];
+      const ns = [...plan.newSets.values()].find((n) => n.id === sid);
       try {
-        for (const b of byTag('set')) {
-          step('set ' + b.it.name);
-          try {
-            await apiCall('set-create', { method: 'POST', body: JSON.stringify({ lang, id: b.it.id, name: b.it.name }) });
-            done++;
-          } catch (e) { failed++; toast(e.message); }
+        if (ns && todo.some((x) => x.mode === 'add')) {
+          step('set ' + ns.name);
+          try { await apiCall('set-create', { method: 'POST', body: JSON.stringify({ lang, id: ns.id, name: ns.name }) }); } catch (e) { if (!/exists/i.test(e.message)) { failed++; toast(e.message); } }
         }
-        for (const b of byTag('card')) {
-          step('card ' + b.it.name);
+        for (const b of todo.filter((x) => x.kind === 'card')) {
+          const x = b.it;
+          if (b.mode === 'match') {
+            step('match ' + x.name);
+            try {
+              await apiCall('import-card-aliases', { method: 'POST', body: JSON.stringify({ lang, key: x.aliasKey, raw: x.aliasRaw, cardId: b.target }) });
+              done++;
+            } catch (e) { failed++; toast(e.message); }
+            continue;
+          }
+          step('card ' + x.name);
           try {
-            const body = { new: true, lang, set: b.it.set, localId: b.it.number, name: b.it.name, variants: b.it.variants };
-            if (b.it.rarity) body.rarity = b.it.rarity;
-            if (b.it.category) body.category = b.it.category;
-            if (b.it.hp) body.hp = parseInt(b.it.hp, 10);
-            if (b.it.illustrator) body.illustrator = b.it.illustrator;
+            const body = { new: true, lang, set: x.set, localId: x.number, name: x.name, variants: x.variants };
+            if (x.rarity) body.rarity = x.rarity;
+            if (x.category) body.category = x.category;
+            if (x.hp) body.hp = parseInt(x.hp, 10);
+            if (x.illustrator) body.illustrator = x.illustrator;
             await apiCall('card', { method: 'POST', body: JSON.stringify(body) });
-            const newId = `${b.it.set}-${b.it.number}`.replace(/\s+/g, '');
+            const newId = `${x.set}-${x.number}`.replace(/\s+/g, '');
             const customKey = new Map();
-            for (const label of b.it.customs) {
+            for (const label of x.customs) {
               const r = await apiCall('custom-variant', { method: 'POST', body: JSON.stringify({ cardId: newId, label, lang }) });
               customKey.set(label, r.key);
             }
-            for (const rk of (b.it.rowKeys || [])) {
+            for (const rk of (x.rowKeys || [])) {
               const vk = rk.std || customKey.get(rk.label);
               if (vk) links.push({ key: rk.key, cardId: newId, variant: vk });
             }
             done++;
           } catch (e) { failed++; toast(e.message); }
         }
-        for (const b of byTag('variant')) {
-          step(b.it.card.name + ' ' + b.it.label);
+        for (const b of todo.filter((x) => x.kind === 'variant' || x.kind === 'custom')) {
+          const x = b.it;
+          if (b.mode === 'match') {
+            step(x.card.name + ' is ' + variantLabel(x.card, b.target));
+            try {
+              for (const k of (x.rowKeys || [])) links.push({ key: k, cardId: x.card.id, variant: b.target });
+              if (b.remember && x.rows && x.rows[0] && x.rows[0].variant) {
+                const std = VARIANT_LABELS[b.target] ? b.target : 'label:' + variantLabel(x.card, b.target);
+                await apiCall('import-variant-aliases', { method: 'POST', body: JSON.stringify({ lang, raw: x.rows[0].variant, variant: std }) });
+              }
+              done++;
+            } catch (e) { failed++; toast(e.message); }
+            continue;
+          }
+          step(x.card.name + ' ' + x.label);
           try {
-            const fresh = await getCard(b.it.card.id);
-            const variants = {};
-            for (const k of realVariants(fresh).filter((x) => !x.startsWith('my-'))) variants[k] = true;
-            variants[b.it.key] = true;
-            await apiCall('card', { method: 'POST', body: JSON.stringify({ lang, cardId: b.it.card.id, variants }) });
-            for (const k of (b.it.rowKeys || [])) links.push({ key: k, cardId: b.it.card.id, variant: b.it.key });
+            if (b.kind === 'variant') {
+              const fresh = await getCard(x.card.id);
+              const variants = {};
+              for (const k of realVariants(fresh).filter((v) => !v.startsWith('my-'))) variants[k] = true;
+              variants[x.key] = true;
+              await apiCall('card', { method: 'POST', body: JSON.stringify({ lang, cardId: x.card.id, variants }) });
+              for (const k of (x.rowKeys || [])) links.push({ key: k, cardId: x.card.id, variant: x.key });
+            } else {
+              const r = await apiCall('custom-variant', { method: 'POST', body: JSON.stringify({ cardId: x.card.id, label: x.label, lang }) });
+              for (const k of (x.rowKeys || [])) links.push({ key: k, cardId: x.card.id, variant: r.key });
+            }
             done++;
           } catch (e) { failed++; toast(e.message); }
         }
-        for (const b of byTag('custom')) {
-          step(b.it.card.name + ' "' + b.it.label + '"');
-          try {
-            const r = await apiCall('custom-variant', { method: 'POST', body: JSON.stringify({ cardId: b.it.card.id, label: b.it.label, lang }) });
-            for (const k of (b.it.rowKeys || [])) links.push({ key: k, cardId: b.it.card.id, variant: r.key });
-            done++;
-          } catch (e) { failed++; toast(e.message); }
-        }
-        for (const b of byTag('diff')) {
+        for (const b of todo.filter((x) => x.kind === 'diff')) {
           step(b.it.card.name + ' ' + b.it.field);
           try {
-            const body = { lang, cardId: b.it.card.id };
-            if (b.it.field === 'types') body.types = b.it.to.split(/[,;/&+]/).map((t) => t.trim()).filter(Boolean);
-            else body[b.it.field] = b.it.field === 'hp' ? parseInt(b.it.to, 10) : b.it.to;
-            await apiCall('card', { method: 'POST', body: JSON.stringify(body) });
+            if (b.mode === 'write') {
+              const body = { lang, cardId: b.it.card.id };
+              if (b.it.field === 'types') body.types = b.it.to.split(/[,;/&+]/).map((t) => t.trim()).filter(Boolean);
+              else body[b.it.field] = b.it.field === 'hp' ? parseInt(b.it.to, 10) : b.it.to;
+              await apiCall('card', { method: 'POST', body: JSON.stringify(body) });
+            }
+            // ruled either way, the rows that raised it are settled
+            for (const rk of (b.it.rowKeys || [])) links.push(rk);
             done++;
           } catch (e) { failed++; toast(e.message); }
         }
-        // removals go last, and only ever by explicit tick
-        for (const b of byTag('missing')) {
+        // removals go last, and only ever by explicit choice
+        for (const b of todo.filter((x) => x.kind === 'missing')) {
           step('remove ' + b.it.card.name + (b.it.whole ? '' : ' ' + b.it.label));
           try {
             if (b.it.whole) await apiCall('card-hide', { method: 'POST', body: JSON.stringify({ cardId: b.it.card.id, hidden: true, lang }) });
@@ -4160,20 +4297,56 @@ function sheetImportCard(onApplied) {
       } finally {
         clearDataCaches();
         progress.textContent = '';
-        stage.replaceChildren(h('p', { id: 'cur-sheet-done', style: 'margin:10px 0 0' },
-          `✅ Applied ${done} change(s)${failed ? ` — ${failed} failed (see toasts)` : ''}. Upload the sheet again to verify it comes back clean.`));
+        toast(`${nameOf(sid)}: applied ${done} change(s)${failed ? `, ${failed} failed` : ''}`);
         if (onApplied) onApplied();
+        // the set re-reads itself from the mirror: what was decided is gone, what remains stays
+        if (_rerun) await _rerun();
+        stage.dataset.applied = String(parseInt(stage.dataset.applied || '0', 10) + 1);
       }
-    });
-    updateApply();
+    };
+
+    renderList();
     stage.replaceChildren(
-      ...(adds || plan.fieldDiffs.length || plan.unmatched.size ? [] : [h('p', { id: 'cur-sheet-clean', style: 'margin:10px 0 0' }, '✅ Nothing to import — the database already matches the sheet.')]),
       ...(matchEl ? [matchEl] : []),
+      ...(onlyAbsent && !plan.unmatched.size ? [h('p', { id: 'cur-sheet-clean', style: 'margin:10px 0 0' }, '✅ Nothing to import — the database already matches the sheet. Only absences remain, and they wait for your say-so.')] : []),
       totals,
       ...(editedEl ? [editedEl] : []),
-      ...groupEls,
-      ...notes.map((n) => h('p', { class: 'muted small', style: 'margin:8px 0 0' }, n)),
-      ...(items.length ? [applyBtn, progress] : []));
+      listEl,
+      detailEl,
+      h('div', { style: 'margin-top:8px' }, ...notes.map((n) => h('p', { class: 'muted small', style: 'margin:4px 0 0' }, n))),
+      h('p', { id: 'cur-sheet-done', hidden: '' }));
+    if (_openSet && bySet.has(_openSet)) openSet(_openSet);
+    else _openSet = null;
+  }
+
+  /** the analysis, from whatever the mirror holds — after an upload's sync,
+   * or on a later visit with nothing new to upload */
+  const posted = new Set();   // links already sent this visit
+  async function reviewPass(src) {
+    stage.replaceChildren(spinner());
+    try {
+      const plan = await analyze(src, _choices);
+      // rows that turned out to already be a printing are linked right away
+      const fresh = plan.links.filter((l) => !posted.has(l.key));
+      if (fresh.length) {
+        await postLinks(fresh).catch((e) => toast(e.message));
+        for (const l of fresh) posted.add(l.key);
+      }
+      renderPlan(plan);
+    } catch (err) { stage.replaceChildren(h('p', { class: 'muted small' }, 'Analysis failed: ' + err.message)); }
+  }
+  async function runReview(sync) {
+    if (!_choices) _choices = { creates: new Set() };
+    if (sync) await reviewPass(sync);
+    // every later pass — a set match, an apply, a return visit — reads the mirror itself
+    const counts = sync ? sync.counts : null;
+    _rerun = async () => {
+      let latest;
+      try { latest = await apiCall('masterlist/rows?lang=' + encodeURIComponent(lang)); }
+      catch (e) { toast(e.message); return; }
+      await reviewPass({ ...latest, counts });
+    };
+    if (!sync) await _rerun();
   }
 
   const fileIn = h('input', { type: 'file', accept: '.csv,.tsv,text/csv,text/tab-separated-values', hidden: '', id: 'cur-sheet-file' });
@@ -4194,7 +4367,10 @@ function sheetImportCard(onApplied) {
       const sel = h('select', { class: 'chip', 'data-col': String(i) },
         ...FIELD_DEFS.map(([id, label]) => {
           const o = h('option', { value: id }, label);
-          const want = savedMap && savedMap[i] !== undefined ? savedMap[i] : guessField(hd);
+          const guess = guessField(hd);
+          let want = savedMap && savedMap[i] !== undefined ? savedMap[i] : guess;
+          // a saved "ignore" from before this field existed must not outlive it
+          if (want === '' && guess && !(savedMap || []).includes(guess)) want = guess;
           if (id === want) o.setAttribute('selected', '');
           return o;
         }));
@@ -4229,21 +4405,9 @@ function sheetImportCard(onApplied) {
         goBtn.disabled = false;
         return;
       }
-      const posted = new Set();   // links already sent for this upload
-      _rerun = async () => {
-        stage.replaceChildren(spinner());
-        try {
-          const plan = await analyze(sync, _choices);
-          // rows that turned out to already be a printing are linked right away
-          const fresh = plan.links.filter((l) => !posted.has(l.key));
-          if (fresh.length) {
-            await postLinks(fresh).catch((e) => toast(e.message));
-            for (const l of fresh) posted.add(l.key);
-          }
-          renderPlan(plan);
-        } catch (err) { stage.replaceChildren(h('p', { class: 'muted small' }, 'Analysis failed: ' + err.message)); }
-      };
-      await _rerun();
+      _choices = { creates: new Set() };
+      _openSet = null;
+      await runReview(sync);
       goBtn.disabled = false;
     });
     stage.replaceChildren(
@@ -4274,12 +4438,18 @@ function sheetImportCard(onApplied) {
 
   // the mirror's state: how much of the sheet this install has seen, and when
   const statusEl = h('p', { id: 'cur-sheet-status', class: 'muted small', style: 'margin:0 0 10px' }, '');
+  // the review picks up where it left off, from the mirror — no upload needed
+  const resumeBtn = h('button', { class: 'btn ghost small', id: 'cur-sheet-resume', hidden: '', onclick: async () => {
+    resumeBtn.disabled = true;
+    try { _openSet = null; await runReview(null); } finally { resumeBtn.disabled = false; }
+  } }, '▶ Continue reviewing');
   (async () => {
     try {
       const st = await apiCall('masterlist/status?lang=' + encodeURIComponent(lang));
       statusEl.textContent = st.total
         ? `Mirror: ${st.total} sheet rows on record (${st.linked} linked to a printing${st.gone ? `, ${st.gone} no longer in the sheet` : ''}), last synced ${new Date(st.lastSync).toLocaleString()}.`
         : 'Mirror: no sheet synced yet — the first upload records every row.';
+      resumeBtn.hidden = !st.total;
     } catch { statusEl.textContent = ''; }
   })();
 
@@ -4297,6 +4467,7 @@ function sheetImportCard(onApplied) {
     h('div', { class: 'row', style: 'gap:8px; flex-wrap:wrap; align-items:center' },
       urlIn, openA,
       h('button', { class: 'btn ghost small', id: 'cur-sheet-upload', onclick: () => fileIn.click() }, '⬆ Upload the downloaded CSV'),
+      resumeBtn,
       fileIn),
     stage,
     savedDet,

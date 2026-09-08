@@ -403,7 +403,28 @@ const { chromium } = require('playwright');
   check('sheet card: the link button points at the sheet',
     await page.locator('#cur-sheet-open').isVisible() &&
     (await page.locator('#cur-sheet-open').getAttribute('href')).includes('docs.google.com'));
-  await page.setInputFiles('#cur-sheet-file', require('path').join(__dirname, 'fixtures', 'consultant.csv'));
+  const fixture = (name) => require('path').join(__dirname, 'fixtures', name);
+  const uploadAndCheck = async (name) => {
+    await page.setInputFiles('#cur-sheet-file', fixture(name));
+    await page.waitForSelector('#cur-sheet-analyze');
+    await page.click('#cur-sheet-analyze');
+    await page.waitForSelector('#cur-sheet-totals', { timeout: 30000 });
+  };
+  const openSet = async (id) => {
+    if (await page.locator('#cur-set-back').isVisible()) await page.click('#cur-set-back');
+    await page.click(`.cur-set-row[data-set="${id}"]`);
+    await page.waitForSelector('#cur-set-apply');
+  };
+  /** the apply of a set re-reads the mirror; the stage counts its applies */
+  const applySet = async () => {
+    const n = parseInt(await page.getAttribute('#cur-sheet-stage', 'data-applied') || '0', 10);
+    await page.click('#cur-set-apply');
+    await page.waitForFunction((want) => parseInt(document.querySelector('#cur-sheet-stage').dataset.applied || '0', 10) >= want, n + 1, { timeout: 30000 });
+    await page.waitForSelector('#cur-sheet-totals');
+  };
+  const setRows = async () => page.locator('.cur-set-row').allTextContents();
+
+  await page.setInputFiles('#cur-sheet-file', fixture('consultant.csv'));
   await page.waitForSelector('#cur-sheet-analyze');
   check('sheet: columns guessed right, including the treacherous ones',
     (await page.locator('select[data-col="0"]').inputValue()) === '' &&          // Series is a grouping, not the set
@@ -413,10 +434,9 @@ const { chromium } = require('playwright');
     (await page.locator('select[data-col="7"]').inputValue()) === 'types' &&
     (await page.locator('select[data-col="8"]').inputValue()) === 'variant');
   await page.click('#cur-sheet-analyze');
-  await page.waitForSelector('#cur-sheet-apply');
-  // the review arrives folded: only the totals line and group summaries show
-  check('sheet: the review is one screen — totals + collapsed groups, no row lists',
-    (await page.locator('#cur-sheet-stage label').count()) === 0 &&
+  await page.waitForSelector('#cur-sheet-sets');
+  check('sheet: the review is a list of sets — no card lists until a set is opened',
+    (await page.locator('.cur-card').count()) === 0 &&
     (await page.textContent('#cur-sheet-totals')).includes('3 to add') &&
     (await page.textContent('#cur-sheet-totals')).includes('3 absent'));
 
@@ -435,36 +455,46 @@ const { chromium } = require('playwright');
   await page.selectOption('select[data-alias="Consultant Promos"]', '::create');
   await page.waitForFunction(() => (document.querySelector('#cur-sheet-totals') || {}).textContent?.includes('5 to add'));
   check('sheet: choosing create turns the unknown set into a reviewed proposal', true);
-  const expandAll = async () => {
-    await page.evaluate(() => document.querySelectorAll('#cur-sheet-stage details').forEach((d) => { d.open = true; }));
-    await page.waitForTimeout(200);   // toggle events render the rows lazily
-  };
-  await expandAll();
-  const stageText = await page.textContent('#cur-sheet-stage');
+  const rows1 = await setRows();
+  check('sheet: the set list names every set with a decision, new sets marked as such',
+    rows1.some((t) => t.startsWith('Test Promos')) && rows1.some((t) => t.includes('Consultant Promos') && t.includes('(new set)')) &&
+    rows1.some((t) => t.startsWith('Base Set') && t.includes('absent')));
+  const stageText0 = await page.textContent('#cur-sheet-stage');
+  check('sheet: duplicate rows inside the sheet are collapsed', stageText0.includes('1 duplicate row(s)'));
+
+  await openSet('test-promos');
+  const stageText = await page.textContent('#cur-set-detail');
+  check('sheet: a set shows its cards with the database\'s printings beside the sheet\'s rows',
+    (await page.locator('.cur-card').count()) >= 3 && stageText.includes('Database has:'));
   check('sheet: rows already in the database produce NO proposals (no duplicates)',
-    stageText.includes('6 row(s) already match the database'));
+    !stageText.includes('"Sparkle Foil"') && !stageText.includes('Sheet says "Normal"'));
   check('sheet: "Holo Rare"/"Pokémon"/"Fire" match "Rare Holo"/"Pokemon"/["Fire"] — no phantom differences',
     !stageText.includes('Charizard'));
-  check('sheet: duplicate rows inside the sheet are collapsed', stageText.includes('1 duplicate row(s)'));
-  check('sheet: a new set is proposed', stageText.includes('New sets (1)') && stageText.includes('Consultant Promos'));
-  check('sheet: new cards are proposed with their printings, grouped under their sets',
-    stageText.includes('Brand New Mon') && stageText.includes('Sheetmon'));
-  check('sheet: a standard variant is matched through its synonym (Reverse Foil)',
-    stageText.includes('New printings (1)') && stageText.includes('Reverse Holo'));
+  check('sheet: a standard variant is matched through its synonym (Reverse Foil) and proposed as the standard printing',
+    stageText.includes('Sheet says "Reverse Foil"') && stageText.includes('sheet row 7'));
   check('sheet: an unknown printing becomes a custom-printing proposal',
-    stageText.includes('New custom printings (1)') && stageText.includes('Prerelease Stamp'));
+    stageText.includes('Sheet says "Prerelease Stamp"'));
   check('sheet: a differing field goes up for review, not silently applied',
-    stageText.includes('Field differences (1)') && stageText.includes('Eevee Star Prime'));
+    stageText.includes('name: "Eevee Star Prime"') === false && /name: ".*" → "Eevee Star Prime"/.test(stageText));
+  check('sheet: new cards are proposed inside their set, with their printings',
+    stageText.includes('New card: #9 Brand New Mon') && stageText.includes('Holo'));
   check('sheet: rows deleted from the sheet are reported, never auto-applied',
-    stageText.includes('In the database but not in the sheet') &&
-    stageText.includes('Pika Promo') && stageText.includes('Sparkle Foil is absent'));
-  check('sheet: the skipped 1st Edition row surfaces by name (the Machamp case)',
-    stageText.includes('Pikachu') && stageText.includes('1st Edition is absent'));
+    stageText.includes('absent from the sheet') && stageText.includes('Pika Promo'));
+  await page.click('#cur-set-back');
+  await openSet('base1');
+  const baseText = await page.textContent('#cur-set-detail');
+  await page.click('#cur-set-back');
+  await openSet('test-promos');
+  check('sheet: the skipped 1st Edition row surfaces by name (the Pikachu case)',
+    baseText.includes('Pikachu') && baseText.includes('1st Edition is absent'));
   check('sheet: printings outside the sheet\'s vocabulary are NOT flagged as deleted',
-    !stageText.includes('Solo Promo') && !stageText.includes('Cracked Ice'));
-
-  await page.click('#cur-sheet-apply');
-  await page.waitForSelector('#cur-sheet-done', { timeout: 30000 });
+    !stageText.includes('Gold Stamp is absent'));
+  check('sheet: every proposal offers add / this-is / ignore, and absences start as keep',
+    (await page.locator('.cur-item[data-kind="custom"] select.cur-choice option:has-text("This is →")').count()) >= 1 &&
+    (await page.locator('.cur-item[data-kind="missing"] select.cur-choice').evaluateAll((els) => els.every((e) => e.value === 'keep'))));
+  await applySet();
+  await openSet('consultant-promos');
+  await applySet();
   const applied = await page.evaluate(async () => {
     const tp = await (await fetch('api/catalog/set?lang=en&id=test-promos')).json();
     const cp = await (await fetch('api/catalog/set?lang=en&id=consultant-promos')).json();
@@ -486,39 +516,37 @@ const { chromium } = require('playwright');
   check('sheet: applied — the reviewed field difference was written', applied.renamed === 'Eevee Star Prime');
   check('sheet: applied — the new card exists with its printing and rarity', applied.newCard);
   check('sheet: applied — the new set exists and holds its card', applied.newSetCard);
-  check('sheet: applied — unticked deletions were left alone', applied.unTickedSurvive);
+  check('sheet: applied — untouched absences were left alone', applied.unTickedSurvive);
+  check('sheet: applied sets leave the list; only absences remain',
+    (await setRows()).every((t) => /absent/.test(t) && !/to decide/.test(t)));
 
   // the proof of idempotence: the same sheet again finds nothing to do
   await gotoCurate();
-  await page.setInputFiles('#cur-sheet-file', require('path').join(__dirname, 'fixtures', 'consultant.csv'));
-  await page.waitForSelector('#cur-sheet-analyze');
-  await page.click('#cur-sheet-analyze');
+  await uploadAndCheck('consultant.csv');
   await page.waitForSelector('#cur-sheet-clean');
   check('sheet: uploading the same sheet again imports nothing (idempotent)', true);
-  await expandAll();
-  const cleanText = await page.textContent('#cur-sheet-stage');
   check('sheet: deleted rows are still reported alongside a clean import',
-    (await page.textContent('#cur-sheet-totals')).includes('3 absent') && cleanText.includes('Pika Promo'));
+    (await page.textContent('#cur-sheet-totals')).includes('3 absent'));
   check('sheet: the saved match resolves "Basic Set" by itself next time',
     (await page.locator('#cur-sheet-match').count()) === 0);
   await page.click('#cur-sheet-aliases summary');
   await page.waitForSelector('#cur-sheet-aliases .row');
   check('sheet: the saved match is listed and forgettable',
     (await page.textContent('#cur-sheet-aliases')).includes('"Basic Set" → base1'));
-  check('sheet: every deletion box starts unticked',
-    (await page.locator('#cur-sheet-stage input[type=checkbox]:checked').count()) === 0);
-  // acting on a deletion is an explicit tick — and surgical: Pika Promo also
+  await openSet('test-promos');
+  check('sheet: every absence starts as keep',
+    await page.locator('.cur-item[data-kind="missing"] select.cur-choice').evaluateAll((els) => els.length > 0 && els.every((e) => e.value === 'keep')));
+  // acting on a deletion is an explicit choice — and surgical: Pika Promo also
   // has a 1st Edition printing the sheet says nothing about, so what's on
   // offer is removing its Normal printing, not hiding the card
-  await page.check('#cur-sheet-stage label:has-text("Pika Promo") input');
-  await page.click('#cur-sheet-apply');
-  await page.waitForSelector('#cur-sheet-done');
+  await page.selectOption('.cur-card[data-card="test-promos-3"] .cur-item[data-kind="missing"] select.cur-choice', 'remove');
+  await applySet();
   const pika = await page.evaluate(async () => {
     const d = await (await fetch('api/catalog/set?lang=en&id=test-promos')).json();
     const c = (d.cards || []).find((x) => x.id === 'test-promos-3');
     return { exists: !!c, normal: !!(c && c.variants && c.variants.normal) };
   });
-  check('sheet: a ticked deletion removes exactly that printing, and the card survives',
+  check('sheet: a chosen deletion removes exactly that printing, and the card survives',
     pika.exists && !pika.normal);
 
   // ---- the mirror: the second sheet is a DIFF against the first ----
@@ -529,40 +557,45 @@ const { chromium } = require('playwright');
   check('mirror: the first upload recorded every sheet row, each linked to a printing',
     mirrorBefore.total === 11 && mirrorBefore.linked === 11 && mirrorBefore.gone === 0);
   await gotoCurate();
-  await page.setInputFiles('#cur-sheet-file', require('path').join(__dirname, 'fixtures', 'consultant-v2.csv'));
-  await page.waitForSelector('#cur-sheet-analyze');
-  await page.click('#cur-sheet-analyze');
-  await page.waitForSelector('#cur-sheet-apply');
+  await uploadAndCheck('consultant-v2.csv');
   const v2Text = await page.textContent('#cur-sheet-stage');
   check('mirror: an inserted row shifts everything below it, and NOTHING reads as changed',
     /Mirror: 11 rows in the sheet — 1 new, 1 edited in place, 0 with changed details, 1 left the sheet, 7 moved, 9 unchanged/.test(v2Text));
   check('mirror: only the new row is proposed — moved rows are not re-imported',
-    (await page.textContent('#cur-sheet-totals')).includes('1 to add') && v2Text.includes('New custom printings (1)'));
+    (await page.textContent('#cur-sheet-totals')).includes('1 to add') && (await setRows()).some((t) => t.startsWith('Test Promos') && t.includes('1 to decide')));
   check('mirror: a rewritten variant is shown as an edit, from -> to',
     (await page.locator('#cur-sheet-edited').count()) === 1 && v2Text.includes('"Reverse Foil"') && v2Text.includes('"Reverse Holo"'));
-  await page.evaluate(() => document.querySelectorAll('#cur-sheet-stage details').forEach((d) => { d.open = true; }));
-  await page.waitForSelector('#cur-sheet-stage label');
-  const v2Open = await page.textContent('#cur-sheet-stage');
+  await openSet('test-promos');
+  const v2Open = await page.textContent('#cur-set-detail');
   check('mirror: a deleted row names the printing it was, with the row it sat on',
-    v2Open.includes('Eevee Star Prime') && v2Open.includes('"Jumbo"') && v2Open.includes('(was row 10, "Normal")'));
-  check('mirror: the deletion is a report — unticked', (await page.locator('#cur-sheet-stage input[type=checkbox]:checked').count()) >= 1 &&
-    !(await page.locator('#cur-sheet-stage label:has-text("Eevee Star Prime") input').isChecked()));
-  await page.click('#cur-sheet-apply');
-  await page.waitForSelector('#cur-sheet-done', { timeout: 30000 });
+    v2Open.includes('Eevee Star Prime') && v2Open.includes('Sheet says "Jumbo"') && v2Open.includes('(was row 10, "Normal")'));
+  // the curator's call: the sheet's "Jumbo" IS this card's Holo — and remembered for every card
+  await page.selectOption('.cur-card[data-card="test-promos-9"] .cur-item[data-kind="custom"] select.cur-choice', 'match:holo');
+  check('mirror: choosing "this is" reveals the remember-for-every-card choice',
+    await page.locator('.cur-card[data-card="test-promos-9"] .cur-remember').isVisible());
+  await page.check('.cur-card[data-card="test-promos-9"] .cur-remember');
+  check('mirror: the deletion is a report — it starts as keep',
+    await page.locator('.cur-card[data-card="test-promos-2"] .cur-item[data-kind="missing"] select.cur-choice').evaluate((e) => e.value === 'keep'));
+  await applySet();
   const mirrorAfter = await page.evaluate(async () => {
     const st = await (await fetch('api/masterlist/status?lang=en')).json();
     const l9 = (await (await fetch('api/masterlist/links?lang=en&cardId=test-promos-9')).json()).links;
     const l1 = (await (await fetch('api/masterlist/links?lang=en&cardId=test-promos-1')).json()).links;
     const l2 = (await (await fetch('api/masterlist/links?lang=en&cardId=test-promos-2')).json()).links;
-    return { st, l9, l1, l2 };
+    const va = (await (await fetch('api/import-variant-aliases?lang=en')).json()).aliases;
+    const c9 = ((await (await fetch('api/catalog/set?lang=en&id=test-promos')).json()).cards || []).find((c) => c.id === 'test-promos-9');
+    return { st, l9, l1, l2, va, c9 };
   });
   check('mirror: rows that left are kept as gone, never deleted (13 on record: 11 live + the deleted row + the edit\'s old wording)',
     mirrorAfter.st.total === 13 && mirrorAfter.st.gone === 2);
-  check('mirror: the new printing remembers its sheet row (Jumbo = row 2)',
-    mirrorAfter.l9.some((l) => l.variant === 'jumbo' && l.rowNo === 2 && !l.gone) && mirrorAfter.l9.some((l) => l.variant === 'holo' && l.rowNo === 11));
+  check('mirror: a manual match links the sheet row to the existing printing and creates nothing (Jumbo = row 2 → Holo)',
+    mirrorAfter.l9.some((l) => l.variant === 'holo' && l.rowNo === 2 && !l.gone) && mirrorAfter.l9.some((l) => l.variant === 'holo' && l.rowNo === 11) &&
+    !(mirrorAfter.c9.printings && Object.values(mirrorAfter.c9.printings).includes('Jumbo')));
+  check('mirror: the remembered wording is saved as a variant alias',
+    mirrorAfter.va.some((a) => a.raw === 'Jumbo' && a.variant === 'holo'));
   check('mirror: the rewritten row links to the same printing under its new wording',
     mirrorAfter.l1.some((l) => l.variant === 'reverse' && l.sheetVariant === 'Reverse Holo' && l.rowNo === 8));
-  check('mirror: the unticked deletion keeps both its printing and its (gone) link',
+  check('mirror: the untouched deletion keeps both its printing and its (gone) link',
     mirrorAfter.l2.some((l) => l.variant === 'normal' && l.gone === true && l.rowNo === 10));
   // the curator sees where a printing came from, on the card itself
   await page.goto('http://localhost:3111/#/set/test-promos');
@@ -573,6 +606,34 @@ const { chromium } = require('playwright');
   check('card modal: the admin sees which masterlist row the printing is',
     /Masterlist row 11/.test(await page.textContent('#card-source')));
   await page.evaluate(() => document.getElementById('card-modal').close());
+
+  // ---- remembered matches do the work next time: a wording, and a card the numbers miss ----
+  // consultant-v3.csv = v2 + a "Jumbo" row on Eevee Star EX (the remembered
+  // wording now means Holo everywhere) + a row for "Gold Star Eevee #77" that
+  // is really card test-promos-4 under another number
+  await gotoCurate();
+  await uploadAndCheck('consultant-v3.csv');
+  await openSet('test-promos');
+  const v3Text = await page.textContent('#cur-set-detail');
+  check('aliases: a remembered wording resolves on a different card without asking (Jumbo → Holo proposed as the standard printing)',
+    /Sheet says "Jumbo"[^\n]*sheet row/.test(v3Text) && (await page.locator('.cur-card[data-card="test-promos-1"] .cur-item[data-kind="variant"]').count()) === 1);
+  check('aliases: a card the numbers cannot find is proposed as new, with a this-is picker of the set\'s cards',
+    v3Text.includes('New card: #77 Gold Star Eevee') &&
+    (await page.locator('.cur-item[data-kind="card"] select.cur-choice option:has-text("This is → #4")').count()) === 1);
+  await page.selectOption('.cur-item[data-kind="card"] select.cur-choice', 'match:test-promos-4');
+  // the Jumbo-on-Eevee proposal is not wanted: ignore it this time
+  await page.selectOption('.cur-card[data-card="test-promos-1"] .cur-item[data-kind="variant"] select.cur-choice', 'ignore');
+  await applySet();
+  await page.waitForSelector('#cur-set-apply');
+  const v3After = await page.textContent('#cur-set-detail');
+  const cardAliases = await page.evaluate(async () => (await (await fetch('api/import-card-aliases?lang=en')).json()).aliases);
+  check('aliases: the card match is remembered, and the row now speaks for that card (#4) — proposed as its printing, no duplicate card',
+    cardAliases.some((a) => a.cardId === 'test-promos-4' && /Gold Star Eevee/.test(a.raw)) &&
+    !v3After.includes('New card: #77') && (await page.locator('.cur-card[data-card="test-promos-4"] .cur-item[data-kind="variant"]').count()) === 1);
+  check('aliases: an ignored proposal comes back next time — ignore is for now, not forever',
+    (await page.locator('.cur-card[data-card="test-promos-1"] .cur-item[data-kind="variant"]').count()) === 1);
+  const noDupe = await page.evaluate(async () => ((await (await fetch('api/catalog/set?lang=en&id=test-promos')).json()).cards || []).filter((c) => /Gold Star Eevee/.test(c.name)).length);
+  check('aliases: no card was created for the matched row', noDupe === 0);
 
   // tidy the stage for the main suite: the consultant set proved its point —
   // hide it so the home page holds the sets the smoke checks expect
