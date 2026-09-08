@@ -287,6 +287,9 @@ db.exec(`
     PRIMARY KEY (lang, key)
   );
 `);
+// a link may carry the curator's "keep ours" rulings: fields the sheet's row
+// disagrees on that are settled in the database's favor (JSON list)
+try { db.exec('ALTER TABLE masterlist_links ADD COLUMN keep TEXT'); } catch { /* already present */ }
 
 /* One-shot links: verify this address, reset this password. Only the SHA-256
  * of each token is kept — the raw value exists in the email and nowhere else,
@@ -492,9 +495,10 @@ const _mlGone = db.prepare('UPDATE masterlist_rows SET gone = 1 WHERE lang = ? A
 const _mlCounts = db.prepare('SELECT COUNT(*) AS total, SUM(gone) AS gone, MAX(last_seen) AS last_seen FROM masterlist_rows WHERE lang = ?');
 const _mlLinkAll = db.prepare('SELECT key, card_id, variant FROM masterlist_links WHERE lang = ?');
 const _mlLinkPut = db.prepare(`INSERT INTO masterlist_links (lang, key, card_id, variant) VALUES (?,?,?,?)
-  ON CONFLICT(lang, key) DO UPDATE SET card_id = excluded.card_id, variant = excluded.variant`);
+  ON CONFLICT(lang, key) DO UPDATE SET card_id = excluded.card_id, variant = excluded.variant,
+    keep = CASE WHEN masterlist_links.card_id = excluded.card_id THEN masterlist_links.keep ELSE NULL END`);
 const _mlLinkDel = db.prepare('DELETE FROM masterlist_links WHERE lang = ? AND key = ?');
-const _mlLinksOfCard = db.prepare(`SELECT l.key, l.variant, r.row_no, r.gone, r.variant AS sheet_variant, r.set_name
+const _mlLinksOfCard = db.prepare(`SELECT l.key, l.variant, l.keep, r.row_no, r.gone, r.variant AS sheet_variant, r.set_name
   FROM masterlist_links l LEFT JOIN masterlist_rows r ON r.lang = l.lang AND r.key = l.key
   WHERE l.lang = ? AND l.card_id = ? ORDER BY r.row_no`);
 const _mlLinkedCount = db.prepare('SELECT COUNT(*) AS n FROM masterlist_links WHERE lang = ?');
@@ -504,8 +508,10 @@ const _mlUnlinked = db.prepare(`SELECT r.key, r.row_no, r.set_name, r.number, r.
 const _mlGoneLinked = db.prepare(`SELECT r.key, r.row_no, r.set_name, r.number, r.name, r.variant, r.notes, l.card_id, l.variant AS lvariant
   FROM masterlist_rows r JOIN masterlist_links l ON l.lang = r.lang AND l.key = r.key
   WHERE r.lang = ? AND r.gone = 1 ORDER BY r.row_no`);
-const _mlLiveLinks = db.prepare(`SELECT l.key, l.card_id, l.variant FROM masterlist_links l
-  JOIN masterlist_rows r ON r.lang = l.lang AND r.key = l.key WHERE l.lang = ? AND r.gone = 0`);
+const _mlLiveLinks = db.prepare(`SELECT l.key, l.card_id, l.variant, l.keep, r.row_no, r.set_name, r.number, r.name, r.variant AS sheet_variant, r.notes, r.extra
+  FROM masterlist_links l JOIN masterlist_rows r ON r.lang = l.lang AND r.key = l.key WHERE l.lang = ? AND r.gone = 0 ORDER BY r.row_no`);
+const _mlLinkKeep = db.prepare('UPDATE masterlist_links SET keep = ? WHERE lang = ? AND key = ?');
+const _mlLinkGet = db.prepare('SELECT keep FROM masterlist_links WHERE lang = ? AND key = ?');
 const _cardAliasList = db.prepare('SELECT key, raw, card_id FROM import_card_aliases WHERE lang = ? ORDER BY raw');
 const _cardAliasPut = db.prepare(`INSERT INTO import_card_aliases (lang, key, raw, card_id, created) VALUES (?,?,?,?,?)
   ON CONFLICT(lang, key) DO UPDATE SET raw = excluded.raw, card_id = excluded.card_id`);
@@ -521,8 +527,14 @@ function masterlistPending(lang) {
   const rowOut = (r, state) => ({ key: r.key, rowNo: r.row_no, set: r.set_name, number: r.number, name: r.name, variant: r.variant, notes: r.notes, ...JSON.parse(r.extra || '{}'), state });
   const pending = _mlUnlinked.all(lang).map((r) => rowOut(r, 'unlinked'));
   const removed = _mlGoneLinked.all(lang).map((r) => ({ key: r.key, rowNo: r.row_no, set: r.set_name, number: r.number, name: r.name, variant: r.variant, notes: r.notes, link: { card_id: r.card_id, variant: r.lvariant } }));
-  const links = _mlLiveLinks.all(lang).map((l) => [l.key, l.card_id, l.variant]);
+  const links = settledLinks(lang);
   return { pending, removed, links, edited: [] };
+}
+/** every settled live row, with its fields — a settled row still has a say on
+ * its card's details, and a "keep ours" ruling rides on the link */
+function settledLinks(lang) {
+  return _mlLiveLinks.all(lang).map((l) => [l.key, l.card_id, l.variant,
+    { rowNo: l.row_no, set: l.set_name, number: l.number, name: l.name, variant: l.sheet_variant, notes: l.notes, ...JSON.parse(l.extra || '{}'), keep: l.keep ? JSON.parse(l.keep) : [] }]);
 }
 
 /** A sheet row's identity: what it says, not where it sits. Leading zeros on
@@ -613,10 +625,8 @@ function masterlistSync(lang, rows) {
     counts.removed++;
     removed.push({ key, rowNo: r.row_no, set: r.set_name, number: r.number, name: r.name, variant: r.variant, notes: r.notes, link: links.get(key) || null });
   }
-  // links for every row that is settled: the catalog's "covered" set
-  const settled = [];
-  for (const r of fresh) { const l = links.get(r.key); if (l) settled.push([r.key, l.card_id, l.variant]); }
-  return { counts, pending, edited, removed, links: settled };
+  // links for every row that is settled: the catalog's "covered" set, each with its fields
+  return { counts, pending, edited, removed, links: settledLinks(lang) };
 }
 
 /** remove a personal row's image files from disk (they are per-row, never shared) */
@@ -3785,7 +3795,7 @@ async function handleApi(req, res, pathname, ip, url) {
     const mLang = LANG_RE.test(url.searchParams.get('lang') || '') ? url.searchParams.get('lang') : 'en';
     const cardId = url.searchParams.get('cardId') || '';
     if (!CARD_ID_RE.test(cardId)) return sendJSON(res, 400, { error: 'cardId is required' });
-    return sendJSON(res, 200, { links: _mlLinksOfCard.all(mLang, cardId).map((l) => ({ key: l.key, variant: l.variant, rowNo: l.row_no, gone: !!l.gone, sheetVariant: l.sheet_variant, sheetSet: l.set_name })) });
+    return sendJSON(res, 200, { links: _mlLinksOfCard.all(mLang, cardId).map((l) => ({ key: l.key, variant: l.variant, rowNo: l.row_no, gone: !!l.gone, sheetVariant: l.sheet_variant, sheetSet: l.set_name, keep: l.keep ? JSON.parse(l.keep) : [] })) });
   }
   if (pathname === '/api/masterlist/links' && req.method === 'POST') {
     if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
@@ -3797,6 +3807,16 @@ async function handleApi(req, res, pathname, ip, url) {
     for (const l of body.links) {
       if (!l || typeof l.key !== 'string' || !/^[0-9a-f]{20}(#\d+)?$/.test(l.key)) continue;
       if (l.remove) { _mlLinkDel.run(mLang, l.key); n++; continue; }
+      if (Array.isArray(l.keep)) {
+        // "keep ours" for these fields: the sheet's word on them is heard and declined, for good
+        const cur = _mlLinkGet.get(mLang, l.key);
+        if (!cur) continue;
+        const have = new Set(cur.keep ? JSON.parse(cur.keep) : []);
+        for (const f of l.keep) if (typeof f === 'string' && /^[a-z]{2,12}$/.test(f)) have.add(f);
+        _mlLinkKeep.run(JSON.stringify([...have]), mLang, l.key);
+        n++;
+        continue;
+      }
       if (typeof l.cardId !== 'string' || !CARD_ID_RE.test(l.cardId) || typeof l.variant !== 'string' || !VARIANT_KEY_RE.test(l.variant)) continue;
       _mlLinkPut.run(mLang, l.key, l.cardId, l.variant);
       n++;

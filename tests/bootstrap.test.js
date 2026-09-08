@@ -635,6 +635,39 @@ const { chromium } = require('playwright');
   const noDupe = await page.evaluate(async () => ((await (await fetch('api/catalog/set?lang=en&id=test-promos')).json()).cards || []).filter((c) => /Gold Star Eevee/.test(c.name)).length);
   check('aliases: no card was created for the matched row', noDupe === 0);
 
+  // ---- a settled row still has a say on its card's details, and "keep ours" is remembered ----
+  // the catalog drifts (someone edits Brand New Mon's rarity); the sheet's row
+  // for it was linked long ago — the difference must surface all the same
+  await page.evaluate(async () => fetch('api/card', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lang: 'en', cardId: 'test-promos-9', rarity: 'Common' }) }));
+  await gotoCurate();
+  await page.waitForSelector('#cur-sheet-resume', { state: 'visible' });
+  await page.click('#cur-sheet-resume');
+  await page.waitForSelector('#cur-sheet-sets');
+  check('resume: the review picks up from the mirror without an upload', (await setRows()).length >= 1);
+  await page.fill('#cur-sheet-filter', 'test prom');
+  check('set list: the filter narrows the list to the sets that match',
+    (await page.locator('.cur-set-row:visible').count()) === 1 && (await page.locator('.cur-set-row[data-set="test-promos"]').isVisible()));
+  await openSet('test-promos');
+  const driftText = await page.textContent('.cur-card[data-card="test-promos-9"]');
+  check('settled rows: a field difference on a long-linked row surfaces, spelled the database\'s way',
+    /rarity: "Common" → "Rare Holo"/.test(driftText));
+  await page.selectOption('.cur-card[data-card="test-promos-9"] .cur-item[data-kind="diff"] select.cur-choice', 'keep');
+  await applySet();
+  const kept = await page.evaluate(async () => {
+    const l9 = (await (await fetch('api/masterlist/links?lang=en&cardId=test-promos-9')).json()).links;
+    const c9 = ((await (await fetch('api/catalog/set?lang=en&id=test-promos')).json()).cards || []).find((c) => c.id === 'test-promos-9');
+    return { keep: l9.filter((l) => l.keep.includes('rarity')).length, rarity: c9.rarity };
+  });
+  check('keep ours: nothing is written, and the ruling rides on the rows\' links',
+    kept.rarity === 'Common' && kept.keep >= 1 &&
+    !/rarity:/.test((await page.locator('.cur-card[data-card="test-promos-9"]').count()) ? await page.textContent('.cur-card[data-card="test-promos-9"]') : ''));
+  // the ruling survives the next upload of the same sheet
+  await gotoCurate();
+  await uploadAndCheck('consultant-v3.csv');
+  await openSet('test-promos');
+  check('keep ours: a re-upload does not ask again',
+    !/rarity: "Common"/.test(await page.textContent('#cur-set-detail')));
+
   // tidy the stage for the main suite: the consultant set proved its point —
   // hide it so the home page holds the sets the smoke checks expect
   await page.evaluate(async () => {
