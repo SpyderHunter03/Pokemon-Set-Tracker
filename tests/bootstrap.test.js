@@ -668,6 +668,32 @@ const { chromium } = require('playwright');
   check('keep ours: a re-upload does not ask again',
     !/rarity: "Common"/.test(await page.textContent('#cur-set-detail')));
 
+  // ---- a card's decisions agree with each other: "this is X" and "remove X" cannot both stand ----
+  // consultant-v4.csv = v3 + a "Jumbo" row for Eevee Star Prime (#2), a card whose
+  // Normal and Sparkle Foil the sheet no longer lists
+  await gotoCurate();
+  await uploadAndCheck('consultant-v4.csv');
+  await openSet('test-promos');
+  const c2 = '.cur-card[data-card="test-promos-2"]';
+  check('agreement: the card shows both a proposal and its absences',
+    (await page.locator(`${c2} .cur-item[data-kind="variant"]`).count()) === 1 &&
+    (await page.locator(`${c2} .cur-item[data-kind="missing"]:visible`).count()) === 2);
+  await page.selectOption(`${c2} .cur-item[data-kind="variant"] select.cur-choice`, 'match:sparkle-foil');
+  check('agreement: "this is → Sparkle Foil" makes the Sparkle Foil absence disappear',
+    (await page.locator(`${c2} .cur-item[data-kind="missing"]:visible`).count()) === 1 &&
+    !(await page.locator(`${c2} .cur-item[data-kind="missing"]:visible`).first().textContent()).includes('Sparkle Foil'));
+  await page.selectOption(`${c2} .cur-item[data-kind="missing"]:visible select.cur-choice`, 'remove');
+  check('agreement: "remove Normal" withdraws "this is → Normal" from the proposal',
+    await page.locator(`${c2} .cur-item[data-kind="variant"] select.cur-choice option[value="match:normal"]`).evaluate((o) => o.disabled));
+  await applySet();
+  const agreed = await page.evaluate(async () => {
+    const c = ((await (await fetch('api/catalog/set?lang=en&id=test-promos')).json()).cards || []).find((x) => x.id === 'test-promos-2');
+    const l2 = (await (await fetch('api/masterlist/links?lang=en&cardId=test-promos-2')).json()).links;
+    return { normal: !!(c.variants && c.variants.normal), sparkle: !!(c.printings && c.printings['sparkle-foil']), linked: l2.some((l) => l.variant === 'sparkle-foil' && l.sheetVariant === 'Jumbo' && !l.gone) };
+  });
+  check('agreement: applied — Normal removed, Sparkle Foil kept and now linked to the Jumbo row',
+    !agreed.normal && agreed.sparkle && agreed.linked);
+
   // tidy the stage for the main suite: the consultant set proved its point —
   // hide it so the home page holds the sets the smoke checks expect
   await page.evaluate(async () => {

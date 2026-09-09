@@ -3730,6 +3730,7 @@ function sheetImportCard(onApplied) {
     // seeded from every settled row's link, then grown by the rows checked here
     const coveredSets = new Set();
     const covered = new Set();          // 'cardId|printingKey'
+    const spoken = new Set();           // cards the sheet has ANY row for — never "wholly absent"
     const coveredKinds = new Map();     // setId -> Set of printing keys the sheet speaks of
     const kindsOf = (sid) => { if (!coveredKinds.has(sid)) coveredKinds.set(sid, new Set()); return coveredKinds.get(sid); };
     const setSizes = new Map();         // setId -> the sheet's claimed printed size
@@ -3773,6 +3774,7 @@ function sheetImportCard(onApplied) {
     };
     for (const [key, cardId, vk, fields] of (sync.links || [])) {
       covered.add(cardId + '|' + vk);
+      spoken.add(cardId);
       const sid = setIdOf(cardId);
       coveredSets.add(sid);
       kindsOf(sid).add(vk);
@@ -3899,6 +3901,7 @@ function sheetImportCard(onApplied) {
       }
 
       // the card exists — cross-reference the printing against what it has
+      spoken.add(card.id);
       const have = realVariants(card).filter((k) => !k.startsWith('my-'));
       const labels = card.printings || {};
       const synRaw = CUSTOM_SYN[norm(varRaw)] || null;
@@ -3954,7 +3957,7 @@ function sheetImportCard(onApplied) {
         const scoped = keys.filter((k) => kinds.has(k));
         const absent = scoped.filter((k) => !covered.has(card.id + '|' + k));
         if (!absent.length) continue;
-        if (absent.length === keys.length) {
+        if (absent.length === keys.length && !spoken.has(card.id)) {
           const exact = plan.missing.find((m) => m.card.id === card.id && m.rowNo);
           plan.missing = plan.missing.filter((m) => m.card.id !== card.id);
           plan.missing.push({ card, whole: true, rowNo: exact && exact.rowNo, sheetVariant: exact && exact.sheetVariant, set: sid });
@@ -4127,6 +4130,27 @@ function sheetImportCard(onApplied) {
       const progress = h('p', { class: 'muted small', style: 'margin:6px 0 0' });
       applyBtn.addEventListener('click', () => applySet(sid, its, applyBtn, progress));
 
+      /* A card's decisions must agree with each other. "This is → Reverse
+       * Holo" means the printing is NOT absent — its absence line goes away.
+       * "Remove Reverse Holo" means no row can be it — that "this is" option
+       * is withdrawn, and a proposal already pointing there falls back to add. */
+      const reconcileCard = (cardId) => {
+        if (!cardId) return;
+        const mine = its.filter((x) => x.cardId === cardId);
+        const matched = new Set(mine.filter((x) => (x.kind === 'variant' || x.kind === 'custom') && x.mode === 'match').map((x) => x.target));
+        const removed = new Set(mine.filter((x) => x.kind === 'missing' && !x.it.whole && x.mode === 'remove').map((x) => x.it.key));
+        for (const m of mine) {
+          if (m.kind === 'missing' && !m.it.whole && m.el) {
+            const claimed = matched.has(m.it.key);
+            if (claimed) { m.mode = 'keep'; if (m.sel) m.sel.value = 'keep'; }
+            m.el.hidden = claimed;
+          }
+          if ((m.kind === 'variant' || m.kind === 'custom') && m.sel) {
+            for (const o of m.sel.options) if (o.value.startsWith('match:')) o.disabled = removed.has(o.value.slice(6));
+            if (m.mode === 'match' && removed.has(m.target)) { m.mode = 'add'; m.target = ''; m.sel.value = 'add'; if (m.rememberLbl) m.rememberLbl.hidden = true; }
+          }
+        }
+      };
       // the sheet's rows behind one proposal, for the curator's eyes
       const rowsText = (rs) => rs && rs.length ? ` · sheet row${rs.length > 1 ? 's' : ''} ${rs.map((r) => r.rowNo).join(', ')}${rs[0].notes ? ` (${rs[0].notes})` : ''}` : '';
       const itemEl = (it) => {
@@ -4148,7 +4172,8 @@ function sheetImportCard(onApplied) {
             h('option', { value: 'keep' }, 'Keep it (the sheet just does not list it)'),
             h('option', { value: 'remove' }, it.it.whole ? 'Hide the whole card' : `Remove ${it.it.label}`));
           sel.value = it.mode;
-          sel.addEventListener('change', () => { it.mode = sel.value; updateApply(); });
+          sel.addEventListener('change', () => { it.mode = sel.value; reconcileCard(it.cardId); updateApply(); });
+          it.el = wrap; it.sel = sel;
           wrap.append(h('div', { class: 'row', style: 'gap:8px; align-items:center; flex-wrap:wrap' },
             h('span', {}, it.it.whole ? `the whole card is absent from the sheet${it.it.rowNo ? ` (was row ${it.it.rowNo}, "${it.it.sheetVariant}")` : ''}` : `${it.it.label} is absent from the sheet${it.it.rowNo ? ` (was row ${it.it.rowNo}, "${it.it.sheetVariant}")` : ''}`), sel));
           return wrap;
@@ -4185,8 +4210,10 @@ function sheetImportCard(onApplied) {
         sel.addEventListener('change', () => {
           if (sel.value.startsWith('match:')) { it.mode = 'match'; it.target = sel.value.slice(6); } else { it.mode = sel.value; it.target = ''; }
           rememberLbl.hidden = it.mode !== 'match';
+          reconcileCard(it.cardId);
           updateApply();
         });
+        it.el = wrap; it.sel = sel; it.rememberLbl = rememberLbl;
         wrap.append(h('div', { class: 'row', style: 'gap:8px; align-items:center; flex-wrap:wrap' },
           h('span', {}, `Sheet says "${x.rows && x.rows[0] ? x.rows[0].variant || '(plain)' : x.label}"${rowsText(x.rows)}`), sel, rememberLbl));
         return wrap;
@@ -4201,6 +4228,7 @@ function sheetImportCard(onApplied) {
           c ? h('div', { class: 'muted small', style: 'margin:2px 0 4px' }, `Database has: ${have.join(', ') || '(no printings)'}`) : null,
           ...its2.map(itemEl));
       });
+      for (const ck of cardKeys) { const c = cardOf(ck); if (c) reconcileCard(c.id); }
       detailEl.replaceChildren(
         h('div', { class: 'row', style: 'gap:10px; align-items:center; margin-top:10px' },
           h('button', { type: 'button', class: 'btn ghost small', id: 'cur-set-back', onclick: () => { _openSet = null; detailEl.hidden = true; listEl.hidden = false; } }, '← All sets'),
@@ -4302,8 +4330,11 @@ function sheetImportCard(onApplied) {
             done++;
           } catch (e) { failed++; toast(e.message); }
         }
-        // removals go last, and only ever by explicit choice
+        // removals go last, and only ever by explicit choice — and never of a
+        // printing a match in this very apply points at
+        const claimed = new Set(todo.filter((x) => (x.kind === 'variant' || x.kind === 'custom') && x.mode === 'match').map((x) => x.cardId + '|' + x.target));
         for (const b of todo.filter((x) => x.kind === 'missing')) {
+          if (!b.it.whole && claimed.has(b.it.card.id + '|' + b.it.key)) { toast(`${b.it.card.name}: ${b.it.label} was matched to a sheet row — not removed`); continue; }
           step('remove ' + b.it.card.name + (b.it.whole ? '' : ' ' + b.it.label));
           try {
             if (b.it.whole) await apiCall('card-hide', { method: 'POST', body: JSON.stringify({ cardId: b.it.card.id, hidden: true, lang }) });
