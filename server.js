@@ -1720,6 +1720,25 @@ function runHashes() {
 const loadSettings = () => readJSON(SETTINGS_FILE, {});
 const saveSettings = (s) => writeJSONAtomic(SETTINGS_FILE, s);
 
+/* One-time, on the first boot after the change: "Cosmos Holo" used to be read
+ * as a spelling of Holo, so sheet rows saying it were linked to the standard
+ * holo. It is a printing of its own. Those links are undone — the rows come
+ * back into the review as custom-printing proposals; the catalog is untouched.
+ * Flagged in settings so a curator who later rules "this IS the holo" is not
+ * overruled on the next boot. */
+{
+  const s = loadSettings();
+  if (!s.cosmosUnlinked) {
+    const rows = db.prepare(`SELECT l.lang, l.key FROM masterlist_links l JOIN masterlist_rows r ON r.lang = l.lang AND r.key = l.key
+      WHERE l.variant = 'holo' AND r.gone = 0 AND lower(replace(replace(r.variant, ' ', ''), '-', '')) = 'cosmosholo'`).all();
+    const del = db.prepare('DELETE FROM masterlist_links WHERE lang = ? AND key = ?');
+    for (const r of rows) del.run(r.lang, r.key);
+    if (rows.length) console.log(`masterlist: ${rows.length} "Cosmos Holo" row(s) unlinked from the standard Holo — they return to the review as their own printing`);
+    s.cosmosUnlinked = true;
+    saveSettings(s);
+  }
+}
+
 function startMirror(remoteBase) {
   build = { running: true, phase: 'mirror', startedAt: Date.now(), error: null, hashesOk: null, log: [] };
   pushLog('Mirroring card database from ' + remoteBase);

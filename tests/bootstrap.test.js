@@ -675,6 +675,10 @@ const { chromium } = require('playwright');
   await uploadAndCheck('consultant-v4.csv');
   await openSet('test-promos');
   const c2 = '.cur-card[data-card="test-promos-2"]';
+  check('cosmos: "Cosmos Holo" is a printing of its own, never a spelling of Holo',
+    (await page.locator('.cur-card[data-card="test-promos-9"] .cur-item[data-kind="custom"]').count()) === 1 &&
+    /Sheet says "Cosmos Holo"/.test(await page.textContent('.cur-card[data-card="test-promos-9"]')));
+  await page.selectOption('.cur-card[data-card="test-promos-9"] .cur-item[data-kind="custom"] select.cur-choice', 'ignore');
   check('agreement: the card shows both a proposal and its absences',
     (await page.locator(`${c2} .cur-item[data-kind="variant"]`).count()) === 1 &&
     (await page.locator(`${c2} .cur-item[data-kind="missing"]:visible`).count()) === 2);

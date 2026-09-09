@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.72.0';
+const APP_VERSION = '3.73.0';
 
 /* ============================================================
  * Storage helpers
@@ -3678,8 +3678,10 @@ function sheetImportCard(onApplied) {
   // spellings a printing arrives in vs the keys the database speaks
   const VSYN = {
     '': 'normal', normal: 'normal', regular: 'normal', base: 'normal', nonholo: 'normal', unlimited: 'normal',
-    holo: 'holo', holofoil: 'holo', holographic: 'holo', foil: 'holo', cosmosholo: 'holo',
-    reverse: 'reverse', reverseholo: 'reverse', reversefoil: 'reverse', reversedholo: 'reverse', mirrorholo: 'reverse',
+    // NOT here, on purpose: "Cosmos Holo" and "Mirror Holo" are printings of
+    // their own (a deck or blister foil pattern), never spellings of Holo / Reverse
+    holo: 'holo', holofoil: 'holo', holographic: 'holo', foil: 'holo',
+    reverse: 'reverse', reverseholo: 'reverse', reversefoil: 'reverse', reversedholo: 'reverse',
     parallelholo: 'reverse', unlimited: 'normal',
     firstedition: 'firstEdition', '1stedition': 'firstEdition', '1sted': 'firstEdition', firsted: 'firstEdition',
     '1st': 'firstEdition', '1steditionholo': 'firstEdition',
