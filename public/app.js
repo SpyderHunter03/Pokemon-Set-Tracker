@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.71.0';
+const APP_VERSION = '3.72.0';
 
 /* ============================================================
  * Storage helpers
@@ -4151,6 +4151,38 @@ function sheetImportCard(onApplied) {
           }
         }
       };
+      /* "Remember for every card" does its work on screen, not just on apply:
+       * every other proposal in this set with the same sheet wording follows
+       * the match — to the same standard printing, or to the printing with
+       * the same label on its own card — and their absence lines retire with
+       * it. Unticking puts them back. (Other sets follow on their next pass,
+       * through the alias the apply saves.) */
+      const wordingOf = (x) => norm(x.it.rows && x.it.rows[0] ? x.it.rows[0].variant : '');
+      const spread = (src) => {
+        const w = wordingOf(src);
+        const on = src.mode === 'match' && src.remember && w;
+        const targetLabel = on && !VARIANT_LABELS[src.target] ? norm(variantLabel(src.it.card, src.target)) : null;
+        let n = 0;
+        for (const o of its) {
+          if (o === src || (o.kind !== 'variant' && o.kind !== 'custom')) continue;
+          if (on && wordingOf(o) === w && o.mode !== 'match') {
+            const have = realVariants(o.it.card).filter((k) => !k.startsWith('my-'));
+            const key = VARIANT_LABELS[src.target] ? (have.includes(src.target) ? src.target : null)
+              : (have.find((k) => norm(variantLabel(o.it.card, k)) === targetLabel) || null);
+            if (!key) continue;
+            o.mode = 'match'; o.target = key; o.autoFrom = src;
+            if (o.sel) o.sel.value = 'match:' + key;
+            if (o.rememberLbl) o.rememberLbl.hidden = false;
+            reconcileCard(o.cardId); n++;
+          } else if (!on && o.autoFrom === src) {
+            o.mode = 'add'; o.target = ''; o.autoFrom = null;
+            if (o.sel) o.sel.value = 'add';
+            if (o.rememberLbl) o.rememberLbl.hidden = true;
+            reconcileCard(o.cardId);
+          }
+        }
+        if (n) toast(`${n} other card${n === 1 ? '' : 's'} in this set followed`);
+      };
       // the sheet's rows behind one proposal, for the curator's eyes
       const rowsText = (rs) => rs && rs.length ? ` · sheet row${rs.length > 1 ? 's' : ''} ${rs.map((r) => r.rowNo).join(', ')}${rs[0].notes ? ` (${rs[0].notes})` : ''}` : '';
       const itemEl = (it) => {
@@ -4203,14 +4235,16 @@ function sheetImportCard(onApplied) {
           ...have.map((k) => h('option', { value: 'match:' + k }, `This is → ${variantLabel(x.card, k)}`)));
         const remember = h('input', { type: 'checkbox', class: 'cur-remember' });
         remember.checked = it.remember;
-        remember.addEventListener('change', () => { it.remember = remember.checked; });
+        remember.addEventListener('change', () => { it.remember = remember.checked; spread(it); updateApply(); });
         const rememberLbl = h('label', { class: 'row muted small', style: 'gap:4px; align-items:center; cursor:pointer' }, remember, 'remember for every card');
         rememberLbl.hidden = it.mode !== 'match';
         sel.value = it.mode === 'match' ? 'match:' + it.target : it.mode;
         sel.addEventListener('change', () => {
           if (sel.value.startsWith('match:')) { it.mode = 'match'; it.target = sel.value.slice(6); } else { it.mode = sel.value; it.target = ''; }
           rememberLbl.hidden = it.mode !== 'match';
+          it.autoFrom = null;            // the curator's own choice outranks a spread
           reconcileCard(it.cardId);
+          if (it.remember) spread(it);
           updateApply();
         });
         it.el = wrap; it.sel = sel; it.rememberLbl = rememberLbl;

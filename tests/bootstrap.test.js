@@ -678,6 +678,20 @@ const { chromium } = require('playwright');
   check('agreement: the card shows both a proposal and its absences',
     (await page.locator(`${c2} .cur-item[data-kind="variant"]`).count()) === 1 &&
     (await page.locator(`${c2} .cur-item[data-kind="missing"]:visible`).count()) === 2);
+  // "remember for every card" works on screen: Eevee Star EX's "Staff Stamp" row is
+  // matched to its Sparkle Foil — Eevee Star Prime's "Staff Stamp" row follows to ITS Sparkle Foil
+  const c1 = '.cur-card[data-card="test-promos-1"]';
+  await page.selectOption(`${c1} .cur-item[data-kind="custom"] select.cur-choice`, 'match:sparkle-foil');
+  await page.check(`${c1} .cur-remember`);
+  check('remember: the other card with the same wording follows at once, and its absence line retires',
+    (await page.locator(`${c2} .cur-item[data-kind="custom"] select.cur-choice`).inputValue()) === 'match:sparkle-foil' &&
+    (await page.locator(`${c2} .cur-item[data-kind="missing"]:visible`).count()) === 1);
+  await page.uncheck(`${c1} .cur-remember`);
+  check('remember: unticking puts the followers back',
+    (await page.locator(`${c2} .cur-item[data-kind="custom"] select.cur-choice`).inputValue()) === 'add' &&
+    (await page.locator(`${c2} .cur-item[data-kind="missing"]:visible`).count()) === 2);
+  await page.selectOption(`${c1} .cur-item[data-kind="custom"] select.cur-choice`, 'ignore');
+  await page.selectOption(`${c2} .cur-item[data-kind="custom"] select.cur-choice`, 'ignore');
   await page.selectOption(`${c2} .cur-item[data-kind="variant"] select.cur-choice`, 'match:sparkle-foil');
   check('agreement: "this is → Sparkle Foil" makes the Sparkle Foil absence disappear',
     (await page.locator(`${c2} .cur-item[data-kind="missing"]:visible`).count()) === 1 &&
