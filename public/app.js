@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.73.0';
+const APP_VERSION = '3.74.0';
 
 /* ============================================================
  * Storage helpers
@@ -3700,6 +3700,9 @@ function sheetImportCard(onApplied) {
   const catKey = (v) => { const n = norm(v); return TRAINER_KINDS.has(n) || n.startsWith('trainer') ? 'trainer' : n; };
   // a rarity, as meaning: subset prefixes (GG, TG) dropped, word order folded
   const rarityKey = (v) => tokensOf(String(v == null ? '' : v).replace(/^\s*(GG|TG|SV)\s+/i, ''));
+  // the sheet's own markup: "tex" is how its app draws the Tera ex symbol — the card is "<name> ex"
+  const cleanName = (v) => String(v == null ? '' : v).replace(/\btex\b/g, 'ex');
+  const nameKey = (v) => norm(cleanName(v));
 
   async function analyze(sync, choices) {
     const ix = await getIndex();
@@ -3752,7 +3755,7 @@ function sheetImportCard(onApplied) {
       const keep = new Set(row.keep || []);
       const diffs = [];
       const nameRaw = row.name || '';
-      if (nameRaw && !keep.has('name') && norm(nameRaw) !== norm(card.name)) diffs.push(['name', card.name, nameRaw]);
+      if (nameRaw && !keep.has('name') && nameKey(nameRaw) !== nameKey(card.name)) diffs.push(['name', card.name, cleanName(nameRaw)]);
       // a rarity is the card's, read off its plain or standard rows — a stamped
       // or dot-coded reprint may wear a rarity of its own without it being a difference
       if (row.rarity && plainOrStd && !keep.has('rarity') && rarityKey(row.rarity) !== rarityKey(card.rarity || '')) {
@@ -3864,11 +3867,11 @@ function sheetImportCard(onApplied) {
       let card = null;
       if (aliasedCard) card = cards.find((c) => c.id === aliasedCard) || null;
       if (!card && numRaw) card = cards.find((c) => numKey(c.localId) === numKey(numRaw)) || null;
-      if (!aliasedCard && nameRaw && (!card || norm(card.name) !== norm(nameRaw))) {
+      if (!aliasedCard && nameRaw && (!card || nameKey(card.name) !== nameKey(nameRaw))) {
         // the number found nothing, or found a different card: a set that
         // numbers its cards by their original printings (Celebrations Classic)
         // is told apart by name, when the name is unique in the set
-        const byName = cards.filter((c) => norm(c.name) === norm(nameRaw));
+        const byName = cards.filter((c) => nameKey(c.name) === nameKey(nameRaw));
         if (byName.length === 1 && (!card || !numRaw || byName[0] !== card)) card = byName[0];
         else if (!numRaw) {
           if (byName.length > 1) { plan.problems.push(`Row ${rowNo}: "${nameRaw}" has no number and ${byName.length} cards in ${setNames.get(sid) || sid} carry that name`); continue; }
@@ -3888,7 +3891,7 @@ function sheetImportCard(onApplied) {
         const ck = sid + '|' + (numRaw ? numKey(numRaw) : 'n:' + norm(nameRaw));
         if (!plan.newCards.has(ck)) {
           if (!nameRaw) { plan.problems.push(`Row ${rowNo}: new card ${sid} #${numRaw} needs a name column`); continue; }
-          plan.newCards.set(ck, { set: sid, number: numRaw, name: nameRaw, rarity: row.rarity || undefined,
+          plan.newCards.set(ck, { set: sid, number: numRaw, name: cleanName(nameRaw), rarity: row.rarity || undefined,
             category: row.category || undefined, hp: row.hp || undefined, illustrator: row.illustrator || undefined,
             variants: {}, customs: [], rowKeys: [], aliasKey: aliasKeyOfRow(row), aliasRaw: `${setRaw} #${numRaw} ${nameRaw}`, rows: [] });
         }

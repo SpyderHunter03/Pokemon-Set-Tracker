@@ -675,6 +675,11 @@ const { chromium } = require('playwright');
   await uploadAndCheck('consultant-v4.csv');
   await openSet('test-promos');
   const c2 = '.cur-card[data-card="test-promos-2"]';
+  // the sheet's "Brand New Mon tex" — "tex" is its app's Tera ex symbol — is the card "Brand New Mon ex":
+  // the proposal is the real name, and the raw markup never reaches the screen
+  const c9diff = await page.locator('.cur-card[data-card="test-promos-9"] .cur-item[data-kind="diff"]').allTextContents();
+  check('markup: the sheet\'s "tex" is offered as "ex", never as "tex"',
+    c9diff.length === 1 && /Brand New Mon ex/.test(c9diff[0]) && !/\btex\b/.test(c9diff[0]));
   check('cosmos: "Cosmos Holo" is a printing of its own, never a spelling of Holo',
     (await page.locator('.cur-card[data-card="test-promos-9"] .cur-item[data-kind="custom"]').count()) === 1 &&
     /Sheet says "Cosmos Holo"/.test(await page.textContent('.cur-card[data-card="test-promos-9"]')));
@@ -707,10 +712,12 @@ const { chromium } = require('playwright');
   const agreed = await page.evaluate(async () => {
     const c = ((await (await fetch('api/catalog/set?lang=en&id=test-promos')).json()).cards || []).find((x) => x.id === 'test-promos-2');
     const l2 = (await (await fetch('api/masterlist/links?lang=en&cardId=test-promos-2')).json()).links;
-    return { normal: !!(c.variants && c.variants.normal), sparkle: !!(c.printings && c.printings['sparkle-foil']), linked: l2.some((l) => l.variant === 'sparkle-foil' && l.sheetVariant === 'Jumbo' && !l.gone) };
+    const c9 = ((await (await fetch('api/catalog/set?lang=en&id=test-promos')).json()).cards || []).find((x) => x.id === 'test-promos-9');
+    return { normal: !!(c.variants && c.variants.normal), sparkle: !!(c.printings && c.printings['sparkle-foil']), linked: l2.some((l) => l.variant === 'sparkle-foil' && l.sheetVariant === 'Jumbo' && !l.gone), name9: c9 && c9.name };
   });
   check('agreement: applied — Normal removed, Sparkle Foil kept and now linked to the Jumbo row',
     !agreed.normal && agreed.sparkle && agreed.linked);
+  check('markup: the written name is "Brand New Mon ex" — "tex" never lands in the catalog', agreed.name9 === 'Brand New Mon ex');
 
   // tidy the stage for the main suite: the consultant set proved its point —
   // hide it so the home page holds the sets the smoke checks expect
