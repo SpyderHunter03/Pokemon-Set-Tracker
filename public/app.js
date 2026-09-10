@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.78.0';
+const APP_VERSION = '3.79.0';
 
 /* ============================================================
  * Storage helpers
@@ -1135,7 +1135,6 @@ async function openCardModal(brief, { variant, onOwnershipChange, onCardChanged 
   const avail = () => availableVariants(card);
   let active = variant && avail().includes(variant) ? variant : avail()[0];
 
-  const chipsWrap = h('div', { class: 'chips', style: 'margin:12px 0 4px; justify-content:center' });
   const counterWrap = h('div', {});
   // provenance, for the curator: which masterlist row this printing IS
   const sourceWrap = h('div', { id: 'card-source', class: 'muted small', style: 'text-align:center; margin-top:4px' });
@@ -1175,14 +1174,6 @@ async function openCardModal(brief, { variant, onOwnershipChange, onCardChanged 
     renderModalImage(); // the picture reflects the selected printing
     renderSource();
     const track = canTrack();
-    chipsWrap.replaceChildren(...avail().map((vk) => {
-      const qty = track ? variantQty(card.id, vk) : 0;
-      return h('button', {
-        type: 'button',
-        class: 'chip' + (vk === active ? ' active' : ''),
-        onclick: () => { active = vk; renderVariantUI(); },
-      }, variantLabel(card, vk) + (qty ? ` ✓${qty > 1 ? '×' + qty : ''}` : ''));
-    }));
     if (!track) {
       // browse-only: offer sign-in instead of ownership controls
       counterWrap.replaceChildren(
@@ -1223,7 +1214,6 @@ async function openCardModal(brief, { variant, onOwnershipChange, onCardChanged 
     h('h2', {}, card.name),
     imgWrap,
     ...rows,
-    chipsWrap,
     counterWrap,
     sourceWrap,
     reportBtn,

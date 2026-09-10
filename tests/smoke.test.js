@@ -211,14 +211,14 @@ const { chromium } = require('playwright');
   c = await coll();
   check('1st Edition tracked independently', c['base1-4'].firstEdition === 1 && c['base1-4'].holo === 1);
 
-  // modal: variant switcher, quantities
+  // modal: one printing at a time — the one the tile was opened from; no switcher
   await page.click('.tcg-card >> nth=0 >> .info-btn');
-  await page.waitForSelector('#card-modal[open] .chips .chip');
-  const chipTexts = await page.locator('#card-modal .chips .chip').allTextContents();
-  check('modal chips show exactly the catalog printings + custom — no "Other / Stamped" bucket',
-    chipTexts.length === 3 && chipTexts[0].startsWith('Holo') && chipTexts[2].startsWith('Cracked Ice') && !chipTexts.some((t) => /Other/.test(t)));
+  await page.waitForSelector('#card-modal[open] .qty-row');
+  check('modal shows only the printing it was opened from — no selector chips',
+    (await page.locator('#card-modal .chips .chip').count()) === 0 &&
+    (await page.textContent('#card-modal-body')).includes('copies of Holo'));
   check('modal shows set/number/rarity', (await page.textContent('#card-modal-body')).includes('4 / 102'));
-  await page.click('#card-modal .qty-row button:last-child'); // + on active (Holo)
+  await page.click('#card-modal .qty-row button:last-child'); // + on the open printing (Holo)
   c = await coll();
   check('modal + increments active printing', c['base1-4'].holo === 2);
   await page.click('#card-modal button:has-text("Close")');
@@ -252,8 +252,13 @@ const { chromium } = require('playwright');
   await pikaFirstEd.locator('.info-btn').click();
   await page.waitForSelector('#card-modal[open] .card-img-wrap img');
   check('modal shows variant scan for 1st Edition', (await page.locator('#card-modal .card-img-wrap img').getAttribute('src')).includes('firstEdition'));
-  await page.click('#card-modal .chips .chip:has-text("Unlimited")');
-  check('modal swaps to base image for Unlimited', !(await page.locator('#card-modal .card-img-wrap img').getAttribute('src')).includes('firstEdition'));
+  check('modal names the printing it was opened from', (await page.textContent('#card-modal-body')).includes('copies of 1st Edition'));
+  await page.click('#card-modal button:has-text("Close")');
+  await page.locator('.tcg-card[data-card-id="base1-58"][data-variant="normal"] .info-btn').click();
+  await page.waitForSelector('#card-modal[open] .card-img-wrap img');
+  check('opening the Unlimited tile shows the base image and names Unlimited',
+    !(await page.locator('#card-modal .card-img-wrap img').getAttribute('src')).includes('firstEdition') &&
+    (await page.textContent('#card-modal-body')).includes('copies of Unlimited'));
   await page.click('#card-modal button:has-text("Close")');
 
   // ---- sorting ----
