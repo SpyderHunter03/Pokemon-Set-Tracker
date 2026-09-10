@@ -573,7 +573,14 @@ select.chip { appearance: none; padding-right: 22px; }
 
 .modal::backdrop { background: rgba(0, 0, 0, .6); backdrop-filter: blur(3px); }
 
-.modal-body { padding: 20px; }
+.modal-body { padding: 20px; position: relative; }
+.modal-close {
+  position: absolute; top: 10px; right: 10px; width: 34px; height: 34px; border-radius: 50%;
+  border: 1px solid var(--border); background: var(--surface-2); color: var(--muted);
+  font-size: 22px; line-height: 1; display: flex; align-items: center; justify-content: center; cursor: pointer; padding: 0;
+}
+.modal-close:hover { color: var(--text); border-color: var(--text); }
+.modal h2 { padding-right: 40px; }
 
 .modal h2 { margin: 0 0 12px; font-size: 19px; }
 

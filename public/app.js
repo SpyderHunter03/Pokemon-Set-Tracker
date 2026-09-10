@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.79.0';
+const APP_VERSION = '3.80.0';
 
 /* ============================================================
  * Storage helpers
@@ -1202,23 +1202,24 @@ async function openCardModal(brief, { variant, onOwnershipChange, onCardChanged 
 
   // anyone signed in can tell the curator what is missing from this card —
   // adding printings is the curator's job, done in Administration
-  const reportBtn = auth ? h('div', { class: 'row', style: 'justify-content:center; margin-top:10px' },
-    h('button', { type: 'button', class: 'btn ghost small', 'data-report-missing': '', onclick: () => {
-      cardModal.close();
-      openReportDialog({ card, set });
-    } }, '✎ Report a missing printing')) : null;
+  const reportBtn = auth ? h('button', { type: 'button', class: 'btn ghost', 'data-report-missing': '', onclick: () => {
+    cardModal.close();
+    openReportDialog({ card, set });
+  } }, '✎ Report a missing printing') : null;
 
   renderVariantUI();
 
   body.replaceChildren(
+    // the way out lives in the corner, where every dialog keeps it
+    h('button', { type: 'button', class: 'modal-close', 'aria-label': 'Close', title: 'Close', onclick: () => cardModal.close() }, '\u00d7'),
     h('h2', {}, card.name),
     imgWrap,
     ...rows,
     counterWrap,
     sourceWrap,
-    reportBtn,
-    h('div', { class: 'row', style: 'margin-top:14px; justify-content:flex-end; gap:8px' },
-      auth ? h('button', { class: 'btn ghost', onclick: async (e) => {
+    !auth ? null : h('div', { class: 'row', style: 'margin-top:14px; justify-content:center; gap:8px; flex-wrap:wrap' },
+      reportBtn,
+      h('button', { class: 'btn ghost', onclick: async (e) => {
         const btn = e.target;
         btn.disabled = true;
         try {
@@ -1248,8 +1249,7 @@ async function openCardModal(brief, { variant, onOwnershipChange, onCardChanged 
           }
         } catch (err) { toast(err.message); }
         finally { btn.disabled = false; }
-      } }, '📒 Add to binder') : null,
-      h('button', { class: 'btn ghost', onclick: () => cardModal.close() }, 'Close'),
+      } }, '📒 Add to binder'),
     ),
   );
 }

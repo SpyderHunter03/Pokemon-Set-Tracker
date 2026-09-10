@@ -63,7 +63,7 @@ const { chromium } = require('playwright');
   const guestColl = await page.evaluate(() => JSON.parse(localStorage.getItem('ptcg.collection.v2') || '{}'));
   check('logged out: tapping a card does not track', Object.keys(guestColl).length === 0);
   check('logged out: modal offers sign-in', (await page.locator('#card-modal button', { hasText: 'Sign in' }).count()) >= 1);
-  await page.click('#card-modal button:has-text("Close")');
+  await page.click('#card-modal .modal-close');
   // signed out there is no server-side collection to back up, and two of the
   // four tabs would have nothing in them — so the page is just the sign-in form
   await page.goto('http://localhost:3111/#/account');
@@ -221,7 +221,7 @@ const { chromium } = require('playwright');
   await page.click('#card-modal .qty-row button:last-child'); // + on the open printing (Holo)
   c = await coll();
   check('modal + increments active printing', c['base1-4'].holo === 2);
-  await page.click('#card-modal button:has-text("Close")');
+  await page.click('#card-modal .modal-close');
   check('qty badge ×2 on holo tile', (await page.textContent('.tcg-card >> nth=0 >> .qty-badge')).trim() === '×2');
 
   // multi-copy tile: tap opens details instead of clearing
@@ -229,7 +229,7 @@ const { chromium } = require('playwright');
   await page.waitForSelector('#card-modal[open]');
   c = await coll();
   check('tap on multi-copy printing opens details, keeps data', c['base1-4'].holo === 2);
-  await page.click('#card-modal button:has-text("Close")');
+  await page.click('#card-modal .modal-close');
 
   // owned/missing filters act per printing
   await page.click('.chip:has-text("Owned")');
@@ -253,13 +253,13 @@ const { chromium } = require('playwright');
   await page.waitForSelector('#card-modal[open] .card-img-wrap img');
   check('modal shows variant scan for 1st Edition', (await page.locator('#card-modal .card-img-wrap img').getAttribute('src')).includes('firstEdition'));
   check('modal names the printing it was opened from', (await page.textContent('#card-modal-body')).includes('copies of 1st Edition'));
-  await page.click('#card-modal button:has-text("Close")');
+  await page.click('#card-modal .modal-close');
   await page.locator('.tcg-card[data-card-id="base1-58"][data-variant="normal"] .info-btn').click();
   await page.waitForSelector('#card-modal[open] .card-img-wrap img');
   check('opening the Unlimited tile shows the base image and names Unlimited',
     !(await page.locator('#card-modal .card-img-wrap img').getAttribute('src')).includes('firstEdition') &&
     (await page.textContent('#card-modal-body')).includes('copies of Unlimited'));
-  await page.click('#card-modal button:has-text("Close")');
+  await page.click('#card-modal .modal-close');
 
   // ---- sorting ----
   await page.selectOption('.chips select >> nth=0', 'name');
@@ -1029,7 +1029,7 @@ const { chromium } = require('playwright');
     await vp.waitForSelector('#card-modal[open]');
     check('share: tapping a card opens it instead of ticking somebody else’s list',
       (await vp.textContent('#view')).includes('1 / 10 in hand'));
-    await vp.click('#card-modal button:has-text("Close")');
+    await vp.click('#card-modal .modal-close');
 
     // ---- the same link, without publishing what is in the house ----
     await page.click('.binder-cover');
