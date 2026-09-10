@@ -1,7 +1,7 @@
 {
   "name": "pokemon-tcg-tracker",
   "version": "1.0.0",
-  "description": "Self-hostable PWA to track your Pokémon card collection",
+  "description": "PWA to track your Pokémon card collection",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"

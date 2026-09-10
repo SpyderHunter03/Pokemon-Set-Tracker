@@ -232,19 +232,46 @@ function fail(msg) {
     try { fs.unlinkSync(orphanNew); } catch { /* tidy */ }
   }
 
-  // ---- personal printings: the per-user layer over the catalog ----
+  // ---- personal printings: the curator's own layer over the catalog ----
   {
-    const regA = await jfetch('http://localhost:3111/api/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'mineuser', password: 'password123' }) });
-    const aAuth = { 'Content-Type': 'application/json', Authorization: 'Bearer ' + regA.token };
+    const admL = await jfetch('http://localhost:3111/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'ptcgadmin', password: 'password123' }) });
+    const aAuth = { 'Content-Type': 'application/json', Authorization: 'Bearer ' + admL.token };
     const regB = await jfetch('http://localhost:3111/api/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'notmineuser', password: 'password123' }) });
     const bAuth2 = { 'Content-Type': 'application/json', Authorization: 'Bearer ' + regB.token };
 
     const made = await jfetch('http://localhost:3111/api/my/printings', { method: 'POST', headers: aAuth, body: JSON.stringify({ cardId: 'base1-4', label: 'Graded PSA 9' }) });
     check('personal printing minted with a my- key', made.ok === true && made.key === 'my-graded-psa-9' && made.label === 'Graded PSA 9');
     const list = await jfetch('http://localhost:3111/api/my/printings?lang=en', { headers: aAuth });
-    check('personal printing listed for its owner', list.printings.length === 1 && list.printings[0].card === 'base1-4' && list.printings[0].label === 'Graded PSA 9');
-    const listB = await jfetch('http://localhost:3111/api/my/printings?lang=en', { headers: bAuth2 });
-    check('somebody else sees none of it', (listB.printings || []).length === 0);
+    check('personal printing listed for its owner', list.printings.some((p) => p.card === 'base1-4' && p.label === 'Graded PSA 9'));
+    const listB = (await fetch('http://localhost:3111/api/my/printings?lang=en', { headers: bAuth2 })).status;
+    const madeB = (await fetch('http://localhost:3111/api/my/printings', { method: 'POST', headers: bAuth2, body: JSON.stringify({ cardId: 'base1-4', label: 'Nope' }) })).status;
+    check('personal printings are the curator\'s alone: a regular account is refused', listB === 403 && madeB === 403);
+
+    // what a regular account gets instead: a report the curator answers
+    const rep = await jfetch('http://localhost:3111/api/reports', { method: 'POST', headers: bAuth2, body: JSON.stringify({ lang: 'en', kind: 'printing', cardId: 'base1-4', cardName: 'Charizard', number: '4', setName: 'Base Set', printing: 'Shadowless', note: 'Seen at a shop' }) });
+    check('a collector reports a missing printing', rep.ok === true && rep.report.status === 'open' && rep.report.printing === 'Shadowless' && rep.report.cardId === 'base1-4');
+    const repBad = (await fetch('http://localhost:3111/api/reports', { method: 'POST', headers: bAuth2, body: JSON.stringify({ kind: 'printing', cardId: 'base1-4' }) })).status;
+    check('a printing report must say which printing', repBad === 400);
+    const repCard = await jfetch('http://localhost:3111/api/reports', { method: 'POST', headers: bAuth2, body: JSON.stringify({ kind: 'card', setName: 'Base Set', cardName: 'Nowhere Mon', number: '999' }) });
+    check('a collector reports a missing card without a card id', repCard.ok === true && repCard.report.kind === 'card');
+    const mine = await jfetch('http://localhost:3111/api/reports', { headers: bAuth2 });
+    check('the collector sees their own reports', mine.reports.length === 2);
+    const allDenied = (await fetch('http://localhost:3111/api/reports/all', { headers: bAuth2 })).status;
+    const resolveDenied = (await fetch('http://localhost:3111/api/reports/resolve', { method: 'POST', headers: bAuth2, body: JSON.stringify({ id: rep.report.id, status: 'done' }) })).status;
+    check('only the curator lists everything or answers', allDenied === 403 && resolveDenied === 403);
+    const all = await jfetch('http://localhost:3111/api/reports/all', { headers: aAuth });
+    check('the curator sees every open report with who sent it', all.open >= 2 && all.reports.some((r) => r.id === rep.report.id && r.username === 'notmineuser'));
+    const me = await jfetch('http://localhost:3111/api/me', { headers: aAuth });
+    check('the curator\'s /me carries the open count', me.openReports >= 2);
+    const done = await jfetch('http://localhost:3111/api/reports/resolve', { method: 'POST', headers: aAuth, body: JSON.stringify({ id: rep.report.id, status: 'done', reply: 'Added as Shadowless' }) });
+    check('the curator marks a report done with a word back', done.ok === true && done.report.status === 'done' && done.report.reply === 'Added as Shadowless' && !!done.report.resolved);
+    const mine2 = await jfetch('http://localhost:3111/api/reports', { headers: bAuth2 });
+    check('the collector sees the answer', mine2.reports.find((r) => r.id === rep.report.id).reply === 'Added as Shadowless');
+    const wdDone = (await fetch('http://localhost:3111/api/reports/withdraw', { method: 'POST', headers: bAuth2, body: JSON.stringify({ id: rep.report.id }) })).status;
+    const wdOpen = await jfetch('http://localhost:3111/api/reports/withdraw', { method: 'POST', headers: bAuth2, body: JSON.stringify({ id: repCard.report.id }) });
+    check('a collector can withdraw an open report, never an answered one', wdDone === 404 && wdOpen.ok === true);
+    const openNow = await jfetch('http://localhost:3111/api/reports/all?status=open', { headers: aAuth });
+    check('answered and withdrawn reports leave the open list', !openNow.reports.some((r) => r.id === rep.report.id || r.id === repCard.report.id));
     const pubSet = await jfetch('http://localhost:3111/api/catalog/set?lang=en&id=base1');
     check('the shared catalog stays clean of personal printings', !JSON.stringify(pubSet).includes('my-graded-psa-9'));
 
@@ -1034,7 +1061,7 @@ function fail(msg) {
       idp.close();
   }
 
-  console.log('=== 7/8 variant importer + read-only mode + offline mirror ===');
+  console.log('=== 7/8 variant importer + catalog editing + accounts ===');
 
   // ---- shell caching: app.js must ALWAYS revalidate (a max-age here once
   //      kept browsers on an old UI for a day after an upgrade) ----
@@ -1077,24 +1104,6 @@ function fail(msg) {
   check('masterlist importer reports unmatched expansions', /Expansions with no matching set: 1/.test(mlOut));
   const mlA = spawnSync('node', ['scripts/import-masterlist.js', 'tests/fixtures/masterlist-sample.csv', '--analyze'], { cwd: ROOT, encoding: 'utf8' });
   check('masterlist importer --analyze parses without a database', mlA.status === 0 && /Printings: 7/.test(mlA.stdout || ''));
-
-  // ---- read-only (central) server mode ----
-  fs.rmSync(path.join(ROOT, '.test-data-ro'), { recursive: true, force: true });
-  start('node', ['server.js'], { PORT: '3113', DATA_DIR: path.join(ROOT, '.test-data-ro'), PTCG_READONLY: '1' });
-  await waitForPort(3113).catch((e) => fail(e.message));
-  const roReg = await jfetch('http://localhost:3113/api/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'roadmin', password: 'password123' }) });
-  const roAuth = { 'Content-Type': 'application/json', Authorization: 'Bearer ' + roReg.token };
-  const roCfg = await jfetch('http://localhost:3113/api/app-config');
-  const roBuild = (await fetch('http://localhost:3113/api/build-data', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).status;
-  const roMirror = (await fetch('http://localhost:3113/api/mirror', { method: 'POST', headers: roAuth, body: JSON.stringify({ remote: 'http://localhost:3111/cdn' }) })).status;
-  const roCustom = (await fetch('http://localhost:3113/api/custom-variant', { method: 'POST', headers: roAuth, body: JSON.stringify({ cardId: 'base1-4', label: 'Nope Holo' }) })).status;
-  const roUpload = (await fetch('http://localhost:3113/api/variant-image?cardId=base1-4&variant=holo', { method: 'POST', headers: roAuth, body: 'x' })).status;
-  check('read-only server reports itself in app-config', roCfg.readonly === true);
-  check('read-only blocks every database write (build/mirror/printing/upload)',
-    roBuild === 403 && roMirror === 403 && roCustom === 403 && roUpload === 403);
-  const roOverlayCard = (await fetch('http://localhost:3113/api/card', { method: 'POST', headers: roAuth, body: JSON.stringify({ localId: '1', set: 'x', name: 'X', new: true }) })).status;
-  const roOverlayRemove = (await fetch('http://localhost:3113/api/card-hide', { method: 'POST', headers: roAuth, body: JSON.stringify({ cardId: 'base1-4' }) })).status;
-  check('read-only blocks overlay editing (add-card / remove)', roOverlayCard === 403 && roOverlayRemove === 403);
 
   // ---- catalog editing writes to the database (add printing shows in the API) ----
   fs.rmSync(path.join(ROOT, '.test-data-ov'), { recursive: true, force: true });
@@ -1304,29 +1313,6 @@ function fail(msg) {
   check('editor: re-ticking the variant restores it with its scan',
     pk2 && pk2.variants && pk2.variants.firstEdition === true &&
     !!(pk2.variantImages && pk2.variantImages.firstEdition && pk2.variantImages.firstEdition.low));
-
-  // ---- download all images locally: repoint a remote image to /cdn ----
-  {
-    const { DatabaseSync } = require('node:sqlite');
-    const ddb = new DatabaseSync(path.join(ROOT, '.test-data-ov', 'ptcg.db'));
-    // point a card at a remote image the mock TCGdex CDN can serve
-    ddb.exec("UPDATE cards SET img_low = 'http://localhost:3999/imgcdn/en/images/base1/4/low.webp', img_high = NULL WHERE lang='en' AND id='base1-4'");
-    ddb.close();
-  }
-  const dlCfg = await jfetch('http://localhost:3115/api/app-config');
-  const dlStart = await ovH('/api/catalog/download-images', {});
-  let dlDone = null;
-  for (let i = 0; i < 120 && !dlDone; i++) {
-    const st = await jfetch('http://localhost:3115/api/build-status');
-    if (!st.running) dlDone = st; else await new Promise((r) => setTimeout(r, 300));
-  }
-  const dlSet = await jfetch('http://localhost:3115/api/catalog/set?lang=en&id=base1');
-  const dlB4 = (dlSet.cards || []).find((c) => c.id === 'base1-4');
-  check('download-images: a remote image is detected', dlCfg.images && dlCfg.images.remote >= 1);
-  check('download-images: run completes and repoints the row to a local /cdn path',
-    dlStart.started === true && dlDone && !dlDone.error && dlB4 && dlB4.img && /^\/cdn\//.test(dlB4.img.low || ''));
-  check('download-images: the file was saved on this server',
-    fs.existsSync(path.join(ROOT, 'public', 'cdn', 'en', 'images', 'base1', '4', 'low.webp')));
 
   // ---- SQLite accounts: change-password invalidates old sessions ----
   const cpUser = await jfetch('http://localhost:3115/api/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'cpuser', password: 'password123' }) });
@@ -1601,25 +1587,6 @@ function fail(msg) {
     migColl.collection && migColl.collection['base1-58'] && migColl.collection['base1-58'].normal === 5 && migMe.admin === true);
   check('JSON→SQLite migration: db created, old files archived',
     fs.existsSync(path.join(migDir, 'ptcg.db')) && fs.existsSync(path.join(migDir, 'users.json.migrated')));
-
-  // ---- offline mirror: fresh install copies a remote database locally ----
-  fs.rmSync(path.join(ROOT, '.test-data-mirror'), { recursive: true, force: true });
-  start('node', ['server.js'], { PORT: '3114', DATA_DIR: path.join(ROOT, '.test-data-mirror') });
-  await waitForPort(3114).catch((e) => fail(e.message));
-  const mReg = await jfetch('http://localhost:3114/api/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'mirroradmin', password: 'password123' }) });
-  const mStart = await jfetch('http://localhost:3114/api/mirror', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + mReg.token }, body: JSON.stringify({ remote: 'http://localhost:3111/cdn' }) });
-  let mDone = null;
-  for (let i = 0; i < 240 && !mDone; i++) {
-    const st = await jfetch('http://localhost:3114/api/build-status');
-    if (!st.running) mDone = st;
-    else await new Promise((r) => setTimeout(r, 500));
-  }
-  const mCfg = await jfetch('http://localhost:3114/api/app-config');
-  check('mirror runs to completion without errors',
-    mStart.started === true && mDone && !mDone.error && mDone.progress && mDone.progress.done === true);
-  check('mirror skips files that already exist locally',
-    mDone && mDone.progress.imagesSkipped > 0 && mDone.progress.imageFailures === 0);
-  check('mirror switches the install to the local copy', mCfg.imageSource === 'local' && mCfg.localDbExists === true);
 
   console.log('=== 8/8 master catalog.db publish → pull round-trip (against mock S3) ===');
   const os = require('os');
@@ -2040,7 +2007,7 @@ function fail(msg) {
   if (suite.status !== 0) { console.error('\nBrowser suite failed.'); process.exit(1); }
   if (!publishOk) { console.error('\nPublisher checks failed.'); process.exit(1); }
   if (!pullOk) { console.error('\nMaster catalog.db pull round-trip failed.'); process.exit(1); }
-  if (stageFails) { console.error(`\n${stageFails} importer/read-only/mirror check(s) failed.`); process.exit(1); }
+  if (stageFails) { console.error(`\n${stageFails} importer/editing/accounts check(s) failed.`); process.exit(1); }
 
   console.log('\nAll stages completed.');
 })().catch((e) => fail(e.stack || e.message));

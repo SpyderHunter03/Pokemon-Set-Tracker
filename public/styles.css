@@ -1331,10 +1331,20 @@ body.printing-proxies #print-area {
 .ce-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px 10px; }
 @media (max-width: 480px) { .ce-grid { grid-template-columns: 1fr; } }
 .ce-field { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
-.ce-field input, .ce-field select {
+.ce-field input, .ce-field select, .ce-field textarea {
   background: var(--card, #1c2333); color: inherit; border: 1px solid var(--line, #333);
   border-radius: 8px; padding: 7px 9px; font-size: 14px; width: 100%; box-sizing: border-box;
 }
+.ce-field textarea { font-family: inherit; resize: vertical; min-height: 64px; }
+/* reports: what collectors say the catalog is missing */
+.report-panel { max-width: 460px; overflow-y: auto; }
+.report-panel .ce-field input { flex: none; }
+.report-list { display: flex; flex-direction: column; gap: 8px; }
+.report-row { border: 1px solid var(--line, #2a3040); border-radius: 8px; padding: 8px 10px; }
+.report-row .report-head { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: baseline; }
+.report-row .report-status { font-size: 12px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line, #333); }
+.report-row .report-status.done { border-color: var(--owned); color: var(--owned); }
+.report-row .report-status.dismissed { opacity: .6; }
 .ce-vars { display: flex; flex-wrap: wrap; gap: 4px 14px; }
 .ce-var { display: inline-flex; align-items: center; gap: 5px; font-size: 14px; cursor: pointer; }
 

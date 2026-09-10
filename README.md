@@ -33,7 +33,7 @@ There are two roles, and they are deliberately kept apart:
 - **The maintainer workspace** manages the one authoritative copy of the card data. It is *not* a personal install — it's a dedicated workbench (see [The maintainer workspace](#the-maintainer-workspace) below) where the TCGdex download runs, edits are made (add printings, upload images, repoint pictures), and from which the master is **published** to object storage (Cloudflare R2 or any S3-compatible bucket). The master is a single file, `catalog.db`, holding only card information and the R2 locations of the images, plus a tiny `catalog.json` manifest carrying the **master version number**.
 - **Every install** (today: the hosted site) is a **consumer**: on first boot it downloads `catalog.db` and loads it into its own local SQLite database, ending up an exact duplicate of the master — cards, image locations, and all published edits.
 
-**Versioning and updates.** Every publish that actually changes the data bumps the master version automatically. Installs check the version with one tiny request (`catalog.json`) — the admin panel shows whether you're up to date, and when you're behind, an **Update card database (vX → vY)** button pulls just the card data. Updating never re-downloads images: image files stay wherever they already are (on the bucket, or on your server if you used "Download all images"). Those are two independent things — keeping card *data* current, and choosing where *images* are served from.
+**Versioning and updates.** Every publish that actually changes the data bumps the master version automatically. Installs check the version with one tiny request (`catalog.json`) — the admin panel shows whether you're up to date, and when you're behind, an **Update card database (vX → vY)** button pulls just the card data. Updating never re-downloads images: image files stay on the bucket.
 
 **The merge contract.** Updates flow strictly one way, master → installs, with two guarantees:
 
@@ -195,15 +195,9 @@ The publisher (`scripts/publish-images.js`) uploads the master `catalog.db` **an
 
 Line the card up with the on-screen frame and capture (or snap a photo). The app computes a perceptual fingerprint of the image and compares it against the fingerprints of every card in your database, showing the top matches with an ownership badge — tap one to add it to your collection on the spot. Tips: fill the frame with the card, avoid glare/sleeves' reflections, and expect the match list (rather than a single guess) to be the norm — reprints with identical artwork genuinely look alike.
 
-## Variant image API (share your library)
+## Reporting what is missing
 
-Your card database is served openly (CORS `*`), so other apps — or friends running this tracker — can pull your variant images:
-
-- `GET /api/variant-images?lang=en` — JSON manifest of every variant image you've added (card, set, variant, URLs).
-- `GET /cdn/en/images/<set>/<number>/<variant>-<low|high>.webp` — the images themselves (long-cached, immutable).
-- The rest of the database is equally fetchable: `/cdn/languages.json`, `/cdn/en/index.json`, `/cdn/en/sets/<set>.json`, `/cdn/custom.json` (custom printing definitions).
-
-A note on sourcing: for a public API, share images of your own cards (or scans you made). Pictures saved from marketplaces like Cardmarket are fine as personal reference, but redistributing them publicly isn't yours to license.
+The catalog is curated by hand, and collectors cannot add printings of their own — instead, any signed-in account can **report a missing card or printing** (from the account page, or from a card's details with "Report a missing printing"). Reports land on the Administration → **Reports** tab, where the curator adds the card or printing in Curation and marks the report *Added* (or *Not added*) with a word back; the collector sees the answer on their account page and can withdraw an open report at any time.
 
 ## First run
 

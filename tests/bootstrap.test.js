@@ -176,14 +176,6 @@ const { chromium } = require('playwright');
   check('custom tile shows uploaded image', (await customTile.locator('img').getAttribute('src')).includes('cracked-ice-holo-low.webp'));
   check('custom tile labeled correctly', (await customTile.locator('.fx-label').textContent()) === 'Cracked Ice Holo');
 
-  // public image API lists it, CORS open
-  const manifest = await page.evaluate(async () => {
-    const r = await fetch('api/variant-images?lang=en');
-    return { cors: r.headers.get('access-control-allow-origin'), body: await r.json() };
-  });
-  check('variant-image API lists the upload with URLs',
-    manifest.cors === '*' &&
-    manifest.body.images.some((i) => i.card === 'base1-4' && i.variant === 'cracked-ice-holo' && i.urls.low && i.urls.high));
 
   // Non-admins cannot add printings or upload. Asked from outside the browser
   // on purpose: the session now lives in a cookie, so a fetch made ON the page

@@ -1381,17 +1381,6 @@ const { chromium } = require('playwright');
     await deadCtx.close();
   }
 
-  // ---- copied files with no server behind them → the app does nothing ----
-  {
-    const gctx = await browser.newContext({ serviceWorkers: 'block' });
-    const gp = await gctx.newPage();
-    await gp.route('**/api/**', (r) => r.abort()); // simulate: no server at all
-    await gp.goto('http://localhost:3111/');
-    await gp.waitForSelector('h2:has-text("Server required")');
-    check('no-server copy is gated (server required)', (await gp.locator('.set-card').count()) === 0);
-    await gctx.close();
-  }
-
   // ---- the main menu turns ninety degrees on a wide window ----
   // A bar across the bottom is right where a thumb is. On a laptop the bottom
   // of the window is the furthest point from what you are reading.
@@ -1523,7 +1512,65 @@ const { chromium } = require('playwright');
     check('the Security tab holds two-factor and the password',
       (await ap.textContent('#account-page')).includes('Change password') &&
       ap.url().endsWith('#/account/security'));
+
+    // a collector cannot add printings of their own any more — they report
+    // what is missing and the curator adds it for everyone
+    await ap.goto('http://localhost:3111/#/set/base1');
+    await ap.waitForSelector('.tcg-card');
+    await ap.click('.tcg-card[data-card-id="base1-4"] >> nth=0 >> .info-btn');
+    await ap.waitForSelector('#card-modal[open] [data-report-missing]');
+    check('report: a collector\'s card details offer a report, never personal printings',
+      (await ap.locator('#card-modal button:has-text("just for you")').count()) === 0 &&
+      (await ap.locator('#card-modal button:has-text("Your scan")').count()) === 0);
+    await ap.click('#card-modal [data-report-missing]');
+    await ap.waitForSelector('#report-panel');
+    check('report: the form arrives filled in with the card it came from',
+      (await ap.locator('#card-modal[open]').count()) === 0 &&
+      (await ap.locator('#report-panel input >> nth=1').inputValue()) !== '' &&
+      (await ap.locator('#report-panel input >> nth=2').inputValue()) === '4');
+    await ap.click('#report-panel [data-report-send]');
+    await ap.waitForSelector('#report-panel p:has-text("Say which printing")');
+    check('report: it will not send without saying which printing', true);
+    await ap.fill('#report-panel input >> nth=3', 'Shadowless Holo');
+    await ap.fill('#report-panel textarea', 'The 1999 shadowless run');
+    await ap.click('#report-panel [data-report-send]');
+    await ap.waitForSelector('#report-panel', { state: 'detached' });
+    await ap.goto('http://localhost:3111/#/account');
+    await ap.waitForSelector('#my-reports .report-row');
+    check('report: the account page lists what you sent, still open',
+      (await ap.textContent('#my-reports')).includes('Shadowless Holo') &&
+      (await ap.locator('#my-reports .report-status.open').count()) === 1);
+    check('report: the account page offers the form on its own too',
+      (await ap.locator('#report-missing').count()) === 1);
     await actx.close();
+  }
+
+  // ---- the curator answers: the Reports tab in Administration ----
+  {
+    const rctx = await browser.newContext({ serviceWorkers: 'block' });
+    const rp = await rctx.newPage();
+    await rp.goto('http://localhost:3111/');
+    await rp.evaluate(async () => {
+      const r = await fetch('api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'ptcgadmin', password: 'password123' }) });
+      const d = await r.json();
+      localStorage.setItem('ptcg.auth', JSON.stringify({ token: d.token, username: d.username }));
+    });
+    await rp.reload();                                                  // the app reads the token at start-up
+    await rp.waitForSelector('.set-card');
+    await rp.goto('http://localhost:3111/#/admin/reports');
+    await rp.waitForSelector('#admin-reports .report-row');
+    const row = rp.locator('#admin-reports .report-row:has-text("Shadowless Holo")');
+    check('report: the curator sees the open report with who sent it',
+      (await row.count()) === 1 && /from smokelogin/.test(await row.textContent()));
+    await row.locator('input[type=text]').fill('Added it — thanks');
+    await row.locator('button:has-text("Added")').click();
+    await rp.waitForSelector('#admin-reports .report-row:has-text("Shadowless Holo")', { state: 'detached' });
+    check('report: marked as added, it leaves the open list', true);
+    await rp.selectOption('#report-filter', 'done');
+    await rp.waitForSelector('#admin-reports .report-row:has-text("Shadowless Holo") .report-status.done');
+    check('report: under "Added" it carries the reply the collector will read',
+      (await rp.textContent('#admin-reports .report-row:has-text("Shadowless Holo")')).includes('Added it'));
+    await rctx.close();
   }
 
   // ---- editing a card from a binder leaves the binder exactly where it was ----

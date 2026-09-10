@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.74.0';
+const APP_VERSION = '3.75.0';
 
 /* ============================================================
  * Storage helpers
@@ -166,7 +166,7 @@ function dbErrorView(title, err, retry) {
     h('p', {}, title),
     h('p', { class: 'small' }, err.message),
     h('p', { class: 'small' }, err.notFound
-      ? 'If you already ran build-data.js, this usually means the app or its cached files are out of date, or the data was downloaded with an older version. "Repair & reload" fixes cached-version problems; re-running "node scripts/build-data.js" upgrades old data (your images are kept).'
+      ? 'This usually means the app or its cached files are out of date. "Repair & reload" fetches the current app; if it keeps happening, the server may still be loading its card database.'
       : ''),
     h('div', { class: 'row', style: 'justify-content:center; margin-top:10px' },
       retry ? h('button', { class: 'btn', onclick: retry }, 'Retry') : null,
@@ -710,7 +710,6 @@ function detectServer() {
         const res = await fetch('api/health', { cache: 'no-store' });
         const data = await res.json();
         serverAvailable = !!data.ok;
-        if (serverAvailable) lsSet('ptcg.serverSeen', true); // remember this is a server-backed install
       } catch { serverAvailable = false; }
       updateAccountButton();
     })();
@@ -721,10 +720,6 @@ function detectServer() {
 /** Tracking (ownership, stats, badges, filters) requires a signed-in account.
  * Signing in requires the server, so this is false for logged-out visitors. */
 function canTrack() { return !!auth; }
-
-/** The app is meant to run with its bundled server. A bare copy of the files
- * with no server behind it (and no memory of ever having one) can do nothing. */
-function serverEverSeen() { return !!lsGet('ptcg.serverSeen'); }
 
 /* The session now rides in an httpOnly cookie the browser attaches by itself,
  * so there is nothing here to send — and nothing here for a stray script to
@@ -742,10 +737,10 @@ async function ensureMe() {
   return _meCache;
 }
 
-/* ---------- personal printings (your own layer over the catalog) ----------
- * Loaded once per account+language and merged into every place printings
- * render. Strictly yours: other accounts never see these, and the master
- * database never carries them. */
+/* ---------- personal printings (the curator's own layer over the catalog) ----------
+ * Admin only. Loaded once per account+language and merged into every place
+ * printings render. Strictly the curator's: other accounts never see these,
+ * and the master database never carries them. */
 let _myPrints = {};            // cardId -> variant -> { label, img }
 let _myPrintsKey = null;       // "username|lang" the map belongs to
 let _myPrintsLoading = null;
@@ -753,7 +748,8 @@ function myPrintingsFor(cardId) {
   return (_myPrintsKey === `${auth && auth.username}|${lang}` && _myPrints[cardId]) || null;
 }
 async function loadMyPrintings() {
-  const key = auth && serverAvailable ? `${auth.username}|${lang}` : null;
+  const me = auth && serverAvailable ? await ensureMe() : null;
+  const key = me && me.admin ? `${auth.username}|${lang}` : null;   // the curator's layer only
   if (!key) { _myPrints = {}; _myPrintsKey = null; return; }
   if (_myPrintsKey === key || _myPrintsLoading === key) return;
   _myPrintsLoading = key;
@@ -1157,8 +1153,8 @@ async function openCardModal(brief, { variant, onOwnershipChange, onCardChanged 
   } catch { /* offline — show what we have */ }
   if (!card.variants && brief.variants) card.variants = brief.variants;
   const me = await ensureMe();
-  await loadMyPrintings();   // the personal layer must be in hand before printings render
   const isAdmin = !!(me && me.admin);
+  if (isAdmin) await loadMyPrintings();   // the curator's personal layer must be in hand before printings render
 
   const rows = [];
   const kv = (k, v) => { if (v) rows.push(h('div', { class: 'kv' }, h('span', {}, k), h('span', {}, String(v)))); };
@@ -1231,7 +1227,7 @@ async function openCardModal(brief, { variant, onOwnershipChange, onCardChanged 
       counterWrap.replaceChildren(
         h('div', { class: 'row', style: 'justify-content:center; margin-top:6px' },
           h('button', { class: 'btn small', onclick: () => { cardModal.close(); goToAccount(); } },
-            serverAvailable ? '🔑 Sign in to track your collection' : 'Tracking needs the server')),
+            '🔑 Sign in to track your collection')),
       );
       return;
     }
@@ -1253,12 +1249,12 @@ async function openCardModal(brief, { variant, onOwnershipChange, onCardChanged 
     renderMineControls();
   }
 
-  /* ---- yours alone: personal printings and your own scans ----
-   * For every signed-in account (the admin included — this is how the curator
-   * keeps their collector hat separate from the master database). */
+  /* ---- the curator's own layer: personal printings and scans ----
+   * Admin only. Everyone else asks for a missing printing through
+   * "Report a missing card or printing" and the curator adds it for all. */
   function renderMineControls() {
     mineWrap.replaceChildren();
-    if (!auth || !serverAvailable) return;
+    if (!auth || !isAdmin) return;
     const mineMap = myPrintingsFor(card.id) || {};
     const mineRow = mineMap[active] || null;
     const fileInput = h('input', { type: 'file', accept: 'image/*', hidden: '', 'data-mine-upload': '' });
@@ -1314,6 +1310,13 @@ async function openCardModal(brief, { variant, onOwnershipChange, onCardChanged 
     );
   }
 
+  // anyone signed in can tell the curator what is missing from this card
+  const reportBtn = auth && !isAdmin ? h('div', { class: 'row', style: 'justify-content:center; margin-top:10px' },
+    h('button', { type: 'button', class: 'btn ghost small', 'data-report-missing': '', onclick: () => {
+      cardModal.close();
+      openReportDialog({ card, set });
+    } }, '✎ Report a missing printing')) : null;
+
   renderVariantUI();
 
   body.replaceChildren(
@@ -1324,6 +1327,7 @@ async function openCardModal(brief, { variant, onOwnershipChange, onCardChanged 
     counterWrap,
     sourceWrap,
     mineWrap,
+    reportBtn,
     h('div', { class: 'row', style: 'margin-top:14px; justify-content:flex-end; gap:8px' },
       auth ? h('button', { class: 'btn ghost', onclick: async (e) => {
         const btn = e.target;
@@ -1434,7 +1438,8 @@ function buildProgressView(onDone) {
 
 /** Shown on the main page when the app has no card database yet. */
 async function renderBootstrap() {
-  const status = await getBuildStatus();
+  const me = await ensureMe();
+  const status = me && me.admin ? await getBuildStatus() : null;
   const panel = h('div', { class: 'center', style: 'max-width:460px; margin:40px auto' });
 
   const showProgress = () => {
@@ -1448,18 +1453,12 @@ async function renderBootstrap() {
 
   if (status && status.running) {
     showProgress();
-  } else if (appConfig.remoteCatalog) {
-    // A shared card database (CDN) is configured — the fast path is to pull the
-    // catalog from it (card data into this DB; images stay on the CDN). No need
-    // to download hundreds of MB from TCGdex.
-    const buildFromSource = h('button', { class: 'btn ghost small', style: 'margin-top:10px', onclick: async (e) => {
-      e.target.disabled = true;
-      try { await startDatabaseBuild(); showProgress(); }
-      catch (err) { e.target.disabled = false; toast(err.message); }
-    } }, 'Or build a full local database from TCGdex');
+  } else if (me && me.admin && appConfig.remoteCatalog && !appConfig.master) {
+    // the catalog comes from the shared card database — one pull and the
+    // server is ready (card images are served straight from that database)
     panel.replaceChildren(
-      h('h2', {}, 'Welcome! Let’s load your cards'),
-      h('p', { class: 'muted' }, 'This tracker reads its cards from a shared card database. Load the catalog into this server and you’re ready — card images are served straight from that database.'),
+      h('h2', {}, 'No cards loaded yet'),
+      h('p', { class: 'muted' }, 'This server reads its cards from the shared card database. Load the catalog and it is ready — card images are served straight from that database.'),
       h('button', { class: 'btn', style: 'margin-top:8px', onclick: async (e) => {
         e.target.disabled = true;
         try {
@@ -1470,14 +1469,13 @@ async function renderBootstrap() {
           toast(err.message);
         }
       } }, '⬇️ Load cards from the database'),
-      h('p', { class: 'muted small', style: 'margin-top:16px' }, 'Prefer to host every image on this server instead? You can download the full database later from the Administration panel.'),
-      buildFromSource,
     );
-  } else {
+  } else if (me && me.admin) {
+    // the workspace (or a server with no master to follow) builds its
+    // catalog from the source: every set and card image, in the background
     panel.replaceChildren(
-      h('h2', {}, 'Welcome! Let’s get your cards'),
-      h('p', { class: 'muted' }, 'This tracker hosts its own card database. One download pulls every set and card image to this server — after that, no third-party services are ever contacted.'),
-      h('p', { class: 'muted small' }, 'The full database is a few hundred MB of images and can take a while. It downloads in the background and resumes if interrupted.'),
+      h('h2', {}, 'No cards loaded yet'),
+      h('p', { class: 'muted' }, 'This server has no master database to follow, so it builds its own catalog from TCGdex — every set and card image. It downloads in the background and resumes if interrupted.'),
       h('button', { class: 'btn', style: 'margin-top:8px', onclick: async (e) => {
         e.target.disabled = true;
         try {
@@ -1488,6 +1486,11 @@ async function renderBootstrap() {
           toast(err.message);
         }
       } }, '⬇️ Download card database'),
+    );
+  } else {
+    panel.replaceChildren(
+      h('h2', {}, 'The cards are on their way'),
+      h('p', { class: 'muted' }, 'The card database is not loaded yet. Check back in a little while.'),
     );
   }
   view.replaceChildren(panel);
@@ -1505,17 +1508,14 @@ async function renderHome() {
     view.replaceChildren(dbErrorView('Could not load the card database.', e, renderHome));
     return;
   }
-  // empty database → offer the in-app download (populates the catalog)
-  if (!sets.length) {
-    await detectServer();
-    if (serverAvailable) { renderBootstrap(); return; }
-    view.replaceChildren(dbErrorView('The card database is empty.', { message: 'No cards have been loaded yet.' }, renderHome));
-    return;
-  }
+  // empty database → the admin loads the catalog from here
+  if (!sets.length) { renderBootstrap(); return; }
 
-  // a download may still be running (first build or admin update) — show it
+  // a catalog job may still be running (first load or a workspace update) —
+  // the curator sees its progress here; everyone else just sees the sets
   let runningBanner = null;
-  if (serverAvailable) {
+  const me = await ensureMe();
+  if (me && me.admin) {
     const status = await getBuildStatus();
     if (status && status.running) {
       runningBanner = h('div', { class: 'stat', style: 'margin-bottom:14px; text-align:left; padding:10px 14px' },
@@ -1567,14 +1567,10 @@ async function renderHome() {
       )
     : h('div', { class: 'signin-banner' },
         h('div', {},
-          h('strong', {}, serverAvailable ? 'Sign in to track your collection' : 'Browsing all cards'),
-          h('div', { class: 'muted small' }, serverAvailable
-            ? 'Create a free account to mark which cards you own and sync across devices. '
-            : 'Every set and card is here to explore.'),
-          serverAvailable ? h('a', { class: 'small', href: '/home' }, 'What is this? About & pricing') : null),
-        serverAvailable
-          ? h('button', { class: 'btn small', onclick: () => goToAccount() }, 'Sign in')
-          : null,
+          h('strong', {}, 'Sign in to track your collection'),
+          h('div', { class: 'muted small' }, 'Create a free account to mark which cards you own and sync across devices. '),
+          h('a', { class: 'small', href: '/home' }, 'What is this? About & pricing')),
+        h('button', { class: 'btn small', onclick: () => goToAccount() }, 'Sign in'),
       );
 
   const grid = h('div', { class: 'set-grid' });
@@ -2400,7 +2396,7 @@ function mailSettingsSection() {
       h('h3', { style: 'margin:0 0 6px' }, 'Sending mail'),
       h('p', { class: 'muted small', style: 'margin:0' }, cfg.packageAvailable
         ? 'With a mail server, this install can confirm addresses and send password resets. Any provider that gives you SMTP credentials will do.'
-        : 'The nodemailer package is not installed on this server, so nothing can be sent yet. Run npm install --omit=dev in the app folder.'),
+        : 'The nodemailer package is not installed on this server, so nothing can be sent yet.'),
       cfg.fromEnvironment ? h('p', { class: 'muted small', style: 'color:var(--accent); margin:0' },
         'Some of these come from this server\u2019s environment, which wins over anything saved here.') : null,
       f('SMTP host', host), f('Port', port, '587 upgrades with STARTTLS; 465 is TLS from the start'),
@@ -2568,7 +2564,7 @@ function renderSetupPage(status) {
 
   const mailBlock = h('div', {},
     h('p', { class: 'muted small' }, status.mailPossible
-      ? 'Optional. With a mail server the app can confirm addresses and send password resets. Any provider that gives you SMTP credentials will do \u2014 or your own mail server.'
+      ? 'Optional. With a mail server the app can confirm addresses and send password resets. Any provider that gives you SMTP credentials will do.'
       : 'The nodemailer package is not installed on this server, so mail is unavailable for now. You can add it later and fill this in from the Administration panel.'),
     f('SMTP host', smtpHost), f('Port', smtpPort), f('Username', smtpUser),
     f('Password', smtpPass), f('From address', smtpFrom),
@@ -2612,7 +2608,7 @@ function renderSetupPage(status) {
   view.replaceChildren(
     h('div', { class: 'page-head' }, h('h1', {}, 'Set up this install')),
     h('p', { class: 'muted' },
-      'Nobody owns this server yet. Its log printed a setup code when it started \u2014 on Proxmox that is the container console, under Docker it is `docker logs`. Paste it here to claim the install as its administrator.'),
+      'Nobody owns this server yet. Its log printed a setup code when it started. Paste it here to claim the install as its administrator.'),
     h('div', { class: 'ce-field' },
       f('Setup code', codeIn),
       h('hr'),
@@ -3021,7 +3017,7 @@ async function renderScanPage() {
     } catch (e) {
       resultsEl.replaceChildren(h('div', { class: 'center' },
         h('p', {}, 'Scanning needs the scan index.'),
-        h('p', { class: 'small' }, e.message + ' — run "node scripts/build-hashes.js" after downloading images.')));
+        h('p', { class: 'small' }, e.message + ' — the scanner index has not been built for this card database yet.')));
       return;
     }
     const setNames = new Map((_indexCache ? _indexCache.sets : []).map((s) => [s.id, s.name]));
@@ -3246,7 +3242,7 @@ function backupCard() {
   return settingsCard(
     h('h3', { style: 'margin:0 0 6px' }, 'Backup'),
     h('p', { class: 'muted small', style: 'margin:0 0 10px' },
-      'Your collection is saved on this device, and on this server when you are signed in. Export a file any time \u2014 import it on another device, or keep it as insurance.'),
+      'Your collection lives on your account and follows you to every device you sign in on. Export a file any time to keep a copy of your own \u2014 and import it here if you ever need it back.'),
     h('div', { class: 'row' },
       h('button', { class: 'btn small', onclick: () => exportCollection() }, 'Export collection'),
       h('button', { class: 'btn ghost small', onclick: () => document.getElementById('import-file').click() }, 'Import collection'),
@@ -3260,7 +3256,7 @@ function aboutCard() {
     h('p', { class: 'muted small', style: 'margin:0 0 6px' },
       `Version ${appConfig.release ? 'v' + appConfig.release : APP_VERSION} \u00b7 app build ${APP_VERSION}`),
     h('p', { class: 'muted small', style: 'margin:0 0 10px' },
-      'Card data and images are self-hosted (built with the included downloader). This app is not affiliated with Nintendo or The Pok\u00e9mon Company.'),
+      'Card data comes from the site\u2019s own curated card database. This app is not affiliated with Nintendo or The Pok\u00e9mon Company.'),
     h('div', { class: 'row' },
       h('a', { class: 'btn ghost small', href: '#/debug' }, 'Debug info'),
       h('button', { class: 'btn ghost small', onclick: () => repairApp() }, 'Repair & reload'),
@@ -3432,21 +3428,6 @@ function renderAccountPage(tab) {
   const page = h('div', { class: 'settings-page', id: 'account-page' });
   view.replaceChildren(page);
 
-  // Standalone: no server, so no account — but the local collection is still
-  // real, and a backup of it is the one thing worth offering.
-  if (!serverAvailable) {
-    addTo(page,
-      settingsHead('Account'),
-      settingsCard(
-        h('h3', { style: 'margin:0 0 6px' }, 'No server behind this app'),
-        h('p', { class: 'muted small', style: 'margin:0' },
-          'Syncing needs the bundled server. Right now the app is running standalone, so your collection lives on this device alone \u2014 export a backup below.'),
-      ),
-      backupCard(), languageCard(), aboutCard(),
-    );
-    return;
-  }
-
   // Signed out, two of the four tabs would be empty and one would be a lie.
   if (!auth) {
     addTo(page, settingsHead('Sign in'), signInCard(), languageCard(), aboutCard());
@@ -3523,6 +3504,7 @@ function renderAccountPage(tab) {
       ),
       settingsCard(emailSection()),
       appConfig.oidc ? settingsCard(providerSection()) : null,
+      reportsCard(),
     );
   } else if (tab === 'security') {
     addTo(page, settingsCard(twoFactorSection()), settingsCard(passwordSection()));
@@ -3533,11 +3515,146 @@ function renderAccountPage(tab) {
   }
 }
 
+/* ============================================================
+ * Reports — a collector tells the curator what the catalog is missing
+ * ============================================================ */
+const REPORT_STATUS = { open: 'Open', done: 'Added', dismissed: 'Not added' };
+
+/** One report as a row: what it is about, its status, and the curator's word
+ * back. `actions` (optional) are extra controls on the right. */
+function reportRowEl(r, ...actions) {
+  const what = r.kind === 'card'
+    ? `Missing card: ${[r.cardName, r.number ? '#' + r.number : null].filter(Boolean).join(' ') || '(unnamed)'}${r.setName ? ' \u2014 ' + r.setName : ''}`
+    : `Missing printing: ${r.printing} on ${r.cardName || r.cardId || '(unnamed)'}${r.number ? ' #' + r.number : ''}${r.setName ? ' \u2014 ' + r.setName : ''}`;
+  return h('div', { class: 'report-row', 'data-report': String(r.id) },
+    h('div', { class: 'report-head' },
+      h('span', { class: 'report-status ' + r.status }, REPORT_STATUS[r.status] || r.status),
+      h('strong', {}, what),
+      r.username ? h('span', { class: 'muted small' }, 'from ' + r.username) : null,
+      h('span', { class: 'muted small' }, new Date(r.created).toLocaleDateString()),
+    ),
+    r.note ? h('p', { class: 'muted small', style: 'margin:4px 0 0; white-space:pre-wrap' }, r.note) : null,
+    r.reply ? h('p', { class: 'small', style: 'margin:4px 0 0' }, 'Curator: ', r.reply) : null,
+    actions.filter(Boolean).length ? h('div', { class: 'row', style: 'margin-top:6px; gap:6px; flex-wrap:wrap' }, ...actions.filter(Boolean)) : null,
+  );
+}
+
+/** The report form. Prefilled from a card when opened from its details;
+ * otherwise the collector says which set and card in their own words. */
+function openReportDialog({ card = null, set = null } = {}) {
+  if (!auth) { goToAccount(); return; }
+  const f = (label, input, hint) => h('label', { class: 'ce-field' }, h('span', { class: 'muted small' }, label), input, hint ? h('span', { class: 'muted small' }, hint) : null);
+  const kindSel = h('select', {},
+    h('option', { value: 'printing' }, 'A printing this card should have (holo, reverse, stamp\u2026)'),
+    h('option', { value: 'card' }, 'A card that is not in the catalog at all'));
+  const setIn = h('input', { type: 'text', placeholder: 'e.g. Ascended Heroes', value: set ? set.name : '' });
+  const cardIn = h('input', { type: 'text', placeholder: 'e.g. Arcanine ex', value: card ? card.name : '' });
+  const numIn = h('input', { type: 'text', placeholder: 'e.g. 32', value: card && card.localId ? String(card.localId) : '' });
+  const printIn = h('input', { type: 'text', placeholder: 'e.g. Cosmos Holo, Reverse Holo, Staff stamp' });
+  const noteIn = h('textarea', { placeholder: 'Anything that helps the curator find it \u2014 where you saw it, a product name, a link.' });
+  const err = h('p', { class: 'muted small', style: 'color:var(--accent); margin:0' });
+  const send = h('button', { class: 'btn', 'data-report-send': '' }, 'Send to the curator');
+  const printField = f('Which printing is missing?', printIn);
+  const syncKind = () => { printField.hidden = kindSel.value !== 'printing'; };
+  kindSel.addEventListener('change', syncKind);
+  syncKind();
+  const close = () => ov.remove();
+  const ov = h('div', { class: 'picker-overlay', onclick: (e) => { if (e.target === ov) close(); } },
+    h('div', { class: 'picker-panel report-panel', id: 'report-panel' },
+      h('h3', { style: 'margin:0' }, 'Report a missing card or printing'),
+      h('p', { class: 'muted small', style: 'margin:0' }, 'The curator adds cards and printings for everyone. Tell them what is missing and it shows up in the catalog once it is added.'),
+      f('What is missing?', kindSel),
+      f('Set', setIn), f('Card', cardIn), f('Number', numIn, 'as printed on the card, if it has one'),
+      printField,
+      f('Notes', noteIn),
+      err,
+      h('div', { class: 'row', style: 'justify-content:flex-end; gap:8px' },
+        h('button', { class: 'btn ghost', onclick: close }, 'Cancel'), send)));
+  send.addEventListener('click', async () => {
+    err.textContent = '';
+    const kind = kindSel.value;
+    if (kind === 'printing' && !printIn.value.trim()) { err.textContent = 'Say which printing is missing.'; return; }
+    if (!cardIn.value.trim() && !setIn.value.trim()) { err.textContent = 'Say which card or set this is about.'; return; }
+    send.disabled = true;
+    try {
+      await apiCall('reports', { method: 'POST', body: JSON.stringify({
+        lang, kind,
+        cardId: card ? card.id : null, setId: set ? set.id : (card ? setIdOf(card.id) : null),
+        setName: setIn.value.trim() || null, cardName: cardIn.value.trim() || null, number: numIn.value.trim() || null,
+        printing: kind === 'printing' ? printIn.value.trim() : null, note: noteIn.value.trim() || null,
+      }) });
+      close();
+      toast('Sent \u2014 the curator will see it');
+      if (location.hash.startsWith('#/account')) route();
+    } catch (ex) { err.textContent = ex.message; send.disabled = false; }
+  });
+  const modals = document.querySelectorAll('dialog[open]');
+  (modals[modals.length - 1] || document.body).append(ov);
+  (kindSel.value === 'printing' && card ? printIn : setIn).focus();
+}
+
+/** Account page: the door to the form, and what you have already sent. */
+function reportsCard() {
+  const list = h('div', { class: 'report-list', id: 'my-reports' }, h('p', { class: 'muted small', style: 'margin:0' }, 'Loading\u2026'));
+  (async () => {
+    let rs = [];
+    try { rs = (await apiCall('reports')).reports; } catch { list.replaceChildren(); return; }
+    if (!rs.length) { list.replaceChildren(h('p', { class: 'muted small', style: 'margin:0' }, 'Nothing reported yet.')); return; }
+    list.replaceChildren(...rs.map((r) => reportRowEl(r, r.status === 'open' ? h('button', { class: 'btn ghost small', onclick: async (e) => {
+      e.target.disabled = true;
+      try { await apiCall('reports/withdraw', { method: 'POST', body: JSON.stringify({ id: r.id }) }); e.target.closest('.report-row').remove(); }
+      catch (ex) { e.target.disabled = false; toast(ex.message); }
+    } }, 'Withdraw') : null)));
+  })();
+  return settingsCard(
+    h('h3', { style: 'margin:0 0 6px' }, 'Missing a card or printing?'),
+    h('p', { class: 'muted small', style: 'margin:0 0 10px' }, 'The catalog is curated by hand. If a card or one of its printings is not here, say so and the curator adds it for everyone.'),
+    h('div', { class: 'row', style: 'margin-bottom:10px' },
+      h('button', { class: 'btn small', id: 'report-missing', onclick: () => openReportDialog() }, '\u270e Report a missing card or printing')),
+    list,
+  );
+}
+
+/** Administration: every report, open ones first, with the curator's answer. */
+function adminReportsTab() {
+  const content = h('div', {});
+  let status = 'open';
+  const list = h('div', { class: 'report-list', id: 'admin-reports' });
+  const sel = h('select', { id: 'report-filter' }, ...[['open', 'Open'], ['done', 'Added'], ['dismissed', 'Not added'], ['all', 'Everything']].map(([v, l]) => h('option', { value: v }, l)));
+  sel.addEventListener('change', () => { status = sel.value; load(); });
+  async function load() {
+    list.replaceChildren(spinner());
+    let d;
+    try { d = await apiCall('reports/all?status=' + status); } catch (e) { list.replaceChildren(h('p', { class: 'muted small' }, e.message)); return; }
+    if (!d.reports.length) { list.replaceChildren(h('p', { class: 'muted small', style: 'margin:0' }, status === 'open' ? 'Nothing open \u2014 the collectors are happy.' : 'Nothing here.')); return; }
+    list.replaceChildren(...d.reports.map((r) => {
+      const reply = h('input', { type: 'text', placeholder: 'A word back to the collector (optional)', value: r.reply || '', style: 'flex:1; min-width:180px' });
+      const act = (st, label, cls) => h('button', { class: cls, onclick: async (e) => {
+        e.target.disabled = true;
+        try { await apiCall('reports/resolve', { method: 'POST', body: JSON.stringify({ id: r.id, status: st, reply: reply.value }) }); load(); }
+        catch (ex) { e.target.disabled = false; toast(ex.message); }
+      } }, label);
+      const open = r.cardId ? h('button', { class: 'btn ghost small', onclick: () => openCardModal({ id: r.cardId, name: r.cardName || '' }) }, 'Open card') : null;
+      return reportRowEl(r, open, reply,
+        r.status !== 'done' ? act('done', '\u2713 Added', 'btn small') : null,
+        r.status !== 'dismissed' ? act('dismissed', 'Not adding', 'btn ghost small') : null,
+        r.status !== 'open' ? act('open', 'Reopen', 'btn ghost small') : null);
+    }));
+  }
+  load();
+  content.append(settingsCard(
+    h('h3', { style: 'margin:0 0 6px' }, 'Reports'),
+    h('p', { class: 'muted small', style: 'margin:0 0 10px' }, 'What collectors say the catalog is missing. Add it in Curation, then mark the report \u2014 they see your answer on their account page.'),
+    h('div', { class: 'row', style: 'margin-bottom:10px' }, h('span', { class: 'muted small' }, 'Show'), sel),
+    list,
+  ));
+  return content;
+}
+
 /* ---- the administration page ---- */
 function adminTabList() {
   const tabs = [['cards', 'Card database']];
-  // nothing to configure on an install whose data is managed elsewhere
-  if (!appConfig.readonly) tabs.push(['curate', 'Curation'], ['mail', 'Mail'], ['signon', 'Sign-on']);
+  tabs.push(['curate', 'Curation'], ['reports', 'Reports'], ['mail', 'Mail'], ['signon', 'Sign-on']);
   tabs.push(['server', 'Server']);
   return tabs;
 }
@@ -3553,7 +3670,7 @@ function renderAdminPage(tab) {
     const only = (msg) => page.replaceChildren(backLink(), settingsHead('Administration'),
       settingsCard(h('p', { class: 'muted', style: 'margin:0' }, msg)),
       pageFooter('#/account', '\u2190 Account'));
-    if (!serverAvailable || !auth) return only('Sign in with the account that set this install up.');
+    if (!auth) return only('Sign in with the account that set this install up.');
     let me;
     try { me = await apiCall('me'); }
     catch (e) { return only('Could not ask this server who you are: ' + e.message); }
@@ -3567,6 +3684,7 @@ function renderAdminPage(tab) {
         '🛠️ Master curation workspace \u2014 edits made here become the master database when you publish (scripts/publish-images.js). This is not a personal install.') : null,
       settingsTabs('admin', tabs, tab),
       tab === 'curate' ? adminCurateTab()
+        : tab === 'reports' ? adminReportsTab()
         : tab === 'mail' ? settingsCard(mailSettingsSection())
           : tab === 'signon' ? settingsCard(providerSettingsSection())
             : tab === 'server' ? adminServerTab()
@@ -4570,14 +4688,6 @@ function sheetImportCard(onApplied) {
  * admin's own browsing) carry no editing tools at all. */
 function adminCurateTab() {
   const content = h('div', {});
-  if (appConfig.readonly) {
-    content.append(settingsCard(
-      h('h3', { style: 'margin:0 0 6px' }, 'Curation'),
-      h('p', { class: 'muted small', style: 'margin:0' },
-        'This server runs in read-only mode (PTCG_READONLY): the card database is managed centrally and cannot be edited here.'),
-    ));
-    return content;
-  }
 
   /* ---- the card workbench: one card on the table at a time ---- */
   const cardBox = h('div', { id: 'cur-card' });
@@ -4789,31 +4899,19 @@ function adminCurateTab() {
  * jobs that rebuild the parts of it this server derives for itself. */
 function adminCardsTab() {
   const content = h('div', {});
-  if (appConfig.readonly) {
-    content.append(settingsCard(
-      h('h3', { style: 'margin:0 0 6px' }, 'Card database'),
-      h('p', { class: 'muted small', style: 'margin:0' },
-        'This server runs in read-only mode (PTCG_READONLY): the card database is managed centrally and cannot be changed from the app.'),
-    ));
-    return content;
-  }
 
   async function renderControls() {
     const status = await getBuildStatus();
     if (status && status.running) {
-      const msg = status.phase === 'images' ? 'Downloading card images to this server:'
-        : status.phase === 'mirror' ? 'Copying the card database:'
-          : 'Working on the card database:';
       content.replaceChildren(settingsCard(
         h('h3', { style: 'margin:0 0 6px' }, 'Card database'),
-        h('p', { class: 'muted small' }, msg),
+        h('p', { class: 'muted small' }, 'Working on the card database:'),
         buildProgressView(async () => { await loadAppConfig(); clearDataCaches(); toast('Done'); renderControls(); }),
       ));
       return;
     }
     let stats = {};
     try { stats = await catGet('stats'); } catch { /* the counts are a nicety */ }
-    const img = appConfig.images || {};   // { local, remote }
 
     // master update check: ping the tiny catalog.json manifest and offer a
     // data-only update when this install is behind (no images move — they
@@ -4892,10 +4990,10 @@ function adminCardsTab() {
       autoArea.append(h('span', { class: 'muted small' }, 'When the master database moves on'), sel, note);
     }
 
-    // Update from TCGdex: only for installs WITHOUT a master (standalone) and
-    // for the maintainer workspace — that's where new sets come from. Consumer
-    // installs update via the master button above, which appears exactly when
-    // the master version is ahead of this install's.
+    // Update from TCGdex: the maintainer workspace (that's where new sets
+    // come from) and a server with no master to follow. A consumer of the
+    // master updates via the button above, which appears exactly when the
+    // master version is ahead of this one.
     const jobs = [];
     if (!appConfig.remoteCatalog || appConfig.master) {
       jobs.push(h('button', { class: 'btn small', onclick: async (e) => {
@@ -4995,20 +5093,6 @@ function adminCardsTab() {
             'Which cards, printings and sets are missing images or data. Fix them here in the workspace — then publish.'),
           btn, out);
       })(),
-      // download images locally + repoint rows to the local copies
-      settingsCard(
-        h('h3', { style: 'margin:0 0 6px' }, 'Images'),
-        h('p', { class: 'muted small', style: 'margin:0 0 10px' }, img.remote
-          ? `${img.remote} image${img.remote === 1 ? '' : 's'} currently load from the online CDN. Download them to this server so it works fully offline \u2014 each card is repointed to its local copy.`
-          : (img.local ? 'All card images are served locally from this server.' : 'No card images yet.')),
-        img.remote ? h('div', { class: 'row' },
-          h('button', { class: 'btn small', onclick: async (e) => {
-            e.target.disabled = true;
-            try { await apiCall('catalog/download-images', { method: 'POST', body: '{}' }); renderControls(); }
-            catch (err) { e.target.disabled = false; toast(err.message); }
-          } }, '⬇️ Download all images to this server'),
-        ) : null,
-      ),
     ].filter(Boolean));
   }
   renderControls();
@@ -5033,7 +5117,7 @@ function adminServerTab() {
       // identical from the outside. Say which.
       conn.replaceChildren(h('h3', { style: 'margin:0 0 6px' }, 'This connection'),
         h('p', { class: 'muted small', style: 'margin:0' },
-          `Could not ask this server where you are coming from: ${e.message}. If this install was just updated, the app may still be the old one \u2014 use Repair & reload on the account page.`));
+          `Could not ask this server where you are coming from: ${e.message}. If the site was just updated, the app may still be the old one \u2014 use Repair & reload on the account page.`));
       return;
     }
     const priv = /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|127\.|::1$|f[cd])/i.test(c.you || '');
@@ -5055,12 +5139,11 @@ function adminServerTab() {
   })();
 
   const kind = appConfig.master ? 'Master curation workspace \u2014 what it publishes becomes everyone else\u2019s card database.'
-    : appConfig.readonly ? 'Read-only \u2014 the card database is managed centrally and cannot be changed from the app.'
-      : appConfig.remoteCatalog ? 'A normal install, following a master database.'
-        : 'Standalone \u2014 this install builds its own card database from TCGdex.';
+    : appConfig.remoteCatalog ? 'Follows the master database.'
+      : 'No master database configured \u2014 the catalog cannot update itself.';
 
   return h('div', {}, conn, settingsCard(
-    h('h3', { style: 'margin:0 0 6px' }, 'This install'),
+    h('h3', { style: 'margin:0 0 6px' }, 'This server'),
     h('p', { class: 'muted small', style: 'margin:0 0 6px' }, kind),
     appConfig.remoteCatalog ? h('p', { class: 'muted small', style: 'margin:0 0 6px' }, `Master database: ${appConfig.remoteCatalog}`) : null,
     h('p', { class: 'muted small', style: 'margin:0' },
@@ -5187,9 +5270,7 @@ function binderGate() {
   view.replaceChildren(h('div', { class: 'center', style: 'max-width:440px; margin:40px auto' },
     h('h2', {}, 'Binders'),
     h('p', { class: 'muted' }, 'Build digital versions of your real binders — pick a pocket size and color, place cards pocket by pocket, and track which ones you have.'),
-    serverAvailable
-      ? h('button', { class: 'btn', onclick: () => goToAccount() }, 'Sign in to start')
-      : h('p', { class: 'muted small' }, 'Binders need an account on the bundled server.'),
+    h('button', { class: 'btn', onclick: () => goToAccount() }, 'Sign in to start'),
   ));
 }
 
@@ -7131,22 +7212,10 @@ if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
 }
 
-/** Full-screen notice shown when the app is running with no server behind it
- * and has never seen one — i.e. someone copied just the files. */
-function renderNoServerGate() {
-  view.replaceChildren(h('div', { class: 'center', style: 'max-width:460px; margin:60px auto' },
-    h('h2', {}, 'Server required'),
-    h('p', { class: 'muted' }, 'This app needs its companion server to run. It looks like only the app files were copied, without the server that powers accounts and the card database.'),
-    h('p', { class: 'muted small' }, 'Install it with the bundled server (see the project’s README) and open it from there.'),
-  ));
-  document.querySelector('.topbar')?.style.setProperty('pointer-events', 'none');
-}
-
 detectServer().then(() => {
   if (auth && serverAvailable) pullAndMerge().catch(() => {});
 });
 Promise.all([detectServer(), loadAppConfig()]).then(async () => {
-  if (!serverAvailable && !serverEverSeen()) { renderNoServerGate(); return; }
   // An install nobody owns yet asks to be claimed before it does anything
   // else. Whoever can read the server's log is the person entitled to do it.
   if (serverAvailable) {

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Pokemon TCG Tracker — self-hostable server
+ * Pokemon TCG Tracker — server
  * Zero dependencies: plain Node.js (>= 18).
  *
  * Serves the PWA from ./public and provides optional account + cloud-sync API.
@@ -10,10 +10,6 @@
  *
  * Usage:  node server.js          (then open http://localhost:3000)
  * Env:    PORT=3000  DATA_DIR=./data
- *         PTCG_READONLY=1  central-server mode: every endpoint that could
- *         change the card database (downloads, custom printings, image
- *         uploads, mirroring) returns 403 — enforced here, not just hidden
- *         in the UI. Self-hosted installs leave this unset.
  */
 'use strict';
 
@@ -43,7 +39,6 @@ const DB_FILE = path.join(DATA_DIR, 'ptcg.db');
 const SECRET_FILE = path.join(DATA_DIR, 'secret.key');
 const TOKEN_TTL_MS = 1000 * 60 * 60 * 24 * 90; // 90 days
 const MAX_BODY = 8 * 1024 * 1024; // 8 MB — a full collection is far smaller
-const READONLY = process.env.PTCG_READONLY === '1';
 // Maintainer/curation workspace: this instance manages the MASTER database
 // (edits here are what get published). It is not a personal install — the app
 // shows a banner so the two are never confused. See README "maintainer
@@ -216,6 +211,32 @@ db.exec(`
     created  TEXT NOT NULL,
     PRIMARY KEY (user_id, lang, card_id, variant)
   );
+`);
+
+/* Reports: a collector tells the curator what the catalog is missing — a card
+ * or a printing — and the curator answers by adding it (or not). Never
+ * published; the catalog change that resolves a report goes out with the
+ * next publish like any other edit. */
+db.exec(`
+  CREATE TABLE IF NOT EXISTS reports (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id  TEXT NOT NULL,
+    lang     TEXT NOT NULL DEFAULT 'en',
+    kind     TEXT NOT NULL,             -- 'card' | 'printing'
+    card_id  TEXT,                      -- the card it is about, when known
+    set_id   TEXT,                      -- the set it is about, when known
+    set_name TEXT,
+    card_name TEXT,
+    number   TEXT,
+    printing TEXT,                      -- the printing's name, in the collector's words
+    note     TEXT,
+    status   TEXT NOT NULL DEFAULT 'open',   -- 'open' | 'done' | 'dismissed'
+    reply    TEXT,                      -- the curator's word back, if any
+    created  TEXT NOT NULL,
+    resolved TEXT
+  );
+  CREATE INDEX IF NOT EXISTS reports_status ON reports (status, created);
+  CREATE INDEX IF NOT EXISTS reports_user ON reports (user_id, created);
 `);
 
 /* Sheet-import aliases: the consultant's set names, matched to this install's
@@ -476,6 +497,24 @@ const _userPrintPut = db.prepare(`INSERT INTO user_printings (user_id, lang, car
     img_low=COALESCE(excluded.img_low, img_low), img_high=COALESCE(excluded.img_high, img_high)`);
 const _userPrintDel = db.prepare('DELETE FROM user_printings WHERE user_id = ? AND lang = ? AND card_id = ? AND variant = ?');
 const _userPrintCount = db.prepare('SELECT COUNT(*) AS n FROM user_printings WHERE user_id = ?');
+
+// ---------- reports (missing cards and printings, collector → curator) ----------
+const MAX_OPEN_REPORTS = 50;                                   // per account
+const _reportPut = db.prepare(`INSERT INTO reports (user_id, lang, kind, card_id, set_id, set_name, card_name, number, printing, note, status, created)
+  VALUES (?,?,?,?,?,?,?,?,?,?,'open',?)`);
+const _reportsMine = db.prepare('SELECT * FROM reports WHERE user_id = ? ORDER BY created DESC LIMIT 200');
+const _reportsOpenCount = db.prepare("SELECT COUNT(*) AS n FROM reports WHERE user_id = ? AND status = 'open'");
+const _reportsAll = db.prepare(`SELECT r.*, u.display AS username FROM reports r LEFT JOIN users u ON u.id = r.user_id
+  WHERE (? = 'all' OR r.status = ?) ORDER BY CASE r.status WHEN 'open' THEN 0 ELSE 1 END, r.created DESC LIMIT 500`);
+const _reportsOpenTotal = db.prepare("SELECT COUNT(*) AS n FROM reports WHERE status = 'open'");
+const _reportGet = db.prepare('SELECT * FROM reports WHERE id = ?');
+const _reportResolve = db.prepare('UPDATE reports SET status = ?, reply = ?, resolved = ? WHERE id = ?');
+const _reportWithdraw = db.prepare("DELETE FROM reports WHERE id = ? AND user_id = ? AND status = 'open'");
+const reportRow = (r) => ({
+  id: r.id, lang: r.lang, kind: r.kind, cardId: r.card_id, setId: r.set_id, setName: r.set_name, cardName: r.card_name,
+  number: r.number, printing: r.printing, note: r.note, status: r.status, reply: r.reply, created: r.created, resolved: r.resolved,
+  ...(r.username !== undefined ? { username: r.username } : {}),
+});
 const _aliasList = db.prepare('SELECT alias, raw, set_id FROM import_aliases WHERE lang = ? ORDER BY raw');
 const _aliasPut = db.prepare(`INSERT INTO import_aliases (lang, alias, raw, set_id, created) VALUES (?,?,?,?,?)
   ON CONFLICT(lang, alias) DO UPDATE SET raw=excluded.raw, set_id=excluded.set_id`);
@@ -1710,13 +1749,7 @@ function runHashes() {
   }
 }
 
-// ---------- offline mirror (copy a remote card database to this server) ----------
-/* Self-hosted installs boot against the public CDN. The administrator can
- * download the whole database (data + images) locally, after which the app
- * pulls images from this server instead — no internet needed. Existing local
- * files are never overwritten, so admin-uploaded photos survive re-mirrors
- * and a re-run only fetches what's new. */
-
+// ---------- settings ----------
 const loadSettings = () => readJSON(SETTINGS_FILE, {});
 const saveSettings = (s) => writeJSONAtomic(SETTINGS_FILE, s);
 
@@ -1739,149 +1772,6 @@ const saveSettings = (s) => writeJSONAtomic(SETTINGS_FILE, s);
   }
 }
 
-function startMirror(remoteBase) {
-  build = { running: true, phase: 'mirror', startedAt: Date.now(), error: null, hashesOk: null, log: [] };
-  pushLog('Mirroring card database from ' + remoteBase);
-  runMirror(remoteBase.replace(/\/+$/, ''))
-    .then(() => {
-      const s = loadSettings();
-      s.imageSource = 'local';
-      s.mirroredFrom = remoteBase;
-      s.mirroredAt = new Date().toISOString();
-      saveSettings(s);
-      build.running = false; build.phase = null; build.hashesOk = true;
-      pushLog('Local copy complete — images now served from this server');
-    })
-    .catch((e) => {
-      build.running = false; build.phase = null;
-      build.error = 'Mirror failed: ' + e.message + ' (safe to retry — it resumes where it stopped)';
-    });
-}
-
-async function runMirror(base) {
-  const progress = {
-    startedAt: new Date().toISOString(), mirror: true,
-    langIndex: 0, langCount: 1, lang: null, setsDone: 0, setTotal: 0, setName: null,
-    cardsEstimate: 0, imagesDownloaded: 0, imagesSkipped: 0, imageFailures: 0,
-    done: false, error: null,
-  };
-  const writeProgress = (extra = {}) => {
-    Object.assign(progress, extra, { updatedAt: new Date().toISOString() });
-    try { writeJSONAtomic(PROGRESS_FILE, progress); } catch { /* cosmetic */ }
-  };
-  const get = async (rel, asJson) => {
-    const res = await fetch(base + '/' + rel);
-    if (!res.ok) { const e = new Error(`HTTP ${res.status} for ${rel}`); e.status = res.status; throw e; }
-    return asJson ? res.json() : Buffer.from(await res.arrayBuffer());
-  };
-  const save = (rel, buf) => {
-    const f = path.join(CDN_DIR, rel);
-    fs.mkdirSync(path.dirname(f), { recursive: true });
-    fs.writeFileSync(f, buf);
-  };
-  const copyIfMissing = async (rel) => {
-    if (fs.existsSync(path.join(CDN_DIR, rel))) { progress.imagesSkipped++; return; }
-    try {
-      save(rel, await get(rel, false));
-      progress.imagesDownloaded++;
-    } catch (e) {
-      if (e.status !== 404) { progress.imageFailures++; pushLog('! ' + rel + ': ' + e.message); }
-    }
-  };
-
-  // language list (single-language remotes may not publish languages.json)
-  let langs = ['en'];
-  try {
-    const lj = await get('languages.json', true);
-    save('languages.json', Buffer.from(JSON.stringify(lj)));
-    const codes = (lj.languages || []).map((l) => l.code || l).filter(Boolean);
-    if (codes.length) langs = codes;
-  } catch { /* default en */ }
-
-  // custom printings: remote first, local definitions win on conflict
-  try {
-    const remoteCustom = await get('custom.json', true);
-    const localCustom = readJSON(CUSTOM_FILE, { cards: {} });
-    const merged = { cards: {} };
-    for (const [id, entry] of Object.entries(remoteCustom.cards || {})) {
-      merged.cards[id] = { variants: { ...(entry.variants || {}) } };
-    }
-    for (const [id, entry] of Object.entries(localCustom.cards || {})) {
-      merged.cards[id] = { variants: { ...((merged.cards[id] || {}).variants || {}), ...(entry.variants || {}) } };
-    }
-    writeJSONAtomic(CUSTOM_FILE, merged);
-  } catch { /* remote has no custom printings */ }
-
-  for (let li = 0; li < langs.length; li++) {
-    const lang = langs[li];
-    const index = await get(`${lang}/index.json`, true);
-    save(`${lang}/index.json`, Buffer.from(JSON.stringify(index)));
-    const qualities = Array.isArray(index.qualities) && index.qualities.length ? index.qualities : ['low'];
-    writeProgress({ lang, langIndex: li, langCount: langs.length, setsDone: 0, setTotal: (index.sets || []).length });
-    for (const f of ['search-index.json', 'scan-index.json']) {
-      try { save(`${lang}/${f}`, await get(`${lang}/${f}`, false)); } catch { /* optional */ }
-    }
-    const sets = index.sets || [];
-    for (let si = 0; si < sets.length; si++) {
-      const brief = sets[si];
-      writeProgress({ setName: brief.name });
-      const raw = await get(`${lang}/sets/${brief.id}.json`, false);
-      save(`${lang}/sets/${brief.id}.json`, raw);
-      const set = JSON.parse(raw.toString('utf8'));
-      if (brief.logo) await copyIfMissing(`${lang}/images/${set.id}/logo.png`);
-      const files = [];
-      for (const c of set.cards || []) {
-        const num = localIdOfCard(c.id);
-        if (c.image) for (const q of qualities) files.push(`${lang}/images/${set.id}/${num}/${q}.webp`);
-        if (c.variantImages) {
-          for (const [vk, qs] of Object.entries(c.variantImages)) {
-            for (const q of qs) files.push(`${lang}/images/${set.id}/${num}/${vk}-${q}.webp`);
-          }
-        }
-      }
-      let next = 0;
-      await Promise.all(Array.from({ length: Math.min(8, files.length || 1) }, async () => {
-        while (next < files.length) {
-          const i = next++;
-          await copyIfMissing(files[i]);
-          if (i % 25 === 0) writeProgress();
-        }
-      }));
-      mergeLocalVariantImages(path.join(CDN_DIR, lang, 'sets', set.id + '.json'), lang);
-      writeProgress({ setsDone: si + 1 });
-    }
-  }
-  writeProgress({ done: true, finishedAt: new Date().toISOString() });
-}
-
-/** Re-attach locally uploaded variant scans to a freshly mirrored set file, so
- * a re-mirror never loses photos the admin added on this install. */
-function mergeLocalVariantImages(setFile, lang) {
-  const set = readJSON(setFile, null);
-  if (!set || !Array.isArray(set.cards)) return;
-  let changed = false;
-  for (const c of set.cards) {
-    const dir = path.join(CDN_DIR, lang, 'images', set.id, localIdOfCard(c.id));
-    let entries = [];
-    try { entries = fs.readdirSync(dir); } catch { continue; }
-    const vimgs = {};
-    for (const f of entries) {
-      const m = f.match(/^([a-zA-Z0-9_-]+)-(low|high)\.webp$/);
-      if (m) (vimgs[m[1]] = vimgs[m[1]] || []).push(m[2]);
-    }
-    for (const k of Object.keys(vimgs)) {
-      vimgs[k].sort();
-      const cur = (c.variantImages && c.variantImages[k]) || [];
-      if (JSON.stringify(cur) !== JSON.stringify(vimgs[k])) {
-        c.variantImages = c.variantImages || {};
-        c.variantImages[k] = vimgs[k];
-        if (!c.image) c.image = `images/${set.id}/${localIdOfCard(c.id)}`;
-        changed = true;
-      }
-    }
-  }
-  if (changed) writeJSONAtomic(setFile, set);
-}
 
 // ---------- custom printings & variant image library ----------
 
@@ -2367,7 +2257,7 @@ async function masterUpdateStatus() {
 async function runScheduledUpdateCheck() {
   // an install with no cards at all is tryMasterPull's problem, not this one;
   // the workspace PRODUCES the master, so it never follows one
-  if (READONLY || MASTER_MODE || build.running || !catalogSource()) return;
+  if (MASTER_MODE || build.running || !catalogSource()) return;
   if (catalogStats().cards === 0) return;
   const mode = autoUpdateMode();
   if (mode === 'off') return;
@@ -2508,79 +2398,8 @@ const _localPrintingLabel = db.prepare(`INSERT INTO printings (lang, card_id, va
   ON CONFLICT(lang, card_id, variant) DO UPDATE SET label = excluded.label, source = 'local', hidden = 0`);
 const _localPrintingImg = db.prepare(`INSERT INTO printings (lang, card_id, variant, img_low, img_high, source) VALUES (?,?,?,?,?, 'local')
   ON CONFLICT(lang, card_id, variant) DO UPDATE SET img_low = excluded.img_low, img_high = excluded.img_high, source = 'local', hidden = 0`);
-const _imgRemote = db.prepare("SELECT COUNT(*) AS n FROM cards WHERE hidden = 0 AND img_low LIKE 'http%'");
-const _imgLocal = db.prepare("SELECT COUNT(*) AS n FROM cards WHERE hidden = 0 AND img_low IS NOT NULL AND img_low NOT LIKE 'http%'");
-const imageCounts = () => ({ remote: _imgRemote.get().n, local: _imgLocal.get().n });
 
-// rows whose images are remote URLs, for the "download all images" job
-const _remoteImgCards = db.prepare("SELECT lang, id, set_id, local_id, img_low, img_high FROM cards WHERE img_low LIKE 'http%' OR img_high LIKE 'http%'");
-const _remoteImgPrints = db.prepare("SELECT lang, card_id, variant, img_low, img_high FROM printings WHERE img_low LIKE 'http%' OR img_high LIKE 'http%'");
-const _setCardImg = db.prepare('UPDATE cards SET img_low = ?, img_high = ? WHERE lang = ? AND id = ?');
-const _setPrintImg = db.prepare('UPDATE printings SET img_low = ?, img_high = ? WHERE lang = ? AND card_id = ? AND variant = ?');
 
-/** Download all remote (http) card images to this server and repoint each row
- * to its local /cdn path, so the install works fully offline. */
-async function runImageDownload() {
-  const progress = {
-    startedAt: new Date().toISOString(), imagesLocalize: true,
-    setsDone: 0, setTotal: 0, imagesDownloaded: 0, imagesSkipped: 0, imageFailures: 0, done: false, error: null,
-  };
-  const write = (extra) => { Object.assign(progress, extra); try { writeJSONAtomic(PROGRESS_FILE, progress); } catch { /* cosmetic */ } };
-  const cards = _remoteImgCards.all();
-  const prints = _remoteImgPrints.all();
-  write({ setTotal: cards.length + prints.length });
-  let done = 0;
-  const fetchTo = async (urlRemote, destRel) => {
-    const dest = path.join(CDN_DIR, destRel);
-    if (fs.existsSync(dest)) { progress.imagesSkipped++; return '/cdn/' + destRel.split(path.sep).join('/'); }
-    const res = await fetch(urlRemote);
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    fs.mkdirSync(path.dirname(dest), { recursive: true });
-    fs.writeFileSync(dest, Buffer.from(await res.arrayBuffer()));
-    progress.imagesDownloaded++;
-    return '/cdn/' + destRel.split(path.sep).join('/');
-  };
-  const localOrKeep = async (urlRemote, destRel) => {
-    if (!urlRemote || !/^https?:\/\//i.test(urlRemote)) return urlRemote;
-    try { return await fetchTo(urlRemote, destRel); }
-    catch (e) { progress.imageFailures++; pushLog('! image ' + destRel + ': ' + e.message); return urlRemote; }
-  };
-  for (const c of cards) {
-    const dir = path.join(c.lang, 'images', c.set_id, c.local_id);
-    const low = await localOrKeep(c.img_low, path.join(dir, 'low.webp'));
-    const high = await localOrKeep(c.img_high, path.join(dir, 'high.webp'));
-    _setCardImg.run(low, high, c.lang, c.id);
-    if (++done % 25 === 0) write({ setsDone: done });
-  }
-  for (const p of prints) {
-    const dir = path.join(p.lang, 'images', setIdOfCard(p.card_id), localIdOfCard(p.card_id));
-    const low = await localOrKeep(p.img_low, path.join(dir, `${p.variant}-low.webp`));
-    const high = await localOrKeep(p.img_high, path.join(dir, `${p.variant}-high.webp`));
-    _setPrintImg.run(low, high, p.lang, p.card_id, p.variant);
-    if (++done % 25 === 0) write({ setsDone: done });
-  }
-  write({ setsDone: cards.length + prints.length, done: true, finishedAt: new Date().toISOString() });
-}
-function startImageDownload() {
-  build = { running: true, phase: 'images', startedAt: Date.now(), error: null, hashesOk: null, log: [] };
-  pushLog('Downloading remote card images to this server');
-  runImageDownload()
-    .then(() => { build.running = false; build.phase = null; build.hashesOk = true; pushLog('Image download complete — images now served locally'); })
-    .catch((e) => { build.running = false; build.phase = null; build.error = 'Image download failed: ' + e.message + ' (safe to retry)'; });
-}
-
-/** Every printing that has its own image, from the database, for the API. */
-const _printsWithImg = db.prepare(`SELECT p.card_id, p.variant, p.img_low, p.img_high, c.name
-  FROM printings p JOIN cards c ON c.lang = p.lang AND c.id = p.card_id
-  WHERE p.lang = ? AND (p.img_low IS NOT NULL OR p.img_high IS NOT NULL)`);
-function variantImageManifest(lang) {
-  return _printsWithImg.all(lang).map((r) => {
-    const urls = {};
-    if (r.img_low) urls.low = r.img_low;
-    if (r.img_high) urls.high = r.img_high;
-    return { card: r.card_id, name: r.name, set: setIdOfCard(r.card_id), variant: r.variant, qualities: Object.keys(urls), urls };
-  });
-}
 
 /* ---------- publishing the master database (workspace → R2) ----------
  * The publish script is the tested tool; this job only runs it and keeps its
@@ -2637,18 +2456,14 @@ async function handleApi(req, res, pathname, ip, url) {
   if (crossSiteWrite(req)) return sendJSON(res, 403, { error: 'Cross-site request refused' });
 
   if (pathname === '/api/health' && req.method === 'GET') {
-    return sendJSON(res, 200, { ok: true, auth: true, version: 2, readonly: READONLY });
+    return sendJSON(res, 200, { ok: true, auth: true, version: 2 });
   }
 
   // where should the app load card data/images from? (offline mirror support)
   if (pathname === '/api/app-config' && req.method === 'GET') {
     const s = loadSettings();
     return sendJSON(res, 200, {
-      readonly: READONLY,
-      imageSource: s.imageSource === 'local' ? 'local' : 'remote',
       localDbExists: dbExists(),
-      mirroredAt: s.mirroredAt || null,
-      images: imageCounts(),
       catalogCards: catalogStats().cards,
       remoteCatalog: (catalogSource() || {}).base || null,
       catalogViaApi: !!catalogApi(),
@@ -2663,7 +2478,7 @@ async function handleApi(req, res, pathname, ip, url) {
       updateRemoteVersion: s.updateRemoteVersion || null,
       master: MASTER_MODE,
       release: RELEASE_VERSION,
-      canPublish: MASTER_MODE && !READONLY && r2Configured(),
+      canPublish: MASTER_MODE && r2Configured(),
     });
   }
 
@@ -2742,7 +2557,6 @@ async function handleApi(req, res, pathname, ip, url) {
   // Only meaningful where those images exist — a pulled-only install serves
   // the master's index and gets its own cards from the overlay instead.
   if (pathname === '/api/scan-index/rebuild' && req.method === 'POST') {
-    if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
     const rbUser = authUser(req);
     if (!rbUser || !isAdminUser(rbUser)) return sendJSON(res, 403, { error: 'Administrator account required' });
     if (build.running) return sendJSON(res, 409, { error: 'Another job is already running' });
@@ -2826,7 +2640,6 @@ async function handleApi(req, res, pathname, ip, url) {
 
   // admin: how this install keeps up with the master — know only, or apply
   if (pathname === '/api/auto-update' && req.method === 'POST') {
-    if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
     // `user` is not bound this early in handleApi — ask for it directly
     const auUser = authUser(req);
     if (!auUser || !isAdminUser(auUser)) return sendJSON(res, 403, { error: 'Administrator account required' });
@@ -2840,20 +2653,8 @@ async function handleApi(req, res, pathname, ip, url) {
     return sendJSON(res, 200, { ok: true, autoUpdate: body.mode });
   }
 
-  // admin: download all remote card images to this server, repointing rows local
-  if (pathname === '/api/catalog/download-images' && req.method === 'POST') {
-    if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
-    const admin = authUser(req);
-    if (!admin || !isAdminUser(admin)) return sendJSON(res, 403, { error: 'Administrator account required' });
-    if (build.running) return sendJSON(res, 409, { error: 'Another job is already running' });
-    if (imageCounts().remote === 0) return sendJSON(res, 200, { ok: true, started: false, message: 'All images are already local' });
-    startImageDownload();
-    return sendJSON(res, 200, { ok: true, started: true });
-  }
-
   // admin: (re)load the static JSON catalog into the database
   if (pathname === '/api/catalog/import' && req.method === 'POST') {
-    if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
     const admin = authUser(req);
     if (!admin || !isAdminUser(admin)) return sendJSON(res, 403, { error: 'Administrator account required' });
     try {
@@ -2866,9 +2667,8 @@ async function handleApi(req, res, pathname, ip, url) {
 
   // admin: pull the catalog from the remote published database (R2) into this DB.
   // Used when there is no local JSON build to import from (the common case for a
-  // fresh self-hosted install that reads from a shared CDN).
+  // fresh install that reads from the shared card database).
   if (pathname === '/api/catalog/pull' && req.method === 'POST') {
-    if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
     const admin = authUser(req);
     if (!admin || !isAdminUser(admin)) return sendJSON(res, 403, { error: 'Administrator account required' });
     if (build.running) return sendJSON(res, 409, { error: 'Another job is already running' });
@@ -2919,7 +2719,6 @@ async function handleApi(req, res, pathname, ip, url) {
 
   // what a master update would ADD — the admin reviews this before pulling
   if (pathname === '/api/catalog/preview' && req.method === 'POST') {
-    if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
     const admin = authUser(req);
     if (!admin || !isAdminUser(admin)) return sendJSON(res, 403, { error: 'Administrator account required' });
     if (build.running) return sendJSON(res, 409, { error: 'Another job is already running' });
@@ -2942,7 +2741,6 @@ async function handleApi(req, res, pathname, ip, url) {
   }
 
   if (pathname === '/api/build-data' && req.method === 'POST') {
-    if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
     if (build.running) return sendJSON(res, 409, { error: 'A download is already running' });
     const body = await readBody(req);
     const langs = typeof body.langs === 'string' && /^[a-z-]{2,7}(,[a-z-]{2,7})*$/.test(body.langs) ? body.langs : '';
@@ -2956,12 +2754,6 @@ async function handleApi(req, res, pathname, ip, url) {
     }
     startBuild({ langs, quality });
     return sendJSON(res, 200, { ok: true, started: true });
-  }
-
-  // public, CORS-open image API: every user-added variant image with URLs
-  if (pathname === '/api/variant-images' && req.method === 'GET') {
-    const lang = LANG_RE.test(url.searchParams.get('lang') || '') ? url.searchParams.get('lang') : 'en';
-    return sendJSON(res, 200, { lang, images: variantImageManifest(lang) });
   }
 
   /* ---------- first run ----------
@@ -3430,6 +3222,7 @@ async function handleApi(req, res, pathname, ip, url) {
       totpEnabled: user.totpEnabled,
       recoveryLeft: user.totpEnabled ? _countRecovery.get(user.id).n : 0,
       oidcLinked: !!user.oidcSub,
+      openReports: isAdminUser(user) ? _reportsOpenTotal.get().n : undefined,
     });
   }
 
@@ -3499,7 +3292,6 @@ async function handleApi(req, res, pathname, ip, url) {
   }
 
   if (pathname === '/api/oidc-settings' && req.method === 'POST') {
-    if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
     if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
     const body = await readBody(req);
     const s2 = loadSettings();
@@ -3548,7 +3340,6 @@ async function handleApi(req, res, pathname, ip, url) {
   }
 
   if (pathname === '/api/mail-settings' && req.method === 'POST') {
-    if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
     if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
     const body = await readBody(req);
     const s = loadSettings();
@@ -3680,34 +3471,8 @@ async function handleApi(req, res, pathname, ip, url) {
     return sendJSON(res, 200, { ok: true, token }, { 'Set-Cookie': sessionCookie(req, token) });
   }
 
-  // ---- admin: mirror a remote card database onto this server (offline use) ----
-  if (pathname === '/api/mirror' && req.method === 'POST') {
-    if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
-    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
-    if (build.running) return sendJSON(res, 409, { error: 'A download is already running' });
-    const body = await readBody(req);
-    const remote = typeof body.remote === 'string' && /^https?:\/\/[^\s]{4,300}$/i.test(body.remote) ? body.remote : null;
-    if (!remote) return sendJSON(res, 400, { error: 'remote must be the card database URL (https://…)' });
-    startMirror(remote);
-    return sendJSON(res, 200, { ok: true, started: true });
-  }
-
-  // ---- admin: choose where the app pulls images/data from ----
-  if (pathname === '/api/image-source' && req.method === 'POST') {
-    if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
-    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
-    const body = await readBody(req);
-    if (!['local', 'remote'].includes(body.source)) return sendJSON(res, 400, { error: 'source must be "local" or "remote"' });
-    if (body.source === 'local' && !dbExists()) return sendJSON(res, 400, { error: 'No local copy exists yet — download the database first' });
-    const s = loadSettings();
-    s.imageSource = body.source;
-    saveSettings(s);
-    return sendJSON(res, 200, { ok: true, imageSource: body.source });
-  }
-
   // ---- admin: define a custom printing (e.g. "Cracked Ice Holo") for a card ----
   if (pathname === '/api/custom-variant' && req.method === 'POST') {
-    if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
     if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
     const body = await readBody(req);
     const cardId = typeof body.cardId === 'string' && CARD_ID_RE.test(body.cardId) ? body.cardId : null;
@@ -3732,7 +3497,6 @@ async function handleApi(req, res, pathname, ip, url) {
 
   // ---- admin: the masterlist mirror — sync a sheet, read its links ----
   if (pathname === '/api/masterlist/sync' && req.method === 'POST') {
-    if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
     if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
     // a whole masterlist is tens of thousands of rows — well past the usual body cap
     const raw = await readRawBody(req, 64 * 1024 * 1024).catch(() => null);
@@ -3772,7 +3536,6 @@ async function handleApi(req, res, pathname, ip, url) {
     return sendJSON(res, 200, { aliases: _cardAliasList.all(aLang).map((r) => ({ key: r.key, raw: r.raw, cardId: r.card_id })) });
   }
   if (pathname === '/api/import-card-aliases' && req.method === 'POST') {
-    if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
     if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
     const body = await readBody(req);
     const aLang = LANG_RE.test(body.lang || '') ? body.lang : 'en';
@@ -3790,7 +3553,6 @@ async function handleApi(req, res, pathname, ip, url) {
     return sendJSON(res, 200, { aliases: _varAliasList.all(aLang).map((r) => ({ key: r.key, raw: r.raw, variant: r.variant })) });
   }
   if (pathname === '/api/import-variant-aliases' && req.method === 'POST') {
-    if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
     if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
     const body = await readBody(req);
     const aLang = LANG_RE.test(body.lang || '') ? body.lang : 'en';
@@ -3817,7 +3579,6 @@ async function handleApi(req, res, pathname, ip, url) {
     return sendJSON(res, 200, { links: _mlLinksOfCard.all(mLang, cardId).map((l) => ({ key: l.key, variant: l.variant, rowNo: l.row_no, gone: !!l.gone, sheetVariant: l.sheet_variant, sheetSet: l.set_name, keep: l.keep ? JSON.parse(l.keep) : [] })) });
   }
   if (pathname === '/api/masterlist/links' && req.method === 'POST') {
-    if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
     if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
     const body = await readBody(req);
     const mLang = LANG_RE.test(body.lang || '') ? body.lang : 'en';
@@ -3850,7 +3611,6 @@ async function handleApi(req, res, pathname, ip, url) {
     return sendJSON(res, 200, { aliases: _aliasList.all(lang).map((r) => ({ alias: r.alias, raw: r.raw, setId: r.set_id })) });
   }
   if (pathname === '/api/import-aliases' && req.method === 'POST') {
-    if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
     if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
     const body = await readBody(req);
     const aLang = LANG_RE.test(body.lang || '') ? body.lang : 'en';
@@ -3867,7 +3627,6 @@ async function handleApi(req, res, pathname, ip, url) {
 
   // ---- admin: create a whole new card, or edit any card's details ----
   if (pathname === '/api/card' && req.method === 'POST') {
-    if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
     if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
     const body = await readBody(req);
     const cLang = LANG_RE.test(body.lang || '') ? body.lang : 'en';
@@ -3921,7 +3680,6 @@ async function handleApi(req, res, pathname, ip, url) {
 
   // ---- admin: create a brand-new set (for promos and the like) ----
   if (pathname === '/api/set-create' && req.method === 'POST') {
-    if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
     if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
     const body = await readBody(req);
     const cLang = LANG_RE.test(body.lang || '') ? body.lang : 'en';
@@ -3939,7 +3697,6 @@ async function handleApi(req, res, pathname, ip, url) {
   // On the master workspace a hide publishes as a deletion to every install;
   // on a normal install it is a local hide that master updates can't undo.
   if (pathname === '/api/card-hide' && req.method === 'POST') {
-    if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
     if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
     const body = await readBody(req);
     const cLang = LANG_RE.test(body.lang || '') ? body.lang : 'en';
@@ -3958,7 +3715,6 @@ async function handleApi(req, res, pathname, ip, url) {
   // Restore: re-add a printing with the same name, or re-tick the variant in
   // the card editor.
   if (pathname === '/api/variant-remove' && req.method === 'POST') {
-    if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
     if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
     const body = await readBody(req);
     const cLang = LANG_RE.test(body.lang || '') ? body.lang : 'en';
@@ -3984,7 +3740,6 @@ async function handleApi(req, res, pathname, ip, url) {
   // ---- admin: hide (tombstone) or restore a whole set ----
   // Restoring also unhides the set's own soft-hidden cards.
   if (pathname === '/api/set-hide' && req.method === 'POST') {
-    if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
     if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
     const body = await readBody(req);
     const cLang = LANG_RE.test(body.lang || '') ? body.lang : 'en';
@@ -3999,7 +3754,6 @@ async function handleApi(req, res, pathname, ip, url) {
 
   // ---- admin: upload the card's own picture (its base image) ----
   if (pathname === '/api/card-image' && req.method === 'POST') {
-    if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
     if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
     const cardId = url.searchParams.get('cardId') || '';
     const cLang = LANG_RE.test(url.searchParams.get('lang') || '') ? url.searchParams.get('lang') : 'en';
@@ -4038,7 +3792,6 @@ async function handleApi(req, res, pathname, ip, url) {
 
   // ---- admin: upload your own image for a specific printing of a card ----
   if (pathname === '/api/variant-image' && req.method === 'POST') {
-    if (READONLY) return sendJSON(res, 403, { error: 'This server is read-only — its card database is managed centrally' });
     if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
     const cardId = url.searchParams.get('cardId') || '';
     const variant = url.searchParams.get('variant') || '';
@@ -4107,11 +3860,63 @@ async function handleApi(req, res, pathname, ip, url) {
     return sendJSON(res, 200, { ok: true, updatedAt, count: Object.keys(clean).length });
   }
 
+  /* ---------- reports: what the catalog is missing ----------
+   * Any signed-in account may say "this card / this printing is not here".
+   * The curator sees them all, answers, and adds to the catalog for everyone
+   * — the one path a collector has to a printing since personal printings
+   * became the curator's alone. */
+  if (pathname === '/api/reports' && req.method === 'GET') {
+    return sendJSON(res, 200, { reports: _reportsMine.all(user.id).map(reportRow) });
+  }
+  if (pathname === '/api/reports' && req.method === 'POST') {
+    const body = await readBody(req);
+    const lang = LANG_RE.test(body.lang || '') ? body.lang : 'en';
+    const kind = body.kind === 'card' ? 'card' : 'printing';
+    const str = (v, max) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : null);
+    const cardId = str(body.cardId, 64);
+    if (cardId && !CARD_ID_RE.test(cardId)) return sendJSON(res, 400, { error: 'Bad card id' });
+    const setId = str(body.setId, 64);
+    const setName = str(body.setName, 120), cardName = str(body.cardName, 120), number = str(body.number, 24);
+    const printing = str(body.printing, 80), note = str(body.note, 1000);
+    if (kind === 'printing' && !printing) return sendJSON(res, 400, { error: 'Say which printing is missing' });
+    if (!cardId && !cardName && !setName) return sendJSON(res, 400, { error: 'Say which card or set this is about' });
+    if (_reportsOpenCount.get(user.id).n >= MAX_OPEN_REPORTS) return sendJSON(res, 429, { error: `You already have ${MAX_OPEN_REPORTS} open reports — the curator will get to them` });
+    const created = new Date().toISOString();
+    const r = _reportPut.run(user.id, lang, kind, cardId, setId, setName, cardName, number, printing, note, created);
+    return sendJSON(res, 200, { ok: true, report: reportRow(_reportGet.get(Number(r.lastInsertRowid))) });
+  }
+  if (pathname === '/api/reports/withdraw' && req.method === 'POST') {
+    const body = await readBody(req);
+    const id = Number(body.id);
+    if (!Number.isInteger(id)) return sendJSON(res, 400, { error: 'id is required' });
+    const r = _reportWithdraw.run(id, user.id);
+    return sendJSON(res, r.changes ? 200 : 404, r.changes ? { ok: true } : { error: 'No open report of yours with that id' });
+  }
+  if (pathname === '/api/reports/all' && req.method === 'GET') {
+    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    const st = ['open', 'done', 'dismissed', 'all'].includes(url.searchParams.get('status')) ? url.searchParams.get('status') : 'open';
+    return sendJSON(res, 200, { open: _reportsOpenTotal.get().n, reports: _reportsAll.all(st, st).map(reportRow) });
+  }
+  if (pathname === '/api/reports/resolve' && req.method === 'POST') {
+    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    const body = await readBody(req);
+    const id = Number(body.id);
+    const status = ['open', 'done', 'dismissed'].includes(body.status) ? body.status : null;
+    if (!Number.isInteger(id) || !status) return sendJSON(res, 400, { error: 'id and status (open | done | dismissed) are required' });
+    if (!_reportGet.get(id)) return sendJSON(res, 404, { error: 'No such report' });
+    const reply = typeof body.reply === 'string' && body.reply.trim() ? body.reply.trim().slice(0, 500) : null;
+    _reportResolve.run(status, reply, status === 'open' ? null : new Date().toISOString(), id);
+    return sendJSON(res, 200, { ok: true, report: reportRow(_reportGet.get(id)) });
+  }
+
   /* ---------- personal printings ----------
    * A user's own layer over the catalog: printings only they can see, and
    * their own scans attached to printings everybody can see. Never published,
-   * never pulled, never anybody else's. Admins get this too — it is how the
-   * curator keeps their collector hat separate. */
+   * never pulled, never anybody else's. Admin only since v0.3.27: the curator
+   * keeps their collector hat separate here; everybody else reports what is
+   * missing (see /api/reports below) and the curator adds it for all. Rows
+   * other accounts made before then are kept, just no longer served. */
+  if (pathname.startsWith('/api/my/printing') && !isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
   if (pathname === '/api/my/printings' && req.method === 'GET') {
     const lang = LANG_RE.test(url.searchParams.get('lang') || '') ? url.searchParams.get('lang') : 'en';
     const rows = _userPrints.all(user.id, lang).map((r) => ({
@@ -4553,7 +4358,7 @@ if (process.argv.includes('--set-password')) {
     // Nobody owns this install yet. Whoever opens it first would otherwise
     // become its administrator, so the setup screen asks for a code that only
     // exists here — in the log of the machine running it.
-    if (userCount() === 0 && !READONLY) {
+    if (userCount() === 0) {
       console.log('');
       console.log('  ┌─────────────────────────────────────────────────────────────┐');
       console.log('  │  This install has no account yet. Open it in a browser and  │');
@@ -4573,7 +4378,7 @@ if (process.argv.includes('--set-password')) {
     // still empty, so an install that boots before the master is reachable
     // (or before it has been published) heals itself.
     const tryMasterPull = () => {
-      if (READONLY || build.running) return;
+      if (build.running) return;
       if (catalogStats().cards > 0 || dbExists() || !catalogSource()) return;
       try { startCatalogPull(catalogSource()); }
       catch (e) { console.error('Auto-load from remote database failed to start: ' + e.message); }
