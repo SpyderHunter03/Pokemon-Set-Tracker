@@ -243,6 +243,13 @@ function fail(msg) {
     const goneB = (await fetch('http://localhost:3111/api/my/printings', { method: 'POST', headers: bAuth2, body: JSON.stringify({ cardId: 'base1-4', label: 'Nope' }) })).status;
     check('personal printings are gone: the endpoints answer 404 for admin and collector alike', goneA === 404 && goneB === 404);
 
+    // retired slots never come back: "other" and personal keys are dropped on the way in
+    await jfetch('http://localhost:3111/api/collection', { method: 'PUT', headers: bAuth2, body: JSON.stringify({ collection: { 'base1-4': { holo: 2, other: 1, 'my-graded-psa-9': 1 }, 'base1-58': { other: 3 } } }) });
+    const stripped = await jfetch('http://localhost:3111/api/collection', { headers: bAuth2 });
+    check('a collection keeps only real printings: "other" and my- tallies are dropped, an emptied card goes with them',
+      stripped.collection['base1-4'] && stripped.collection['base1-4'].holo === 2 && !('other' in stripped.collection['base1-4']) &&
+      !('my-graded-psa-9' in stripped.collection['base1-4']) && !stripped.collection['base1-58']);
+
     // what a regular account gets instead: a report the curator answers
     const rep = await jfetch('http://localhost:3111/api/reports', { method: 'POST', headers: bAuth2, body: JSON.stringify({ lang: 'en', kind: 'printing', cardId: 'base1-4', cardName: 'Charizard', number: '4', setName: 'Base Set', printing: 'Shadowless', note: 'Seen at a shop' }) });
     check('a collector reports a missing printing', rep.ok === true && rep.report.status === 'open' && rep.report.printing === 'Shadowless' && rep.report.cardId === 'base1-4');

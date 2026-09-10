@@ -1756,6 +1756,33 @@ const saveSettings = (s) => writeJSONAtomic(SETTINGS_FILE, s);
   }
 }
 
+/* One-time, on the first boot after v0.3.30: the "Other / Stamped" slot and
+ * the personal-printing layer are gone, so the tallies collectors kept under
+ * them ("other", "my-…") are cleared out of every collection. A collection
+ * that changes gets a fresh updated_at so every signed-in device pulls it. */
+const RETIRED_VARIANT = (vk) => vk === 'other' || vk.startsWith('my-');
+{
+  const s = loadSettings();
+  if (!s.retiredVariantsCleared) {
+    const rows = db.prepare('SELECT user_id, data FROM collections').all();
+    let users = 0, tallies = 0;
+    const now = Date.now();
+    for (const r of rows) {
+      let coll;
+      try { coll = JSON.parse(r.data); } catch { continue; }
+      let changed = false;
+      for (const [id, val] of Object.entries(coll)) {
+        if (!val || typeof val !== 'object') continue;
+        for (const vk of Object.keys(val)) if (RETIRED_VARIANT(vk)) { delete val[vk]; tallies++; changed = true; }
+        if (!Object.keys(val).length) delete coll[id];
+      }
+      if (changed) { putCollectionOf(r.user_id, coll, now); users++; }
+    }
+    if (tallies) console.log(`collections: cleared ${tallies} retired "other"/personal tallies from ${users} account(s)`);
+    s.retiredVariantsCleared = true;
+    saveSettings(s);
+  }
+}
 
 // ---------- custom printings & variant image library ----------
 
@@ -3830,7 +3857,7 @@ async function handleApi(req, res, pathname, ip, url) {
       } else if (val && typeof val === 'object' && !Array.isArray(val)) {
         let vn = 0;
         for (const [vk, q] of Object.entries(val)) {
-          if (!VARIANT_RE.test(vk)) continue;
+          if (!VARIANT_RE.test(vk) || RETIRED_VARIANT(vk)) continue;   // "other" and personal keys are no more
           const qq = clamp(q);
           if (qq > 0) variants[vk] = qq;
           if (++vn > 16) break;

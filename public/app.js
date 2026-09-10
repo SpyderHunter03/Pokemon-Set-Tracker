@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.77.0';
+const APP_VERSION = '3.78.0';
 
 /* ============================================================
  * Storage helpers
@@ -560,6 +560,7 @@ function normalizeEntry(val) {
   if (val && typeof val === 'object') {
     const out = {};
     for (const [k, q] of Object.entries(val)) {
+      if (k === 'other' || k.startsWith('my-')) continue;   // retired slots (v0.3.30) never come back
       const qq = Math.max(0, Math.min(9999, parseInt(q, 10) || 0));
       if (qq > 0) out[k] = qq;
     }
@@ -570,7 +571,15 @@ function normalizeEntry(val) {
 
 function loadCollection() {
   const v2 = lsGet('ptcg.collection.v2');
-  if (v2) return v2;
+  if (v2) {
+    // retired slots left on this device are dropped on the way in
+    const clean = {};
+    for (const [id, val] of Object.entries(v2)) {
+      const e = normalizeEntry(val);
+      if (Object.keys(e).length) clean[id] = e;
+    }
+    return clean;
+  }
   const v1 = lsGet('ptcg.collection.v1'); // migrate old single-quantity data
   const migrated = {};
   if (v1) {
@@ -598,9 +607,7 @@ function variantQty(cardId, variant) {
 function totalQty(cardId) {
   const e = collection[cardId];
   if (!e) return 0;
-  // an "other" tally from before the Other / Stamped slot was retired (v0.3.29)
-  // stays in the data untouched but no longer counts as owning the card
-  return Object.entries(e).reduce((a, [k, n]) => a + (k === 'other' ? 0 : n), 0);
+  return Object.values(e).reduce((a, b) => a + b, 0);
 }
 
 function ownedAny(cardId) { return totalQty(cardId) > 0; }
