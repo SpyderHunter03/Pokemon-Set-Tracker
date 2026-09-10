@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.80.0';
+const APP_VERSION = '3.81.0';
 
 /* ============================================================
  * Storage helpers
@@ -3782,18 +3782,24 @@ function sheetImportCard(onApplied) {
         if (linkVariant) d.rowKeys.push({ key: row.key, cardId: card.id, variant: linkVariant });
       }
     };
+    const stale = [];   // settled rows whose printing the card no longer has — they go back through the review
     for (const [key, cardId, vk, fields] of (sync.links || [])) {
+      const sid = setIdOf(cardId);
+      const card = fields ? await cardById(sid, cardId) : null;
+      // A link made when the card looked different (a holo-only card whose
+      // plain row was read as its holo, and which now has a Normal) points at
+      // a printing that is not there. Counting it as settled would leave the
+      // real printing "absent from the sheet" while its row sits right there
+      // in the sheet — so the row is judged again, like a new one.
+      if (card && !realVariants(card).includes(vk)) { stale.push({ ...fields, key, state: 'unlinked' }); continue; }
       covered.add(cardId + '|' + vk);
       spoken.add(cardId);
-      const sid = setIdOf(cardId);
       coveredSets.add(sid);
       kindsOf(sid).add(vk);
       plan.matched++;
-      if (fields) {
-        const card = await cardById(sid, cardId);
-        if (card) noteDiffs({ ...fields, key }, card, sid, vk, !!VARIANT_LABELS[vk] || !fields.variant);
-      }
+      if (card) noteDiffs({ ...fields, key }, card, sid, vk, !!VARIANT_LABELS[vk] || !fields.variant);
     }
+    if (stale.length) rows.push(...stale);
 
     // a printing's label: the sheet's variant, or variant + notes when the
     // notes are what tells two rows apart ("Play! Pokémon Logo" comes in nine

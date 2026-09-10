@@ -712,6 +712,31 @@ const { chromium } = require('playwright');
     !agreed.normal && agreed.sparkle && agreed.linked);
   check('markup: the written name is "Brand New Mon ex" — "tex" never lands in the catalog', agreed.name9 === 'Brand New Mon ex');
 
+  // ---- a settled link at a printing the card no longer has is judged again ----
+  // (Pitch Black, 2026-09-10: three Rares showed "Normal is absent from the
+  // sheet" while their plain rows sat in the sheet — linked to a holo the
+  // cards had since lost.) The row goes back through the review, finds its
+  // real printing, and the phantom absence never appears.
+  const staleLink = await page.evaluate(async () => {
+    const links = (await (await fetch('api/masterlist/links?lang=en&cardId=test-promos-9')).json()).links.filter((l) => !l.gone && l.variant === 'holo');
+    if (!links.length) return null;
+    await fetch('api/masterlist/links', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ lang: 'en', links: [{ key: links[0].key, cardId: 'test-promos-9', variant: 'wPromo' }] }) });
+    return links[0].key;
+  });
+  check('stale link: the fixture has a settled Holo row on card 9 to bend', !!staleLink);
+  await gotoCurate();
+  await page.waitForSelector('#cur-sheet-resume', { state: 'visible' });
+  await page.click('#cur-sheet-resume');
+  await page.waitForSelector('#cur-sheet-sets');
+  const staleSetOpen = await page.locator('.cur-set-row[data-set="test-promos"]').count();
+  const staleText = staleSetOpen ? (await openSet('test-promos'), await page.textContent('#cur-set-detail')) : '';
+  check('stale link: no phantom "Holo is absent" — the row is judged again instead',
+    !/Holo is absent/.test(staleText));
+  const relinked = await page.evaluate(async (k) =>
+    (await (await fetch('api/masterlist/links?lang=en&cardId=test-promos-9')).json()).links.some((l) => l.key === k && l.variant === 'holo'), staleLink);
+  check('stale link: the re-judged row is linked back to the printing it really is', relinked);
+
   // tidy the stage for the main suite: the consultant set proved its point —
   // hide it so the home page holds the sets the smoke checks expect
   await page.evaluate(async () => {
