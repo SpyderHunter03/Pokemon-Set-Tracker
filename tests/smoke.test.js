@@ -1573,51 +1573,6 @@ const { chromium } = require('playwright');
     await rctx.close();
   }
 
-  // ---- editing a card from a binder leaves the binder exactly where it was ----
-  {
-    const ectx = await browser.newContext({ serviceWorkers: 'block' });
-    const ep = await ectx.newPage();
-    await ep.goto('http://localhost:3111/');
-    await ep.evaluate(async () => {
-      const r = await fetch('api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'ptcgadmin', password: 'password123' }) });
-      const d = await r.json();
-      localStorage.setItem('ptcg.auth', JSON.stringify({ token: d.token, username: d.username }));
-    });
-    await ep.reload();                                                  // the app reads the token at start-up
-    await ep.waitForSelector('.set-card');
-    await ep.goto('http://localhost:3111/#/binders');
-    await ep.waitForSelector('.binder-create');
-    await ep.fill('.binder-create input[type=text]', 'Admin Binder');
-    await ep.selectOption('.binder-create select >> nth=0', '2');       // 2×2 → base1's 8 printings need 2 pages
-    await pickFill(ep, 'base set', 'Base Set');
-    await ep.click('button:has-text("Create binder")');
-    await ep.waitForSelector('.binder-cover-page');
-    await ep.click('.binder-cover-page');
-    await ep.waitForSelector('.binder-grid .pocket');
-    await ep.click('button:has-text("Edit binder")');
-    await ep.waitForSelector('.page-remove');
-    await ep.click('button:has-text("›")');                            // move off page 1
-    await ep.waitForFunction(() => (document.querySelector('#view').textContent || '').includes('Page 2 of 2'));
-    await ep.waitForFunction(() => !document.querySelector('.flip-sheet'));
-    await ep.click('.binder-grid .pocket.filled .pocket-edit >> nth=0');
-    await ep.waitForSelector('.pocket-actions');
-    await ep.click('.pocket-actions button:has-text("Details")');
-    await ep.waitForSelector('#card-modal[open] button:has-text("Add printing (just for you)")');
-    const printing = 'Smoke Keepstate';
-    ep.once('dialog', (d) => d.accept(printing));
-    await ep.click('#card-modal button:has-text("Add printing (just for you)")');
-    await ep.waitForSelector(`#card-modal .chip:has-text("${printing}")`);
-    check('binder: adding a printing keeps edit mode on',
-      (await ep.locator('.page-remove').count()) > 0);
-    check('binder: adding a printing does not slam the book shut',
-      (await ep.textContent('#view')).includes('Page 2 of 2'));
-    await ep.evaluate(() => document.getElementById('card-modal').close());
-    check('binder: the pages are still there once the modal closes',
-      (await ep.locator('.binder-grid .pocket.filled').count()) > 0 &&
-      (await ep.locator('.page-remove').count()) > 0);
-    await ectx.close();
-  }
-
   // ---- moving whole sheets: reorder by drag, and open a gap in the middle ----
   // Its own binder on purpose: the main walk above has a hand-derived pocket map
   // that every later count leans on, and renumbering pages under it would move

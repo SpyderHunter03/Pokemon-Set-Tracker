@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.75.0';
+const APP_VERSION = '3.76.0';
 
 /* ============================================================
  * Storage helpers
@@ -354,10 +354,6 @@ async function searchCards({ name, rarity, type, sort, page = 1, perPage = 100 }
 /** Image URL for a printing. Each card/printing carries explicit low/high
  * URLs from the database (a remote CDN, or a local path this server serves). */
 function cardImg(card, quality = 'low', variant = null) {
-  // your own scan of a printing beats the shared picture — it IS your copy
-  const mine = variant && card && card.id ? myPrintingsFor(card.id) : null;
-  const mi = mine && mine[variant] && mine[variant].img;
-  if (mi) return mi[quality] || mi.low || mi.high || null;
   const vi = variant && card.variantImages && card.variantImages[variant];
   if (vi) return vi[quality] || vi.low || vi.high || null;
   if (!card.img) return null;
@@ -635,9 +631,6 @@ function realVariants(card) {
   // only assume "normal" when the card has no printings at all — a card whose
   // normal printing was removed but keeps a custom one must not resurrect it
   if (!avail.length) avail.push('normal');
-  // …then YOUR printings, which exist only for you and never resurrect anything
-  const mine = card && card.id ? myPrintingsFor(card.id) : null;
-  if (mine) for (const key of Object.keys(mine)) if (mine[key].label && !avail.includes(key)) avail.push(key);
   return avail;
 }
 
@@ -651,8 +644,6 @@ function availableVariants(card) {
 function variantLabel(card, vk) {
   const custom = card && card.printings && card.printings[vk];
   if (custom) return custom;
-  const mine = card && card.id ? myPrintingsFor(card.id) : null;
-  if (mine && mine[vk] && mine[vk].label) return mine[vk].label;
   if (vk === 'normal') {
     return card && card.variants && card.variants.firstEdition ? 'Unlimited' : 'Normal';
   }
@@ -735,33 +726,6 @@ async function ensureMe() {
   if (_meCache && _meCache.username === auth.username) return _meCache;
   try { _meCache = await apiCall('me'); } catch { _meCache = null; }
   return _meCache;
-}
-
-/* ---------- personal printings (the curator's own layer over the catalog) ----------
- * Admin only. Loaded once per account+language and merged into every place
- * printings render. Strictly the curator's: other accounts never see these,
- * and the master database never carries them. */
-let _myPrints = {};            // cardId -> variant -> { label, img }
-let _myPrintsKey = null;       // "username|lang" the map belongs to
-let _myPrintsLoading = null;
-function myPrintingsFor(cardId) {
-  return (_myPrintsKey === `${auth && auth.username}|${lang}` && _myPrints[cardId]) || null;
-}
-async function loadMyPrintings() {
-  const me = auth && serverAvailable ? await ensureMe() : null;
-  const key = me && me.admin ? `${auth.username}|${lang}` : null;   // the curator's layer only
-  if (!key) { _myPrints = {}; _myPrintsKey = null; return; }
-  if (_myPrintsKey === key || _myPrintsLoading === key) return;
-  _myPrintsLoading = key;
-  try {
-    const d = await apiCall('my/printings?lang=' + encodeURIComponent(lang));
-    _myPrints = {};
-    for (const p of d.printings || []) {
-      (_myPrints[p.card] = _myPrints[p.card] || {})[p.variant] = { label: p.label, img: p.img };
-    }
-    _myPrintsKey = key;
-  } catch { /* offline — the overlay simply waits for the next chance */ }
-  finally { _myPrintsLoading = null; }
 }
 
 async function apiCall(path, options = {}) {
@@ -886,7 +850,6 @@ function updateAccountButton() {
   const btn = document.getElementById('account-btn');
   btn.classList.toggle('synced', !!auth && syncState !== 'error');
   btn.textContent = auth ? (syncState === 'error' ? '⚠️' : '☁️') : '👤';
-  loadMyPrintings();   // called on every auth change — the personal layer follows the account
 }
 
 /* ============================================================
@@ -1136,13 +1099,10 @@ function rerenderCards() {
  * ============================================================ */
 const cardModal = document.getElementById('card-modal');
 
-/** @param onCardChanged how the page behind should repaint when an admin edit
- * changes the card itself (new printing, removed printing, new image, edited
- * card). Default is a full route() re-render; callers that hold their own state
- * — the binder holds edit mode and which pages are open — pass a narrower
- * refresh so opening a card never throws that state away. */
-async function openCardModal(brief, { variant, onOwnershipChange, onCardChanged } = {}) {
-  const refreshBehind = onCardChanged || route;
+/** @param onCardChanged kept for callers that hold their own state (the
+ * binder passes a narrower refresh); nothing in the modal changes the card
+ * itself any more — all editing lives in Administration. */
+async function openCardModal(brief, { variant, onOwnershipChange, onCardChanged } = {}) {   // eslint-disable-line no-unused-vars
   const body = document.getElementById('card-modal-body');
   body.replaceChildren(spinner());
   cardModal.showModal();
@@ -1154,7 +1114,6 @@ async function openCardModal(brief, { variant, onOwnershipChange, onCardChanged 
   if (!card.variants && brief.variants) card.variants = brief.variants;
   const me = await ensureMe();
   const isAdmin = !!(me && me.admin);
-  if (isAdmin) await loadMyPrintings();   // the curator's personal layer must be in hand before printings render
 
   const rows = [];
   const kv = (k, v) => { if (v) rows.push(h('div', { class: 'kv' }, h('span', {}, k), h('span', {}, String(v)))); };
@@ -1171,7 +1130,6 @@ async function openCardModal(brief, { variant, onOwnershipChange, onCardChanged 
 
   const chipsWrap = h('div', { class: 'chips', style: 'margin:12px 0 4px; justify-content:center' });
   const counterWrap = h('div', {});
-  const mineWrap = h('div', {});
   // provenance, for the curator: which masterlist row this printing IS
   const sourceWrap = h('div', { id: 'card-source', class: 'muted small', style: 'text-align:center; margin-top:4px' });
   let sourceLinks = null;
@@ -1210,17 +1168,13 @@ async function openCardModal(brief, { variant, onOwnershipChange, onCardChanged 
     renderModalImage(); // the picture reflects the selected printing
     renderSource();
     const track = canTrack();
-    const mineMap = myPrintingsFor(card.id) || {};
     chipsWrap.replaceChildren(...avail().map((vk) => {
       const qty = track ? variantQty(card.id, vk) : 0;
-      // ☆ marks what is yours alone: a personal printing, or your own scan
-      const yours = mineMap[vk] ? '☆ ' : '';
       return h('button', {
         type: 'button',
         class: 'chip' + (vk === active ? ' active' : ''),
-        title: mineMap[vk] ? 'Personal — only you see this' : undefined,
         onclick: () => { active = vk; renderVariantUI(); },
-      }, yours + variantLabel(card, vk) + (qty ? ` ✓${qty > 1 ? '×' + qty : ''}` : ''));
+      }, variantLabel(card, vk) + (qty ? ` ✓${qty > 1 ? '×' + qty : ''}` : ''));
     }));
     if (!track) {
       // browse-only: offer sign-in instead of ownership controls
@@ -1246,72 +1200,11 @@ async function openCardModal(brief, { variant, onOwnershipChange, onCardChanged 
       ),
       h('div', { class: 'muted small', style: 'text-align:center' }, `copies of ${variantLabel(card, active)}`),
     );
-    renderMineControls();
   }
 
-  /* ---- the curator's own layer: personal printings and scans ----
-   * Admin only. Everyone else asks for a missing printing through
-   * "Report a missing card or printing" and the curator adds it for all. */
-  function renderMineControls() {
-    mineWrap.replaceChildren();
-    if (!auth || !isAdmin) return;
-    const mineMap = myPrintingsFor(card.id) || {};
-    const mineRow = mineMap[active] || null;
-    const fileInput = h('input', { type: 'file', accept: 'image/*', hidden: '', 'data-mine-upload': '' });
-    fileInput.addEventListener('change', async (e) => {
-      const f = e.target.files[0];
-      if (!f) return;
-      try {
-        const res = await fetch(`api/my/printing-image?cardId=${encodeURIComponent(card.id)}&variant=${encodeURIComponent(active)}&lang=${encodeURIComponent(lang)}`, {
-          method: 'POST',
-          headers: { ...authHeaders(), 'Content-Type': f.type || 'application/octet-stream' },
-          body: f,
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || 'Upload failed');
-        const m = (_myPrints[card.id] = _myPrints[card.id] || {});
-        m[active] = { label: (m[active] && m[active].label) || null, img: data.urls };
-        toast(`Your scan is on ${variantLabel(card, active)} — only you see it`);
-        renderVariantUI();
-        refreshBehind();
-      } catch (err) { toast(err.message); }
-      e.target.value = '';
-    });
-    mineWrap.append(
-      h('div', { class: 'row', style: 'justify-content:center; margin-top:10px' },
-        h('button', { type: 'button', class: 'btn ghost small', onclick: async () => {
-          const label = prompt('Name of your printing (e.g. "Graded PSA 9", "Shadowless misprint"):');
-          if (!label || label.trim().length < 2) return;
-          try {
-            const r = await apiCall('my/printings', { method: 'POST', body: JSON.stringify({ cardId: card.id, label: label.trim(), lang }) });
-            (_myPrints[card.id] = _myPrints[card.id] || {})[r.key] = { label: r.label, img: null };
-            active = r.key;
-            toast(`Added your printing: ${r.label}`);
-            renderVariantUI();
-            refreshBehind();
-          } catch (err) { toast(err.message); }
-        } }, '＋ Add printing (just for you)'),
-        h('button', { type: 'button', class: 'btn ghost small', onclick: () => fileInput.click() }, `⬆ Your scan of ${variantLabel(card, active)}`),
-        mineRow ? h('button', { type: 'button', class: 'btn ghost small', onclick: async () => {
-          try {
-            await apiCall('my/printing-remove', { method: 'POST', body: JSON.stringify({ cardId: card.id, variant: active, lang }) });
-            const m = _myPrints[card.id];
-            if (m) { delete m[active]; if (!Object.keys(m).length) delete _myPrints[card.id]; }
-            if (!avail().includes(active)) active = avail()[0];
-            toast('Removed — it was only ever yours');
-            renderVariantUI();
-            refreshBehind();
-          } catch (err) { toast(err.message); }
-        } }, mineRow.label ? `✕ Remove ${mineRow.label}` : '✕ Remove your scan') : null,
-        fileInput,
-      ),
-      h('p', { class: 'muted small', style: 'text-align:center; margin:6px 0 0' },
-        '☆ Yours alone — personal printings and scans live on your account. Nobody else sees them, and publishing never touches them.'),
-    );
-  }
-
-  // anyone signed in can tell the curator what is missing from this card
-  const reportBtn = auth && !isAdmin ? h('div', { class: 'row', style: 'justify-content:center; margin-top:10px' },
+  // anyone signed in can tell the curator what is missing from this card —
+  // adding printings is the curator's job, done in Administration
+  const reportBtn = auth ? h('div', { class: 'row', style: 'justify-content:center; margin-top:10px' },
     h('button', { type: 'button', class: 'btn ghost small', 'data-report-missing': '', onclick: () => {
       cardModal.close();
       openReportDialog({ card, set });
@@ -1326,7 +1219,6 @@ async function openCardModal(brief, { variant, onOwnershipChange, onCardChanged 
     chipsWrap,
     counterWrap,
     sourceWrap,
-    mineWrap,
     reportBtn,
     h('div', { class: 'row', style: 'margin-top:14px; justify-content:flex-end; gap:8px' },
       auth ? h('button', { class: 'btn ghost', onclick: async (e) => {
@@ -3216,8 +3108,6 @@ function languageCard() {
       lang = e.target.value;
       lsSet('ptcg.lang', lang);
       clearDataCaches();
-      _myPrints = {}; _myPrintsKey = null;   // the personal layer is per-language too
-      loadMyPrintings();
       toast('Language switched');
       route();
     } }, ...langs.map((l) => {

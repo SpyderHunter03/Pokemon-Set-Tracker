@@ -134,10 +134,11 @@ const { chromium } = require('playwright');
   await page.waitForSelector('.tcg-card');
   const tilesBefore = await page.locator('.tcg-card').count();
   await page.click('.tcg-card[data-card-id="base1-4"] >> nth=0 >> .info-btn');
-  await page.waitForSelector('#card-modal[open] button:has-text("just for you")');
-  check('the card modal offers personal tools but never master ones',
+  await page.waitForSelector('#card-modal[open] [data-report-missing]');
+  check('the card modal offers a report, never master tools or personal printings',
     (await page.locator('#card-modal button:has-text("(master)")').count()) === 0 &&
-    (await page.locator('#card-modal button:has-text("Edit card")').count()) === 0);
+    (await page.locator('#card-modal button:has-text("Edit card")').count()) === 0 &&
+    (await page.locator('#card-modal button:has-text("just for you")').count()) === 0);
   check('no add-card tile in the set grid, admin or not',
     (await page.locator('.add-card-tile').count()) === 0);
   await page.evaluate(() => document.getElementById('card-modal').close());

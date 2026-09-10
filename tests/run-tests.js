@@ -232,20 +232,16 @@ function fail(msg) {
     try { fs.unlinkSync(orphanNew); } catch { /* tidy */ }
   }
 
-  // ---- personal printings: the curator's own layer over the catalog ----
+  // ---- reports: a collector says what the catalog is missing; the curator answers ----
   {
     const admL = await jfetch('http://localhost:3111/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'ptcgadmin', password: 'password123' }) });
     const aAuth = { 'Content-Type': 'application/json', Authorization: 'Bearer ' + admL.token };
     const regB = await jfetch('http://localhost:3111/api/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'notmineuser', password: 'password123' }) });
     const bAuth2 = { 'Content-Type': 'application/json', Authorization: 'Bearer ' + regB.token };
-
-    const made = await jfetch('http://localhost:3111/api/my/printings', { method: 'POST', headers: aAuth, body: JSON.stringify({ cardId: 'base1-4', label: 'Graded PSA 9' }) });
-    check('personal printing minted with a my- key', made.ok === true && made.key === 'my-graded-psa-9' && made.label === 'Graded PSA 9');
-    const list = await jfetch('http://localhost:3111/api/my/printings?lang=en', { headers: aAuth });
-    check('personal printing listed for its owner', list.printings.some((p) => p.card === 'base1-4' && p.label === 'Graded PSA 9'));
-    const listB = (await fetch('http://localhost:3111/api/my/printings?lang=en', { headers: bAuth2 })).status;
-    const madeB = (await fetch('http://localhost:3111/api/my/printings', { method: 'POST', headers: bAuth2, body: JSON.stringify({ cardId: 'base1-4', label: 'Nope' }) })).status;
-    check('personal printings are the curator\'s alone: a regular account is refused', listB === 403 && madeB === 403);
+    // the per-user printing layer is gone for good: its endpoints no longer exist for anyone
+    const goneA = (await fetch('http://localhost:3111/api/my/printings?lang=en', { headers: aAuth })).status;
+    const goneB = (await fetch('http://localhost:3111/api/my/printings', { method: 'POST', headers: bAuth2, body: JSON.stringify({ cardId: 'base1-4', label: 'Nope' }) })).status;
+    check('personal printings are gone: the endpoints answer 404 for admin and collector alike', goneA === 404 && goneB === 404);
 
     // what a regular account gets instead: a report the curator answers
     const rep = await jfetch('http://localhost:3111/api/reports', { method: 'POST', headers: bAuth2, body: JSON.stringify({ lang: 'en', kind: 'printing', cardId: 'base1-4', cardName: 'Charizard', number: '4', setName: 'Base Set', printing: 'Shadowless', note: 'Seen at a shop' }) });
@@ -272,32 +268,6 @@ function fail(msg) {
     check('a collector can withdraw an open report, never an answered one', wdDone === 404 && wdOpen.ok === true);
     const openNow = await jfetch('http://localhost:3111/api/reports/all?status=open', { headers: aAuth });
     check('answered and withdrawn reports leave the open list', !openNow.reports.some((r) => r.id === rep.report.id || r.id === repCard.report.id));
-    const pubSet = await jfetch('http://localhost:3111/api/catalog/set?lang=en&id=base1');
-    check('the shared catalog stays clean of personal printings', !JSON.stringify(pubSet).includes('my-graded-psa-9'));
-
-    await jfetch('http://localhost:3111/api/collection', { method: 'PUT', headers: aAuth, body: JSON.stringify({ collection: { 'base1-4': { 'my-graded-psa-9': 1 } } }) });
-    const mColl = await jfetch('http://localhost:3111/api/collection', { headers: aAuth });
-    check('a personal printing ticks like any other', mColl.collection['base1-4']['my-graded-psa-9'] === 1);
-
-    // your own scan on a STANDARD printing: only you see it, served from /uimg/
-    const scanPng = await require('sharp')({ create: { width: 50, height: 70, channels: 3, background: { r: 200, g: 10, b: 10 } } }).png().toBuffer();
-    const up = await jfetch('http://localhost:3111/api/my/printing-image?cardId=base1-4&variant=holo&lang=en', {
-      method: 'POST', headers: { Authorization: aAuth.Authorization, 'Content-Type': 'image/png' }, body: scanPng,
-    });
-    check('your own scan lands on a standard printing', up.ok === true && /^\/uimg\/[a-f0-9-]{36}-low\.webp$/.test(up.urls.low));
-    const scanRes = await fetch('http://localhost:3111' + up.urls.low);
-    check('the scan serves from its unguessable address', scanRes.status === 200 && scanRes.headers.get('content-type') === 'image/webp');
-
-    // a master-set binder deals pockets to YOUR printings too
-    const mBin = await jfetch('http://localhost:3111/api/binders', { method: 'POST', headers: aAuth, body: JSON.stringify({ name: 'Mine', size: 3, color: 'red', fillFromSet: 'base1', lang: 'en' }) });
-    const mSlots = Object.values((mBin.binder && mBin.binder.slots) || {});
-    check('binder fill deals a pocket to your personal printing', mSlots.some((s) => s.card === 'base1-4' && s.variant === 'my-graded-psa-9'));
-
-    const rm = await jfetch('http://localhost:3111/api/my/printing-remove', { method: 'POST', headers: aAuth, body: JSON.stringify({ cardId: 'base1-4', variant: 'holo' }) });
-    check('removing your scan works', rm.ok === true);
-    await new Promise((r) => setTimeout(r, 150));   // the file removal is fire-and-forget
-    const goneRes = await fetch('http://localhost:3111' + up.urls.low);
-    check('a removed scan disappears from disk', goneRes.status === 404);
   }
 
   // ---- the sixty-page ceiling ----
