@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.76.0';
+const APP_VERSION = '3.77.0';
 
 /* ============================================================
  * Storage helpers
@@ -552,7 +552,6 @@ const VARIANT_DEFS = [
   ['reverse', 'Reverse Holo'],
   ['firstEdition', '1st Edition'],
   ['wPromo', 'W Promo'],
-  ['other', 'Other / Stamped'],
 ];
 const VARIANT_LABELS = Object.fromEntries(VARIANT_DEFS);
 
@@ -599,7 +598,9 @@ function variantQty(cardId, variant) {
 function totalQty(cardId) {
   const e = collection[cardId];
   if (!e) return 0;
-  return Object.values(e).reduce((a, b) => a + b, 0);
+  // an "other" tally from before the Other / Stamped slot was retired (v0.3.29)
+  // stays in the data untouched but no longer counts as owning the card
+  return Object.entries(e).reduce((a, [k, n]) => a + (k === 'other' ? 0 : n), 0);
 }
 
 function ownedAny(cardId) { return totalQty(cardId) > 0; }
@@ -615,13 +616,12 @@ function setVariantQty(cardId, variant, qty) {
 }
 
 /** The real printings of a card: from the data, plus any admin-defined
- * custom printings ("Cracked Ice Holo" etc.). No "other" — that lives in
- * the detail view. */
+ * custom printings ("Cracked Ice Holo" etc.). Nothing else — a printing the
+ * catalog does not carry is reported to the curator, not tracked loosely. */
 function realVariants(card) {
   const avail = [];
   const v = card && card.variants;
   for (const [key] of VARIANT_DEFS) {
-    if (key === 'other') continue;
     if (v && v[key]) avail.push(key);
   }
   const pr = card && card.printings;   // custom printings carried on the card
@@ -634,9 +634,9 @@ function realVariants(card) {
   return avail;
 }
 
-/** Variants offered in the card detail view: every real printing + the "other/stamped" bucket. */
+/** Variants offered in the card detail view: exactly the card's real printings. */
 function availableVariants(card) {
-  return [...realVariants(card), 'other'];
+  return realVariants(card);
 }
 
 /** Display label for a variant of a specific card. A "normal" printing of a
@@ -1548,7 +1548,7 @@ async function openCardEditor(opts) {
   // new cards (and duplicates) can land in any set
   const setSel = editing ? null : h('select', {}, ...allSets.map((x) => h('option', { value: x.id }, x.name)));
   if (setSel && homeSet) setSel.value = homeSet;
-  const varBoxes = VARIANT_DEFS.filter(([k]) => k !== 'other').map(([k, lbl]) => {
+  const varBoxes = VARIANT_DEFS.map(([k, lbl]) => {
     const cb = h('input', { type: 'checkbox' });
     cb.checked = src ? !!(src.variants && src.variants[k]) : k === 'normal';
     return { k, cb, el: h('label', { class: 'ce-var' }, cb, ' ' + lbl) };

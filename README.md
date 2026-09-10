@@ -12,7 +12,7 @@ A lightweight web app (PWA) for tracking which Pokémon cards you own — with c
   - **Sets** — every set with completion progress bars
   - **Pokémon** — every printing of each Pokémon across all sets (grouped by Pokédex number: Base Set Charizard, Charizard VMAX, etc. all in one place)
   - **Search** — instant name search with rarity/type filters (built automatically from your data)
-- **Per-variant tracking** — each card's real variants come from the data (Normal, Holo, Reverse Holo, 1st Edition, W Promo), plus an "Other / Stamped" slot for prerelease/staff stamps and the like. Track quantities of each.
+- **Per-variant tracking** — each card's printings are exactly what the curated catalog carries (Normal, Holo, Reverse Holo, 1st Edition, W Promo, and any custom printing the curator has added — stamps, cosmos holos, and the like). Track quantities of each; if a printing is missing, report it.
 - **Master set mode** — a toggle on each set page that counts every variant separately in the progress bar, for true master-set collectors.
 - **Variant looks** — printings are visually distinct: 1st Edition tiles carry the edition stamp, holo/reverse printings get a sheen — until you replace them with real images (below).
 - **Custom printings & your own images (admin)** — open any card's details as the admin: **＋ Add printing** creates printings the base data doesn't know ("Cracked Ice Holo", staff stamps, whatever your checklist needs) as fully tracked tiles, and **⬆ Upload image** attaches your own photo/scan to the selected printing (converted to webp on the server, shown instead of any synthetic look). Files can also be dropped in manually as `cdn/<lang>/images/<set>/<number>/<variant>-low.webp` — the downloader auto-detects them.

@@ -215,8 +215,8 @@ const { chromium } = require('playwright');
   await page.click('.tcg-card >> nth=0 >> .info-btn');
   await page.waitForSelector('#card-modal[open] .chips .chip');
   const chipTexts = await page.locator('#card-modal .chips .chip').allTextContents();
-  check('modal chips show printings + custom + other',
-    chipTexts.length === 4 && chipTexts[0].startsWith('Holo') && chipTexts[2].startsWith('Cracked Ice') && chipTexts[3].startsWith('Other'));
+  check('modal chips show exactly the catalog printings + custom — no "Other / Stamped" bucket',
+    chipTexts.length === 3 && chipTexts[0].startsWith('Holo') && chipTexts[2].startsWith('Cracked Ice') && !chipTexts.some((t) => /Other/.test(t)));
   check('modal shows set/number/rarity', (await page.textContent('#card-modal-body')).includes('4 / 102'));
   await page.click('#card-modal .qty-row button:last-child'); // + on active (Holo)
   c = await coll();
