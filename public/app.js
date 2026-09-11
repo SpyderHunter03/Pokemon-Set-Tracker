@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.81.0';
+const APP_VERSION = '3.82.0';
 
 /* ============================================================
  * Storage helpers
@@ -4058,11 +4058,15 @@ function sheetImportCard(onApplied) {
         return h('div', { class: 'row', style: 'gap:10px; align-items:center; margin:4px 0; flex-wrap:wrap' },
           h('span', {}, `"${u.raw}" — ${u.rows} row(s)`), sel);
       });
-      matchEl = h('div', { id: 'cur-sheet-match', style: 'margin-top:10px' },
-        h('h4', { class: 'muted small', style: 'margin:0 0 4px' }, `Match the sheet's sets first (${plan.unmatched.size})`),
-        h('p', { class: 'muted small', style: 'margin:0 0 6px' },
+      // collapsible, and it remembers: once the curator has folded it away to
+      // work the sets, it stays folded on every pass until they open it again
+      matchEl = h('details', { id: 'cur-sheet-match', class: 'cur-cat', style: 'margin-top:10px' },
+        h('summary', { class: 'muted small', style: 'cursor:pointer' }, `Match the sheet's sets first (${plan.unmatched.size})`),
+        h('p', { class: 'muted small', style: 'margin:4px 0 6px' },
           'The sheet uses set names this database does not know. Match each one to your set (remembered for every future upload — several sheet sets may map to the same set), create it, or ignore its rows.'),
         ...rows);
+      if (lsGet('ptcg.curSheetMatchOpen') !== false) matchEl.setAttribute('open', '');
+      matchEl.addEventListener('toggle', () => lsSet('ptcg.curSheetMatchOpen', matchEl.open));
       notes.push(`⚠ Rows from ${plan.unmatched.size} unmatched sheet set(s) are not part of this review yet.`);
     }
     // rows the consultant rewrote in place: shown so the review reads right,
@@ -4089,29 +4093,59 @@ function sheetImportCard(onApplied) {
     // ---- the set list: one line per set, three counts, ticked off as sets are settled ----
     const bySet = new Map();
     for (const it of items) { if (!bySet.has(it.setId)) bySet.set(it.setId, []); bySet.get(it.setId).push(it); }
-    const setIds = [...bySet.keys()].sort((a, b) => {
-      const oa = plan.setOrder.has(a) ? plan.setOrder.get(a) : 1e9, ob = plan.setOrder.has(b) ? plan.setOrder.get(b) : 1e9;
-      return oa - ob || String(a).localeCompare(String(b));
-    });
     const isNew = (sid) => [...plan.newSets.values()].some((ns) => ns.id === sid);
+    // the order the curator works in is theirs to choose, and it sticks:
+    // release order (the catalog's own, oldest or newest first), name, or
+    // by how much there is to decide — most first to clear the big ones,
+    // fewest first to tick off the quick ones
+    const SET_SORTS = [
+      ['oldest', 'Release date · oldest first'],
+      ['newest', 'Release date · newest first'],
+      ['name', 'Name A–Z'],
+      ['most', 'Most to decide first'],
+      ['fewest', 'Fewest to decide first'],
+    ];
+    let listSort = lsGet('ptcg.curSheetSort') || 'oldest';
+    if (!SET_SORTS.some(([k]) => k === listSort)) listSort = 'oldest';
+    const releaseIdx = (sid) => (plan.setOrder.has(sid) ? plan.setOrder.get(sid) : 1e9);
+    const countsOf = (sid) => {
+      const its = bySet.get(sid);
+      return {
+        decide: its.filter((x) => x.kind !== 'missing' && x.kind !== 'diff').length,
+        diffs: its.filter((x) => x.kind === 'diff').length,
+        absent: its.filter((x) => x.kind === 'missing').length,
+        total: its.length,
+      };
+    };
+    const sortedSetIds = () => [...bySet.keys()].sort((a, b) => {
+      const byName = () => nameOf(a).localeCompare(nameOf(b)) || String(a).localeCompare(String(b));
+      if (listSort === 'name') return byName();
+      if (listSort === 'most' || listSort === 'fewest') {
+        const d = countsOf(b).total - countsOf(a).total;
+        return (listSort === 'most' ? d : -d) || byName();
+      }
+      const d = releaseIdx(a) - releaseIdx(b);
+      return (listSort === 'newest' ? -d : d) || byName();
+    });
     const listEl = h('div', { id: 'cur-sheet-sets', style: 'margin-top:10px' });
     const detailEl = h('div', { id: 'cur-set-detail', hidden: '' });
     let listFilter = '';
     const renderList = () => {
-      const filterIn = h('input', { type: 'search', id: 'cur-sheet-filter', placeholder: 'Find a set…', value: listFilter, style: 'margin:0 0 6px; min-width:200px' });
+      const filterIn = h('input', { type: 'search', id: 'cur-sheet-filter', placeholder: 'Find a set…', value: listFilter, style: 'margin:0; min-width:200px' });
       filterIn.addEventListener('input', () => {
         listFilter = filterIn.value;
         const q = norm(listFilter);
         for (const el of listEl.querySelectorAll('.cur-set-row')) el.hidden = !!q && !norm(el.textContent).includes(q);
       });
+      const sortSel = h('select', { id: 'cur-sheet-sort', 'aria-label': 'Order the sets' }, ...SET_SORTS.map(([v, l]) => h('option', { value: v }, l)));
+      sortSel.value = listSort;
+      sortSel.addEventListener('change', () => { listSort = sortSel.value; lsSet('ptcg.curSheetSort', listSort); renderList(); });
+      const ordered = sortedSetIds();
       listEl.replaceChildren(
-        h('h4', { class: 'muted small', style: 'margin:0 0 4px' }, `Sets with something to decide (${setIds.length})`),
-        filterIn,
-        ...setIds.map((sid) => {
-          const its = bySet.get(sid);
-          const decide = its.filter((x) => x.kind !== 'missing' && x.kind !== 'diff').length;
-          const diffs = its.filter((x) => x.kind === 'diff').length;
-          const absent = its.filter((x) => x.kind === 'missing').length;
+        h('h4', { class: 'muted small', style: 'margin:0 0 4px' }, `Sets with something to decide (${ordered.length})`),
+        h('div', { class: 'row', style: 'gap:8px; align-items:center; flex-wrap:wrap; margin:0 0 6px' }, filterIn, h('span', { class: 'muted small' }, 'Order'), sortSel),
+        ...ordered.map((sid) => {
+          const { decide, diffs, absent } = countsOf(sid);
           const bits = [];
           if (decide) bits.push(`${decide} to decide`);
           if (diffs) bits.push(`${diffs} field difference(s)`);

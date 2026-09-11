@@ -435,6 +435,8 @@ const { chromium } = require('playwright');
 
   // ---- the highest level first: unknown sheet sets are matched, not guessed ----
   await page.waitForSelector('#cur-sheet-match');
+  check('sheet: the match-first step opens folded out the first time, and can be folded away',
+    (await page.locator('#cur-sheet-match[open]').count()) === 1);
   const matchText = await page.textContent('#cur-sheet-match');
   check('sheet: unknown set names park in a match-first step, rows excluded until resolved',
     matchText.includes('Basic Set') && matchText.includes('Consultant Promos'));
@@ -637,6 +639,23 @@ const { chromium } = require('playwright');
   await page.click('#cur-sheet-resume');
   await page.waitForSelector('#cur-sheet-sets');
   check('resume: the review picks up from the mirror without an upload', (await setRows()).length >= 1);
+  // the curator picks the order of the set list, and it sticks across passes
+  if ((await page.locator('.cur-set-row').count()) >= 2) {
+    const ids = async () => page.locator('.cur-set-row').evaluateAll((els) => els.map((e) => e.dataset.set));
+    const byName = async () => page.locator('.cur-set-row').evaluateAll((els) => els.map((e) => e.textContent.split(' — ')[0].replace(' (new set)', '')));
+    await page.selectOption('#cur-sheet-sort', 'name');
+    const names = await byName();
+    check('set list: "Name A–Z" orders the sets alphabetically', names.every((n, i) => !i || names[i - 1].localeCompare(n) <= 0));
+    await page.selectOption('#cur-sheet-sort', 'most');
+    const counts = await page.locator('.cur-set-row').evaluateAll((els) => els.map((e) => (e.textContent.match(/\d+/g) || []).map(Number).reduce((a, b) => a + b, 0)));
+    check('set list: "Most to decide first" puts the busiest set at the top', counts.every((c, i) => !i || counts[i - 1] >= c));
+    await page.selectOption('#cur-sheet-sort', 'newest');
+    const newest = await ids();
+    await page.selectOption('#cur-sheet-sort', 'oldest');
+    const oldest = await ids();
+    check('set list: newest-first is the reverse of oldest-first', JSON.stringify(newest) === JSON.stringify([...oldest].reverse()));
+    check('set list: the chosen order is remembered', (await page.evaluate(() => JSON.parse(localStorage.getItem('ptcg.curSheetSort')))) === 'oldest');
+  }
   await page.fill('#cur-sheet-filter', 'test prom');
   check('set list: the filter narrows the list to the sets that match',
     (await page.locator('.cur-set-row:visible').count()) === 1 && (await page.locator('.cur-set-row[data-set="test-promos"]').isVisible()));
