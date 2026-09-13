@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.83.0';
+const APP_VERSION = '3.84.0';
 
 /* ============================================================
  * Storage helpers
@@ -5213,8 +5213,8 @@ function adminCardsTab() {
           let st;
           try { st = await apiCall('prices/status?lang=' + encodeURIComponent(lang)); } catch (e) { box.replaceChildren(h('p', { class: 'muted small', style: 'margin:0' }, e.message)); return; }
           box.replaceChildren(h('p', { class: 'muted small', style: 'margin:0 0 8px' }, st.running
-            ? `Sweeping: ${st.done} / ${st.total} cards, ${st.written} prices written${st.failed ? `, ${st.failed} could not be fetched` : ''}\u2026`
-            : `${st.priced} printings priced${st.latest ? ` (latest figure ${st.latest})` : ''} \u00b7 ${st.sweptAt ? `last full sweep ${new Date(st.sweptAt).toLocaleString()}` : 'no sweep yet'}${st.error ? ` \u00b7 last run: ${st.error}` : ''}`));
+            ? `Sweeping: ${st.resumedAt ? `resumed at card ${st.resumedAt + 1}, ` : ''}${st.done} / ${st.total - (st.resumedAt || 0)} cards, ${st.written} prices written${st.failed ? `, ${st.failed} could not be fetched` : ''}\u2026`
+            : `${st.priced} printings priced${st.latest ? ` (latest figure ${st.latest})` : ''} \u00b7 ${st.sweptAt ? `last full sweep ${new Date(st.sweptAt).toLocaleString()}` : 'no sweep yet'}${st.cursor ? ` \u00b7 a pass from ${st.cursor.day} was cut short and will pick up where it stopped` : ''}${st.error ? ` \u00b7 last run: ${st.error}` : ''}`));
           btn.disabled = !!st.running;
           if (st.running) setTimeout(say, 2000);
         };

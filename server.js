@@ -2461,7 +2461,7 @@ const PRICE_FINISH = {
   normal: 'normal', unlimited: 'normal', holofoil: 'holo', 'unlimited-holofoil': 'holo',
   'reverse-holofoil': 'reverse', '1st-edition': 'firstEdition', '1st-edition-holofoil': 'firstEdition',
 };
-const priceJob = { running: false, startedAt: null, finishedAt: null, done: 0, total: 0, written: 0, failed: 0, error: null, lastId: null };
+const priceJob = { running: false, startedAt: null, finishedAt: null, done: 0, total: 0, written: 0, failed: 0, error: null, lastId: null, resumedAt: 0 };
 function recordCardPrices(lang, cardId, pricing, variantsCsv) {
   const toCents = (v) => (typeof v === 'number' && v >= 0 ? Math.round(v * 100) : null);
   const day = (ts) => { const d = ts ? new Date(ts) : new Date(); return (isNaN(d) ? new Date() : d).toISOString().slice(0, 10); };
@@ -2501,9 +2501,17 @@ function recordCardPrices(lang, cardId, pricing, variantsCsv) {
 async function runPriceSweep() {
   const cards = _priceCardsToSweep.all();
   priceJob.total = cards.length; priceJob.done = 0; priceJob.written = 0; priceJob.failed = 0;
-  // resume: the id the last pass stopped at is where this one starts
+  // Resume: a pass interrupted today — by a deploy restarting the service,
+  // most likely — carries on from where it stopped instead of starting over.
+  // The place is kept in the settings file, not in memory, so it outlives the
+  // process; a cursor from another day is stale and the pass starts afresh.
+  const today = new Date().toISOString().slice(0, 10);
+  const s0 = loadSettings();
+  const cursor = s0.priceCursor && s0.priceCursor.day === today ? s0.priceCursor.lastId : (priceJob.lastId || null);
   let start = 0;
-  if (priceJob.lastId) { const i = cards.findIndex((c) => c.lang + '/' + c.id === priceJob.lastId); if (i > 0) start = i + 1; }
+  if (cursor) { const i = cards.findIndex((c) => c.lang + '/' + c.id === cursor); if (i >= 0) start = i + 1; }
+  priceJob.resumedAt = start;
+  const remember = (lastId) => { const s = loadSettings(); s.priceCursor = { day: today, lastId }; saveSettings(s); };
   for (let i = start; i < cards.length; i++) {
     const c = cards[i];
     try {
@@ -2516,6 +2524,7 @@ async function runPriceSweep() {
       } else if (res.status !== 404) priceJob.failed++;
     } catch { priceJob.failed++; }
     priceJob.done = i + 1 - start; priceJob.lastId = c.lang + '/' + c.id;
+    if ((i + 1) % 25 === 0) remember(priceJob.lastId);   // a restart loses at most 25 cards' worth
     if (PRICE_SWEEP_GAP_MS > 0 && i < cards.length - 1) await new Promise((r) => setTimeout(r, PRICE_SWEEP_GAP_MS));
   }
   priceJob.lastId = null;
@@ -2524,7 +2533,7 @@ function startPriceSweep() {
   if (priceJob.running) return false;
   priceJob.running = true; priceJob.startedAt = Date.now(); priceJob.finishedAt = null; priceJob.error = null;
   runPriceSweep()
-    .then(() => { const s = loadSettings(); s.pricesSweptAt = new Date().toISOString(); saveSettings(s); })
+    .then(() => { const s = loadSettings(); s.pricesSweptAt = new Date().toISOString(); delete s.priceCursor; saveSettings(s); })
     .catch((e) => { priceJob.error = e.message; })
     .finally(() => { priceJob.running = false; priceJob.finishedAt = Date.now(); });
   return true;
@@ -2533,8 +2542,10 @@ function startPriceSweep() {
 function priceSweepTick() {
   if (priceJob.running || build.running) return;
   if (catalogStats().cards === 0) return;
-  const at = loadSettings().pricesSweptAt;
-  if (at && Date.now() - Date.parse(at) < PRICE_SWEEP_EVERY) return;
+  const s = loadSettings();
+  const today = new Date().toISOString().slice(0, 10);
+  const unfinished = s.priceCursor && s.priceCursor.day === today;   // a pass a restart cut short
+  if (!unfinished && s.pricesSweptAt && Date.now() - Date.parse(s.pricesSweptAt) < PRICE_SWEEP_EVERY) return;
   startPriceSweep();
 }
 /** Latest raw prices for a list of cards: { 'cardId|variant': { market, low, high, currency, observed, eur? } } */
@@ -2658,7 +2669,8 @@ async function handleApi(req, res, pathname, ip, url) {
   if (pathname === '/api/prices/status' && req.method === 'GET') {
     const lang = LANG_RE.test(url.searchParams.get('lang') || '') ? url.searchParams.get('lang') : 'en';
     const c = _priceCount.get(lang);
-    return sendJSON(res, 200, { ...priceJob, priced: c.n, latest: c.latest, sweptAt: loadSettings().pricesSweptAt || null, source: PRICE_SOURCE_API });
+    const st = loadSettings();
+    return sendJSON(res, 200, { ...priceJob, priced: c.n, latest: c.latest, sweptAt: st.pricesSweptAt || null, cursor: st.priceCursor || null, source: PRICE_SOURCE_API });
   }
   if (pathname === '/api/prices/sweep' && req.method === 'POST') {
     const admin = authUser(req);

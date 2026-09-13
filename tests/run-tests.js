@@ -298,6 +298,21 @@ function fail(msg) {
     const sweepDenied = (await fetch('http://localhost:3111/api/prices/sweep', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + regP.token }, body: '{}' })).status;
     const sweepAnon = (await fetch('http://localhost:3111/api/prices/sweep', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).status;
     check('prices: only the administrator starts a sweep', sweepDenied === 403 && sweepAnon === 403);
+
+    // a pass cut short (a deploy restarted the service) carries on from where
+    // it stopped: the cursor lives in the settings file, keyed to the day
+    const sfile = path.join(ROOT, '.test-data', 'settings.json');
+    const sjson = JSON.parse(fs.readFileSync(sfile, 'utf8'));
+    const todayStr = new Date().toISOString().slice(0, 10);
+    sjson.priceCursor = { day: todayStr, lastId: 'en/base1-4' };
+    fs.writeFileSync(sfile, JSON.stringify(sjson));
+    const admL2 = await jfetch('http://localhost:3111/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'ptcgadmin', password: 'password123' }) });
+    const started = await jfetch('http://localhost:3111/api/prices/sweep', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + admL2.token }, body: '{}' });
+    let pst = null;
+    for (let i = 0; i < 100 && (!pst || pst.running); i++) { await new Promise((r) => setTimeout(r, 200)); pst = await jfetch('http://localhost:3111/api/prices/status?lang=en'); }
+    check('prices: a sweep resumes after the card the cursor names instead of starting over',
+      started.started === true && pst && pst.resumedAt === 2 && pst.done === pst.total - 2);
+    check('prices: a finished pass clears the cursor and stamps the day', pst.cursor === null && !!pst.sweptAt);
   }
 
   // ---- the sixty-page ceiling ----

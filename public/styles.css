@@ -525,9 +525,10 @@ select.chip { appearance: none; padding-right: 22px; }
 
 
 .tcg-card .qty-badge {
+  /* beside the tick, top-right — the top-left corner belongs to the price */
   position: absolute;
   top: 6px;
-  left: 6px;
+  right: 32px;
   background: rgba(15, 18, 32, .85);
   border: 1px solid var(--border);
   color: var(--text);
