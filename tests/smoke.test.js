@@ -238,6 +238,32 @@ const { chromium } = require('playwright');
   check('missing filter shows 5 printings', (await page.locator('.tcg-card').count()) === 5);
   await page.click('.chip:has-text("All")');
 
+  // ---- prices: what you own, added up — on the set page, the home tiles and the banner ----
+  {
+    const money = (cents) => { const n = cents / 100; return n >= 1000 ? '$' + Math.round(n).toLocaleString('en-US') : n >= 100 ? '$' + n.toFixed(0) : '$' + n.toFixed(2); };
+    const owned = await coll();
+    const look = await page.evaluate(async (ids) => (await fetch('api/prices/lookup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lang: 'en', ids }) })).json(), Object.keys(owned));
+    let mine = 0;
+    for (const [id, e] of Object.entries(owned)) for (const [vk, q] of Object.entries(e)) { const pr = look.prices[id + '|' + vk]; if (pr) mine += pr.market * q; }
+    check('prices: the collector owns something priced (holo ×2 among it)', mine >= 82500);
+    await page.waitForFunction((want) => (document.querySelector('#set-value')?.textContent || '').startsWith(want + ' owned of '), money(mine));
+    check('prices: the set page adds up what you own, by copies, against the whole set', true);
+    check('prices: a row in List view carries the figure too', await (async () => {
+      await page.selectOption('.chips select >> nth=1', 'list');
+      await page.waitForSelector('.card-row .row-price:not([hidden])');
+      const t = await page.locator('.card-row[data-card-id="base1-4"][data-variant="holo"] .row-price').textContent();
+      await page.selectOption('.chips select >> nth=1', 'grid');
+      return t === '$413';
+    })());
+    await page.goto('http://localhost:3111/#/');
+    await page.waitForFunction((want) => document.querySelector('#stat-value')?.textContent === want, money(mine));
+    check('prices: the stats banner says what the collection is worth', !(await page.locator('#stat-value-wrap').isHidden()));
+    await page.waitForFunction((want) => (document.querySelector('[data-set-value="base1"]')?.textContent || '').startsWith(want + ' owned of '), money(mine));
+    check('prices: the set tile on the home page carries owned / whole-set value', true);
+    await page.goto('http://localhost:3111/#/set/base1');
+    await page.waitForSelector('.tcg-card');
+  }
+
   // ---- printing looks: name banner on non-primary printings + real variant scans ----
   check('primary printing banners its name too now', (await page.locator('.tcg-card >> nth=0 >> .fx-label').textContent()) === 'Holo');
   check('1st Edition printing shows its name across the base scan', (await page.locator('.tcg-card >> nth=1 >> .fx-label').textContent()) === '1st Edition');

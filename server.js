@@ -242,6 +242,27 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS reports_user ON reports (user_id, created);
 `);
 
+/* Prices: what a printing goes for, one row per (printing, source, grade,
+ * kind, day). Raw prices come from the same source the catalog does (TCGdex
+ * relays TCGplayer per finish, and Cardmarket per card); "observed" is the
+ * day the source stamped on the figure, so the table is a history for free.
+ * Never published with the master — prices are a time series, not catalog. */
+db.exec(`
+  CREATE TABLE IF NOT EXISTS prices (
+    lang      TEXT NOT NULL DEFAULT 'en',
+    card_id   TEXT NOT NULL,
+    variant   TEXT NOT NULL,
+    source    TEXT NOT NULL,             -- 'tcgplayer' | 'cardmarket'
+    grade     TEXT NOT NULL DEFAULT '',  -- '' = raw
+    kind      TEXT NOT NULL,             -- 'market' | 'low' | 'high' | 'trend' | 'avg30'
+    cents     INTEGER NOT NULL,
+    currency  TEXT NOT NULL DEFAULT 'USD',
+    observed  TEXT NOT NULL,             -- YYYY-MM-DD
+    PRIMARY KEY (lang, card_id, variant, source, grade, kind, observed)
+  );
+  CREATE INDEX IF NOT EXISTS prices_latest ON prices (lang, card_id, variant, source, kind, observed DESC);
+`);
+
 /* Sheet-import aliases: the consultant's set names, matched to this install's
  * sets once and remembered. Many aliases may point at one set ("Base Set (E)",
  * "Base Set (C)" both -> base1); an empty set_id means "ignore rows from this
@@ -2412,6 +2433,124 @@ const _localPrintingImg = db.prepare(`INSERT INTO printings (lang, card_id, vari
 
 
 
+/* ---------- prices: the nightly sweep and the reads ----------
+ * The source is the catalog's own (TCGdex, or whatever PTCG_SOURCE_API points
+ * at). One card request per catalog card, throttled to be polite; the job
+ * resumes where it stopped and runs once a day on its own. Only raw prices
+ * for now — TCGplayer per finish (USD) and Cardmarket per card (EUR). */
+const PRICE_SOURCE_API = (process.env.PTCG_SOURCE_API || 'https://api.tcgdex.net/v2').replace(/\/+$/, '');
+const PRICE_SWEEP_GAP_MS = Number(process.env.PTCG_PRICE_GAP_MS || 350);   // ~3 requests a second
+const PRICE_SWEEP_EVERY = 24 * 60 * 60 * 1000;
+const _pricePut = db.prepare(`INSERT INTO prices (lang, card_id, variant, source, grade, kind, cents, currency, observed)
+  VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(lang, card_id, variant, source, grade, kind, observed) DO UPDATE SET cents = excluded.cents`);
+const _priceLatestOfCard = db.prepare(`SELECT variant, source, kind, cents, currency, observed FROM prices p
+  WHERE lang = ? AND card_id = ? AND grade = '' AND observed = (
+    SELECT MAX(observed) FROM prices q WHERE q.lang = p.lang AND q.card_id = p.card_id AND q.variant = p.variant AND q.source = p.source AND q.kind = p.kind AND q.grade = '')`);
+const _priceHistory = db.prepare(`SELECT observed, cents FROM prices WHERE lang = ? AND card_id = ? AND variant = ? AND source = 'tcgplayer' AND grade = '' AND kind = 'market' AND observed >= ? ORDER BY observed`);
+const _priceSetTotals = db.prepare(`SELECT c.set_id AS set_id, SUM(p.cents) AS cents, COUNT(*) AS n FROM prices p
+  JOIN cards c ON c.lang = p.lang AND c.id = p.card_id AND c.hidden = 0
+  WHERE p.lang = ? AND p.source = 'tcgplayer' AND p.kind = 'market' AND p.grade = '' AND p.observed = (
+    SELECT MAX(observed) FROM prices q WHERE q.lang = p.lang AND q.card_id = p.card_id AND q.variant = p.variant AND q.source = p.source AND q.kind = p.kind AND q.grade = '')
+  GROUP BY c.set_id`);
+const _priceCount = db.prepare("SELECT COUNT(DISTINCT card_id || '|' || variant) AS n, MAX(observed) AS latest FROM prices WHERE lang = ? AND source = 'tcgplayer' AND kind = 'market'");
+const _priceCardsToSweep = db.prepare('SELECT lang, id, variants_csv FROM cards WHERE hidden = 0 ORDER BY lang, id');
+// TCGdex's TCGplayer finish names → the catalog's printing keys. "unlimited"
+// is what TCGplayer calls the plain printing of a card that also has a 1st
+// Edition; it lands on the same key the app labels "Unlimited".
+const PRICE_FINISH = {
+  normal: 'normal', unlimited: 'normal', holofoil: 'holo', 'unlimited-holofoil': 'holo',
+  'reverse-holofoil': 'reverse', '1st-edition': 'firstEdition', '1st-edition-holofoil': 'firstEdition',
+};
+const priceJob = { running: false, startedAt: null, finishedAt: null, done: 0, total: 0, written: 0, failed: 0, error: null, lastId: null };
+function recordCardPrices(lang, cardId, pricing, variantsCsv) {
+  const toCents = (v) => (typeof v === 'number' && v >= 0 ? Math.round(v * 100) : null);
+  const day = (ts) => { const d = ts ? new Date(ts) : new Date(); return (isNaN(d) ? new Date() : d).toISOString().slice(0, 10); };
+  const has = new Set(String(variantsCsv || '').split(',').filter(Boolean));
+  let n = 0;
+  const tp = pricing && pricing.tcgplayer;
+  if (tp && typeof tp === 'object') {
+    const observed = day(tp.updated);
+    const seen = new Set();
+    for (const [finish, vk] of Object.entries(PRICE_FINISH)) {
+      const v = tp[finish];
+      if (!v || typeof v !== 'object') continue;
+      // "normal" outranks "unlimited" when a source carries both for one key
+      if (seen.has(vk) && finish.startsWith('unlimited')) continue;
+      seen.add(vk);
+      for (const [kind, field] of [['market', 'marketPrice'], ['low', 'lowPrice'], ['high', 'highPrice']]) {
+        const c = toCents(v[field]);
+        if (c == null) continue;
+        _pricePut.run(lang, cardId, vk, 'tcgplayer', '', kind, c, 'USD', observed); n++;
+      }
+    }
+  }
+  const cm = pricing && pricing.cardmarket;
+  if (cm && typeof cm === 'object') {
+    const observed = day(cm.updated);
+    // Cardmarket prices the card, plus a holo twin: the plain figure is the
+    // card's non-holo printing (normal, else reverse), the -holo figure its holo
+    const plainKey = has.has('normal') || !has.has('holo') ? 'normal' : 'holo';
+    for (const [kind, field, vk] of [['trend', 'trend', plainKey], ['avg30', 'avg30', plainKey], ['trend', 'trend-holo', 'holo'], ['avg30', 'avg30-holo', 'holo']]) {
+      const c = toCents(cm[field]);
+      if (c == null) continue;
+      _pricePut.run(lang, cardId, vk, 'cardmarket', '', kind, c, 'EUR', observed); n++;
+    }
+  }
+  return n;
+}
+async function runPriceSweep() {
+  const cards = _priceCardsToSweep.all();
+  priceJob.total = cards.length; priceJob.done = 0; priceJob.written = 0; priceJob.failed = 0;
+  // resume: the id the last pass stopped at is where this one starts
+  let start = 0;
+  if (priceJob.lastId) { const i = cards.findIndex((c) => c.lang + '/' + c.id === priceJob.lastId); if (i > 0) start = i + 1; }
+  for (let i = start; i < cards.length; i++) {
+    const c = cards[i];
+    try {
+      const res = await fetch(`${PRICE_SOURCE_API}/${c.lang}/cards/${encodeURIComponent(c.id)}`, { headers: { 'Accept': 'application/json' } });
+      if (res.ok) {
+        const data = await res.json();
+        db.exec('BEGIN');
+        try { priceJob.written += recordCardPrices(c.lang, c.id, data.pricing, c.variants_csv); db.exec('COMMIT'); }
+        catch (e) { db.exec('ROLLBACK'); throw e; }
+      } else if (res.status !== 404) priceJob.failed++;
+    } catch { priceJob.failed++; }
+    priceJob.done = i + 1 - start; priceJob.lastId = c.lang + '/' + c.id;
+    if (PRICE_SWEEP_GAP_MS > 0 && i < cards.length - 1) await new Promise((r) => setTimeout(r, PRICE_SWEEP_GAP_MS));
+  }
+  priceJob.lastId = null;
+}
+function startPriceSweep() {
+  if (priceJob.running) return false;
+  priceJob.running = true; priceJob.startedAt = Date.now(); priceJob.finishedAt = null; priceJob.error = null;
+  runPriceSweep()
+    .then(() => { const s = loadSettings(); s.pricesSweptAt = new Date().toISOString(); saveSettings(s); })
+    .catch((e) => { priceJob.error = e.message; })
+    .finally(() => { priceJob.running = false; priceJob.finishedAt = Date.now(); });
+  return true;
+}
+/** Once a day, on its own — a card with no price yet is a card nobody can value. */
+function priceSweepTick() {
+  if (priceJob.running || build.running) return;
+  if (catalogStats().cards === 0) return;
+  const at = loadSettings().pricesSweptAt;
+  if (at && Date.now() - Date.parse(at) < PRICE_SWEEP_EVERY) return;
+  startPriceSweep();
+}
+/** Latest raw prices for a list of cards: { 'cardId|variant': { market, low, high, currency, observed, eur? } } */
+function latestPricesFor(lang, ids) {
+  const out = {};
+  for (const id of ids) {
+    for (const r of _priceLatestOfCard.all(lang, id)) {
+      const k = id + '|' + r.variant;
+      const o = out[k] || (out[k] = {});
+      if (r.source === 'tcgplayer') { o[r.kind] = r.cents; o.currency = r.currency; if (r.kind === 'market') o.observed = r.observed; }
+      else if (r.source === 'cardmarket' && r.kind === 'trend') { o.eur = r.cents; o.eurObserved = r.observed; }
+    }
+  }
+  return out;
+}
+
 /* ---------- publishing the master database (workspace → R2) ----------
  * The publish script is the tested tool; this job only runs it and keeps its
  * words. Credentials come from the service environment (an EnvironmentFile
@@ -2491,6 +2630,42 @@ async function handleApi(req, res, pathname, ip, url) {
       release: RELEASE_VERSION,
       canPublish: MASTER_MODE && r2Configured(),
     });
+  }
+
+  /* ---------- prices ----------
+   * Reading is open, like the catalog: a price is public knowledge. Only the
+   * sweep itself is the administrator's to start. */
+  if (pathname === '/api/prices/lookup' && req.method === 'POST') {
+    const body = await readBody(req);
+    const lang = LANG_RE.test(body.lang || '') ? body.lang : 'en';
+    const ids = Array.isArray(body.ids) ? body.ids.filter((x) => typeof x === 'string' && CARD_ID_RE.test(x)).slice(0, 2000) : [];
+    return sendJSON(res, 200, { lang, prices: latestPricesFor(lang, ids) });
+  }
+  if (pathname === '/api/prices/history' && req.method === 'GET') {
+    const lang = LANG_RE.test(url.searchParams.get('lang') || '') ? url.searchParams.get('lang') : 'en';
+    const cardId = url.searchParams.get('cardId') || '', variant = url.searchParams.get('variant') || 'normal';
+    if (!CARD_ID_RE.test(cardId) || !VARIANT_KEY_RE.test(variant)) return sendJSON(res, 400, { error: 'cardId and variant are required' });
+    const days = Math.max(7, Math.min(730, parseInt(url.searchParams.get('days') || '90', 10) || 90));
+    const since = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
+    return sendJSON(res, 200, { lang, cardId, variant, currency: 'USD', points: _priceHistory.all(lang, cardId, variant, since).map((r) => [r.observed, r.cents]) });
+  }
+  if (pathname === '/api/prices/sets' && req.method === 'GET') {
+    const lang = LANG_RE.test(url.searchParams.get('lang') || '') ? url.searchParams.get('lang') : 'en';
+    const sets = {};
+    for (const r of _priceSetTotals.all(lang)) sets[r.set_id] = { cents: r.cents, printings: r.n };
+    return sendJSON(res, 200, { lang, currency: 'USD', sets });
+  }
+  if (pathname === '/api/prices/status' && req.method === 'GET') {
+    const lang = LANG_RE.test(url.searchParams.get('lang') || '') ? url.searchParams.get('lang') : 'en';
+    const c = _priceCount.get(lang);
+    return sendJSON(res, 200, { ...priceJob, priced: c.n, latest: c.latest, sweptAt: loadSettings().pricesSweptAt || null, source: PRICE_SOURCE_API });
+  }
+  if (pathname === '/api/prices/sweep' && req.method === 'POST') {
+    const admin = authUser(req);
+    if (!admin || !isAdminUser(admin)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    if (build.running) return sendJSON(res, 409, { error: 'The card database is busy — try again when the job finishes' });
+    const started = startPriceSweep();
+    return sendJSON(res, 200, { ok: true, started, running: true });
   }
 
   // hidden (tombstoned) cards of a set — lets the admin see and restore them
@@ -4303,6 +4478,10 @@ if (process.argv.includes('--set-password')) {
     const sched = () => { runScheduledUpdateCheck().catch(() => { /* offline is normal */ }); };
     setTimeout(sched, 60 * 1000).unref();
     setInterval(sched, AUTO_UPDATE_EVERY).unref();
+    // prices: once a day, a couple of minutes after boot and hourly thereafter
+    // until a day has passed since the last full pass
+    setTimeout(priceSweepTick, 2 * 60 * 1000).unref();
+    setInterval(priceSweepTick, 60 * 60 * 1000).unref();
   });
 }
 

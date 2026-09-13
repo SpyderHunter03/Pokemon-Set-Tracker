@@ -277,6 +277,29 @@ function fail(msg) {
     check('answered and withdrawn reports leave the open list', !openNow.reports.some((r) => r.id === rep.report.id || r.id === repCard.report.id));
   }
 
+  // ---- prices: history grows a day at a time; the sweep is the administrator's to start ----
+  {
+    const { DatabaseSync } = require('node:sqlite');
+    const pdb = new DatabaseSync(path.join(ROOT, '.test-data', 'ptcg.db'));
+    const ago = (d) => new Date(Date.now() - d * 86400000).toISOString().slice(0, 10);
+    // two older days, as a sweep on those days would have left them
+    pdb.prepare("INSERT OR REPLACE INTO prices (lang, card_id, variant, source, grade, kind, cents, currency, observed) VALUES ('en','base1-4','holo','tcgplayer','','market',?, 'USD', ?)").run(39000, ago(2));
+    pdb.prepare("INSERT OR REPLACE INTO prices (lang, card_id, variant, source, grade, kind, cents, currency, observed) VALUES ('en','base1-4','holo','tcgplayer','','market',?, 'USD', ?)").run(40100, ago(1));
+    pdb.close();
+    const hist = await jfetch('http://localhost:3111/api/prices/history?lang=en&cardId=base1-4&variant=holo&days=30');
+    check('prices: the history endpoint returns the days in order, oldest first', hist.points.length === 3 && hist.points[0][1] === 39000 && hist.points[2][1] === 41250);
+    const latest = await jfetch('http://localhost:3111/api/prices/lookup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lang: 'en', ids: ['base1-4'] }) });
+    check('prices: the lookup still answers with today\'s figure, not an older day', latest.prices['base1-4|holo'].market === 41250 && latest.prices['base1-4|holo'].observed === ago(0));
+    const setsP = await jfetch('http://localhost:3111/api/prices/sets?lang=en');
+    check('prices: per-set totals count each printing once at its latest price', setsP.sets.base1 && setsP.sets.base1.printings === 4 && setsP.sets.base1.cents === 1025275);
+    const badHist = (await fetch('http://localhost:3111/api/prices/history?lang=en&cardId=&variant=holo')).status;
+    check('prices: a bad card id is refused', badHist === 400);
+    const regP = await jfetch('http://localhost:3111/api/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'pricepeeker', password: 'password123' }) });
+    const sweepDenied = (await fetch('http://localhost:3111/api/prices/sweep', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + regP.token }, body: '{}' })).status;
+    const sweepAnon = (await fetch('http://localhost:3111/api/prices/sweep', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).status;
+    check('prices: only the administrator starts a sweep', sweepDenied === 403 && sweepAnon === 403);
+  }
+
   // ---- the sixty-page ceiling ----
   // MAX_BINDER_PAGES clamps in three places and none of them was ever
   // exercised, because reaching it through the UI means sixty sheets. It does

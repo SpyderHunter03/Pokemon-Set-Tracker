@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.82.0';
+const APP_VERSION = '3.83.0';
 
 /* ============================================================
  * Storage helpers
@@ -187,6 +187,152 @@ function clearDataCaches() {
   _searchCache = null;
   _setDetailCache.clear();
   _scanIndexCache = null;
+  _priceMap.clear(); _priceAsked.clear(); _priceSets = null;
+}
+
+/* ============================================================
+ * Prices — what a printing goes for, asked for in batches
+ *
+ * Every tile and row wants a figure, and a page may hold five hundred of
+ * them; asking one at a time would be five hundred requests. So a pill asks
+ * for its card and waits, and the asks are gathered for a moment and sent as
+ * one lookup. The answer is remembered for the session (per language).
+ * ============================================================ */
+const _priceMap = new Map();     // 'cardId|variant' -> { market, low, high, currency, observed, eur }
+const _priceAsked = new Set();   // card ids already looked up (a card with no price is still answered)
+let _priceSets = null;           // set id -> { cents, printings }, the catalog's whole-set totals
+const priceKey = (cardId, vk) => cardId + '|' + vk;
+function priceOf(cardId, vk) { return _priceMap.get(priceKey(cardId, vk)) || null; }
+/** "$412.50", "$9,800", "$0.12" — dollars with cents only when they matter */
+function fmtMoney(cents, currency = 'USD', precise = false) {
+  if (cents == null) return '';
+  const sym = currency === 'EUR' ? '\u20ac' : '$';
+  const n = cents / 100;
+  if (precise) return sym + n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  if (n >= 1000) return sym + Math.round(n).toLocaleString();
+  if (n >= 100) return sym + n.toFixed(0);
+  return sym + n.toFixed(2);
+}
+let _priceQueue = new Set(), _priceTimer = null, _priceInflight = null;
+const _priceListeners = new Set();   // () => void, told when new prices arrive
+/** Have the latest prices for these cards on hand; resolves when they are. */
+async function ensurePrices(ids) {
+  const want = [...new Set(ids)].filter((id) => id && !_priceAsked.has(id));
+  if (!want.length) return;
+  for (const id of want) _priceAsked.add(id);
+  for (let i = 0; i < want.length; i += 500) {
+    const chunk = want.slice(i, i + 500);
+    try {
+      const d = await apiCall('prices/lookup', { method: 'POST', body: JSON.stringify({ lang, ids: chunk }) });
+      for (const [k, v] of Object.entries(d.prices || {})) _priceMap.set(k, v);
+    } catch {
+      // offline or an old server: ask again next time rather than remembering a blank
+      for (const id of chunk) _priceAsked.delete(id);
+      return;
+    }
+  }
+  for (const fn of _priceListeners) { try { fn(); } catch { /* a listener's page may be gone */ } }
+}
+function queuePrice(cardId) {
+  if (_priceAsked.has(cardId)) return;
+  _priceQueue.add(cardId);
+  if (_priceTimer) return;
+  _priceTimer = setTimeout(() => {
+    const ids = [..._priceQueue]; _priceQueue = new Set(); _priceTimer = null;
+    ensurePrices(ids);
+  }, 25);
+}
+/** The little figure a tile or row wears. Fills itself in when the answer lands. */
+function pricePill(cardId, vk, cls) {
+  const el = h('span', { class: cls || 'price-pill', 'data-price': priceKey(cardId, vk) });
+  const paint = () => {
+    const p = priceOf(cardId, vk);
+    el.textContent = p && p.market != null ? fmtMoney(p.market, p.currency) : '';
+    el.hidden = !(p && p.market != null);
+    if (p && p.market != null) el.title = `TCGplayer market price, ${p.observed}`;
+  };
+  paint();
+  if (!_priceAsked.has(cardId)) {
+    el.hidden = true;
+    const listener = () => { paint(); if (_priceAsked.has(cardId)) _priceListeners.delete(listener); };
+    _priceListeners.add(listener);
+    queuePrice(cardId);
+  }
+  return el;
+}
+/** The price panel in a card's details: today's figures and the last 90 days
+ * as a small line. Draws itself once the numbers arrive; says so when the
+ * history is still one day old. */
+function priceSection(cardId, vk) {
+  const box = h('div', { class: 'price-box', 'data-price-box': priceKey(cardId, vk) });
+  (async () => {
+    await ensurePrices([cardId]);
+    const p = priceOf(cardId, vk);
+    if (!p || p.market == null) { box.hidden = true; return; }
+    const line = h('div', { class: 'price-line' },
+      h('span', { class: 'price-now' }, fmtMoney(p.market, p.currency, true)),
+      h('span', { class: 'muted small' }, ` market · low ${fmtMoney(p.low, p.currency)} · high ${fmtMoney(p.high, p.currency)}` +
+        (p.eur != null ? ` · Cardmarket ${fmtMoney(p.eur, 'EUR')}` : '')),
+    );
+    const foot = h('div', { class: 'muted small', style: 'text-align:center' }, `TCGplayer market price · ${p.observed}`);
+    box.replaceChildren(line, foot);
+    let pts = [];
+    try { pts = (await apiCall(`prices/history?lang=${encodeURIComponent(lang)}&cardId=${encodeURIComponent(cardId)}&variant=${encodeURIComponent(vk)}&days=90`)).points || []; }
+    catch { return; }
+    if (pts.length < 2) { box.append(h('div', { class: 'muted small', style: 'text-align:center' }, 'The price history starts today \u2014 the line draws itself as the days go by.')); return; }
+    box.insertBefore(priceSparkline(pts, p.currency), foot);
+  })();
+  return box;
+}
+/** points: [[YYYY-MM-DD, cents], ...] in date order → an inline SVG line, min/max labelled */
+function priceSparkline(points, currency) {
+  const W = 320, H = 72, PAD = 6;
+  const t0 = Date.parse(points[0][0]), t1 = Date.parse(points[points.length - 1][0]);
+  const vals = points.map((p) => p[1]);
+  let lo = Math.min(...vals), hi = Math.max(...vals);
+  if (hi === lo) { hi += 1; lo -= 1; }
+  const x = (t) => PAD + ((t1 === t0 ? 0.5 : (t - t0) / (t1 - t0))) * (W - 2 * PAD);
+  const y = (v) => H - PAD - ((v - lo) / (hi - lo)) * (H - 2 * PAD);
+  const d = points.map((p, i) => `${i ? 'L' : 'M'}${x(Date.parse(p[0])).toFixed(1)},${y(p[1]).toFixed(1)}`).join(' ');
+  const area = d + ` L${x(t1).toFixed(1)},${H - PAD} L${x(t0).toFixed(1)},${H - PAD} Z`;
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(svgNS, 'svg');
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('class', 'price-spark'); svg.setAttribute('role', 'img');
+  svg.setAttribute('aria-label', `Market price over ${points.length} days, from ${fmtMoney(points[0][1], currency)} to ${fmtMoney(points[points.length - 1][1], currency)}`);
+  const mk = (tag, attrs) => { const el = document.createElementNS(svgNS, tag); for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v); return el; };
+  svg.append(mk('path', { d: area, class: 'spark-area' }), mk('path', { d, class: 'spark-line' }),
+    mk('circle', { cx: x(t1).toFixed(1), cy: y(points[points.length - 1][1]).toFixed(1), r: 3, class: 'spark-dot' }));
+  const wrap = h('div', { class: 'price-chart' }, svg,
+    h('div', { class: 'row muted small', style: 'justify-content:space-between' },
+      h('span', {}, `${points[0][0]} · ${fmtMoney(points[0][1], currency)}`),
+      h('span', {}, `low ${fmtMoney(lo, currency)} · high ${fmtMoney(hi, currency)}`),
+      h('span', {}, `${points[points.length - 1][0]} · ${fmtMoney(points[points.length - 1][1], currency)}`)));
+  return wrap;
+}
+/** Sum of market prices over a list of printings: [ [cardId, vk, qty], ... ] → cents (null when nothing is priced) */
+function priceSum(entries) {
+  let cents = 0, any = false;
+  for (const [id, vk, qty] of entries) {
+    const p = priceOf(id, vk);
+    if (p && p.market != null) { cents += p.market * (qty == null ? 1 : qty); any = true; }
+  }
+  return any ? cents : null;
+}
+/** The catalog's per-set totals (every printing, once), fetched once per session. */
+async function setPriceTotals() {
+  if (_priceSets) return _priceSets;
+  try { _priceSets = (await apiCall('prices/sets?lang=' + encodeURIComponent(lang))).sets || {}; }
+  catch { return {}; }
+  return _priceSets;
+}
+/** What the signed-in collection is worth: every owned printing, times its count. */
+async function collectionValue() {
+  const ids = Object.keys(collection);
+  if (!ids.length) return null;
+  await ensurePrices(ids);
+  const entries = [];
+  for (const [id, e] of Object.entries(collection)) for (const [vk, q] of Object.entries(e)) entries.push([id, vk, q]);
+  return priceSum(entries);
 }
 
 async function getIndex() {
@@ -965,6 +1111,7 @@ function cardTile(card, variant, { onOwnershipChange } = {}) {
   // every card everywhere, because a picture alone doesn't say which set
   tile.classList.add('capped');
   tile.append(cardCaption(card.id, card, 'card-cap'));
+  tile.append(pricePill(card.id, variant));   // what this printing goes for, in the corner
   tile.append(h('button', {
     class: 'info-btn', title: 'Card details', 'aria-label': 'Card details',
     onclick: (e) => { e.stopPropagation(); openCardModal(card, { variant, onOwnershipChange }); },
@@ -1047,6 +1194,7 @@ function cardRow(card, variant, { onOwnershipChange, thumb } = {}) {
     ),
     h('div', { class: 'row-meta muted small' }, `${setNameOf(card.id)} · #${card.localId || localIdOf(card.id)}`),
   ));
+  row.append(pricePill(card.id, variant, 'row-price'));
   row.append(h('div', { class: 'row-mark' }));
   row.append(h('button', {
     class: 'info-btn', title: 'Card details', 'aria-label': 'Card details',
@@ -1136,6 +1284,7 @@ async function openCardModal(brief, { variant, onOwnershipChange, onCardChanged 
   let active = variant && avail().includes(variant) ? variant : avail()[0];
 
   const counterWrap = h('div', {});
+  const priceWrap = priceSection(card.id, active);   // today's figure and the line behind it
   // provenance, for the curator: which masterlist row this printing IS
   const sourceWrap = h('div', { id: 'card-source', class: 'muted small', style: 'text-align:center; margin-top:4px' });
   let sourceLinks = null;
@@ -1216,6 +1365,7 @@ async function openCardModal(brief, { variant, onOwnershipChange, onCardChanged 
     imgWrap,
     ...rows,
     counterWrap,
+    priceWrap,
     sourceWrap,
     !auth ? null : h('div', { class: 'row', style: 'margin-top:14px; justify-content:center; gap:8px; flex-wrap:wrap' },
       reportBtn,
@@ -1453,6 +1603,7 @@ async function renderHome() {
         h('div', { class: 'stat' }, h('div', { class: 'num', id: 'stat-owned' }, String(totalOwned)), h('div', { class: 'lbl' }, 'cards owned')),
         h('div', { class: 'stat' }, h('div', { class: 'num', id: 'stat-complete' }, String(completeSets)), h('div', { class: 'lbl' }, 'sets completed')),
         h('div', { class: 'stat' }, h('div', { class: 'num' }, String(ordered.length)), h('div', { class: 'lbl' }, 'sets total')),
+        h('div', { class: 'stat', id: 'stat-value-wrap', hidden: '' }, h('div', { class: 'num', id: 'stat-value' }, '\u2026'), h('div', { class: 'lbl' }, 'collection value')),
       )
     : h('div', { class: 'signin-banner' },
         h('div', {},
@@ -1487,6 +1638,7 @@ async function renderHome() {
           h('div', { class: 'name' }, s.name),
           h('div', { class: 'count' }, `${owned} / ${total || '?'}${done ? ' ✓ complete' : ''}` +
             (pt ? ` · ${pt.owned} / ${pt.total} printings` : '')),
+          h('div', { class: 'count set-value', 'data-set-value': s.id, hidden: '' }),
           h('div', { class: 'progress' + (done ? ' done' : '') }, h('div', { style: `width:${pct}%` })),
           pt ? h('div', { class: 'progress' + (pt.total > 0 && pt.owned >= pt.total ? ' done' : ''), style: 'margin-top:3px' }, h('div', { style: `width:${vPct}%` })) : null,
         ),
@@ -1509,11 +1661,52 @@ async function renderHome() {
       h('div', { class: 'chips' }, sortCtl),
     ),
     grid);
+
+  // what it is all worth — filled in once the prices are here, so the sets
+  // themselves never wait on them. Each tile: owned value / the whole set.
+  fillSetValues(grid);
+  if (canTrack()) updateStatsBanner();
+}
+
+/** Every set tile's value line: "$X owned of $Y" (or just the set's worth when browsing). */
+async function fillSetValues(grid) {
+  const totals = await setPriceTotals();
+  const ownedBySet = {};
+  if (canTrack()) {
+    const ids = Object.keys(collection);
+    await ensurePrices(ids);
+    for (const [id, e] of Object.entries(collection)) {
+      const sid = setIdOf(id);
+      const v = priceSum(Object.entries(e).map(([vk, q]) => [id, vk, q]));
+      if (v != null) ownedBySet[sid] = (ownedBySet[sid] || 0) + v;
+    }
+  }
+  if (!grid.isConnected) return;
+  for (const el of grid.querySelectorAll('[data-set-value]')) {
+    const sid = el.dataset.setValue;
+    const t = totals[sid];
+    const o = ownedBySet[sid];
+    if (!t && o == null) continue;
+    el.textContent = canTrack()
+      ? `${fmtMoney(o || 0)} owned${t ? ` of ${fmtMoney(t.cents)}` : ''}`
+      : (t ? `worth ${fmtMoney(t.cents)}` : '');
+    el.hidden = !el.textContent;
+  }
 }
 
 function updateStatsBanner() {
   const el = document.getElementById('stat-owned');
   if (el) el.textContent = String(Object.keys(collection).filter(ownedAny).length);
+  const vWrap = document.getElementById('stat-value-wrap');
+  if (vWrap) {
+    collectionValue().then((cents) => {
+      const v = document.getElementById('stat-value');
+      if (!v) return;
+      if (cents == null) { vWrap.hidden = true; return; }
+      v.textContent = fmtMoney(cents);
+      vWrap.hidden = false;
+    });
+  }
 }
 
 /* ============================================================
@@ -1889,10 +2082,22 @@ async function renderSetPage(setId) {
   const progressWrap = h('div', { class: 'progress', style: 'flex:1; min-width:140px' }, progressBar);
   // second bar: the master-set view — every printing counts separately
   const printLabel = h('span', { class: 'muted' });
+  const valueLabel = h('span', { class: 'muted', id: 'set-value' });
   const printBar = h('div', {});
   const printWrap = h('div', { class: 'progress', style: 'flex:1; min-width:140px' }, printBar);
 
+  const updateValue = () => {
+    const all = [], mine = [];
+    for (const c of cards) for (const vk of realVariants(c)) {
+      all.push([c.id, vk, 1]);
+      const q = canTrack() ? variantQty(c.id, vk) : 0;
+      if (q) mine.push([c.id, vk, q]);
+    }
+    const total = priceSum(all), owned = priceSum(mine);
+    valueLabel.textContent = total == null ? '' : (canTrack() ? `${fmtMoney(owned || 0)} owned of ${fmtMoney(total)}` : `worth ${fmtMoney(total)}`);
+  };
   function updateProgress() {
+    updateValue();
     const owned = cards.filter((c) => ownedAny(c.id)).length;
     const total = officialTotal;
     progressLabel.textContent = `${owned} / ${total}`;
@@ -1951,7 +2156,8 @@ async function renderSetPage(setId) {
         ...(canTrack() ? [h('div', { class: 'prog-stack' },
           h('div', { class: 'prog-row' }, progressLabel, progressWrap),
           h('div', { class: 'prog-row' }, printLabel, printWrap),
-        )] : []),
+          h('div', { class: 'prog-row' }, valueLabel),
+        )] : [h('div', { class: 'prog-stack' }, h('div', { class: 'prog-row' }, valueLabel))]),
       ),
       h('div', { class: 'set-filter' }, searchInput),
       chipsWrap,
@@ -1961,6 +2167,8 @@ async function renderSetPage(setId) {
   renderChips();
   if (canTrack()) updateProgress();
   renderGrid();
+  // the set's worth, and yours in it: every printing once, yours by count
+  ensurePrices(cards.map((c) => c.id)).then(updateValue);
 }
 
 /* ============================================================
@@ -2610,7 +2818,19 @@ async function renderPokemonPage(dexStr) {
   const vLabel = h('span', { class: 'muted' });
   const vBar = h('div', {});
   const vWrap = h('div', { class: 'progress', style: 'flex:1; min-width:120px' }, vBar);
+  const worthLabel = h('span', { class: 'muted', id: 'pokemon-value' });
+  const updateWorth = () => {
+    const all = [], mine = [];
+    for (const c of sp.cards) for (const vk of realVariants(c)) {
+      all.push([c.id, vk, 1]);
+      const q = canTrack() ? variantQty(c.id, vk) : 0;
+      if (q) mine.push([c.id, vk, q]);
+    }
+    const total = priceSum(all), owned = priceSum(mine);
+    worthLabel.textContent = total == null ? '' : (canTrack() ? `${fmtMoney(owned || 0)} owned of ${fmtMoney(total)}` : `worth ${fmtMoney(total)}`);
+  };
   function updateProgress() {
+    updateWorth();
     if (!canTrack()) return;
     const owned = sp.cards.filter((c) => ownedAny(c.id)).length;
     progressLabel.textContent = `${owned} / ${sp.cards.length} owned`;
@@ -2671,13 +2891,15 @@ async function renderPokemonPage(dexStr) {
         ...(canTrack() ? [h('div', { class: 'prog-stack' },
           h('div', { class: 'prog-row' }, progressLabel, pWrap),
           h('div', { class: 'prog-row' }, vLabel, vWrap),
-        )] : []),
+          h('div', { class: 'prog-row' }, worthLabel),
+        )] : [h('div', { class: 'prog-stack' }, h('div', { class: 'prog-row' }, worthLabel))]),
       ),
       chipsWrap,
     ),
     grid,
   );
   updateProgress();
+  ensurePrices(sp.cards.map((c) => c.id)).then(updateWorth);
 }
 
 /* ============================================================
@@ -4983,6 +5205,30 @@ function adminCardsTab() {
         autoArea.children.length ? autoArea : null,
       ),
       publishCard,
+      // prices: when the sweep last ran, how much is priced, and a way to run it now
+      (() => {
+        const box = h('div', {});
+        const btn = h('button', { class: 'btn small', id: 'price-sweep' }, '\ud83d\udcb2 Refresh prices now');
+        const say = async () => {
+          let st;
+          try { st = await apiCall('prices/status?lang=' + encodeURIComponent(lang)); } catch (e) { box.replaceChildren(h('p', { class: 'muted small', style: 'margin:0' }, e.message)); return; }
+          box.replaceChildren(h('p', { class: 'muted small', style: 'margin:0 0 8px' }, st.running
+            ? `Sweeping: ${st.done} / ${st.total} cards, ${st.written} prices written${st.failed ? `, ${st.failed} could not be fetched` : ''}\u2026`
+            : `${st.priced} printings priced${st.latest ? ` (latest figure ${st.latest})` : ''} \u00b7 ${st.sweptAt ? `last full sweep ${new Date(st.sweptAt).toLocaleString()}` : 'no sweep yet'}${st.error ? ` \u00b7 last run: ${st.error}` : ''}`));
+          btn.disabled = !!st.running;
+          if (st.running) setTimeout(say, 2000);
+        };
+        btn.addEventListener('click', async () => {
+          btn.disabled = true;
+          try { await apiCall('prices/sweep', { method: 'POST', body: '{}' }); toast('Price sweep started'); say(); }
+          catch (e) { btn.disabled = false; toast(e.message); }
+        });
+        say();
+        return settingsCard(
+          h('h3', { style: 'margin:0 0 6px' }, 'Prices'),
+          h('p', { class: 'muted small', style: 'margin:0 0 8px' }, 'TCGplayer market prices per printing (and Cardmarket per card), read from the card source once a day. Nothing here is published \u2014 prices live on this server.'),
+          box, h('div', { class: 'row' }, btn));
+      })(),
       jobs.length ? settingsCard(
         h('h3', { style: 'margin:0 0 6px' }, 'Jobs'),
         h('div', { class: 'row' }, ...jobs),
@@ -5967,6 +6213,7 @@ async function renderBinderPage(id, shareToken = null) {
         h('div', { class: 'muted' }, showHave
           ? `${binder.size}×${binder.size} · ${got} / ${total} in hand`
           : `${binder.size}×${binder.size} · ${total} card${total === 1 ? '' : 's'}`),
+        h('div', { class: 'muted', id: 'binder-value', hidden: '' }),
       ),
       shared && owner ? h('p', { class: 'muted small', style: 'margin:-6px 0 10px' }, `Shared by ${owner}.`) : null,
       total && showHave ? h('div', { class: 'progress', style: 'height:8px; margin-bottom:10px' },
@@ -5980,6 +6227,20 @@ async function renderBinderPage(id, shareToken = null) {
         'Selecting \u2014 tap the pockets you want as proxies, then turn the page and keep going; they all print on the ' +
         'same sheets. Tapping will not change what\u2019s in hand while you\u2019re picking.') : null,
     ].filter(Boolean));
+    fillBinderValue();
+  }
+  /** what the binder is worth: every pocket, and the pockets ticked in hand */
+  async function fillBinderValue() {
+    const entries = Object.values(binder.slots).filter((e) => e.card);
+    if (!entries.length) return;
+    await ensurePrices(entries.map((e) => e.card));
+    const el = head.querySelector('#binder-value');
+    if (!el) return;
+    const total = priceSum(entries.map((e) => [e.card, e.variant, 1]));
+    const held = priceSum(entries.filter((e) => e.have).map((e) => [e.card, e.variant, 1]));
+    if (total == null) return;
+    el.textContent = showHave ? `${fmtMoney(held || 0)} in hand of ${fmtMoney(total)}` : `worth ${fmtMoney(total)}`;
+    el.hidden = false;
   }
 
   /** pull a whole sheet out of the binder: what sits on it comes out with it

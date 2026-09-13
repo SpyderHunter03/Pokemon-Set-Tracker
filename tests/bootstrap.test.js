@@ -129,6 +129,43 @@ const { chromium } = require('playwright');
   await page.waitForSelector('#admin-page button:has-text("Update cards from TCGdex")', { timeout: 120000 });
   check('admin update completes', true);
 
+  // ---- prices: the sweep reads the source's figures per printing ----
+  check('prices: the Card database tab offers the sweep', (await page.locator('#price-sweep').count()) === 1);
+  await page.click('#price-sweep');
+  let pst = null;
+  for (let i = 0; i < 100; i++) {
+    pst = await (await fetch('http://localhost:3111/api/prices/status?lang=en')).json();
+    if (!pst.running && pst.sweptAt && pst.priced > 0) break;
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  check('prices: the sweep priced the printings the source knows', pst.priced >= 5 && pst.failed === 0 && !!pst.sweptAt);
+  const look = await page.evaluate(async () => (await fetch('api/prices/lookup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lang: 'en', ids: ['base1-4', 'base1-58', 'swsh3-136'] }) })).json());
+  check('prices: finishes land on the catalog\'s printing keys (unlimited-holofoil → holo, 1st-edition-holofoil → firstEdition, unlimited → normal)',
+    look.prices['base1-4|holo'] && look.prices['base1-4|holo'].market === 41250 &&
+    look.prices['base1-4|firstEdition'] && look.prices['base1-4|firstEdition'].market === 980000 &&
+    look.prices['base1-58|normal'] && look.prices['base1-58|normal'].market === 225 &&
+    look.prices['swsh3-136|reverse'] && look.prices['swsh3-136|reverse'].market === 31);
+  check('prices: low and high ride along, and Cardmarket\'s EUR trend', look.prices['base1-4|holo'].low === 30000 && look.prices['base1-4|holo'].high === 90000 && look.prices['base1-4|holo'].eur === 38510);
+  await page.goto('http://localhost:3111/#/set/base1');
+  await page.waitForSelector('.tcg-card .price-pill:not([hidden])');
+  check('prices: every tile wears its printing\'s figure',
+    (await page.locator('.tcg-card[data-card-id="base1-4"][data-variant="holo"] .price-pill').textContent()) === '$413' &&
+    (await page.locator('.tcg-card[data-card-id="base1-4"][data-variant="firstEdition"] .price-pill').textContent()) === '$9,800' &&
+    (await page.locator('.tcg-card[data-card-id="base1-58"][data-variant="normal"] .price-pill').textContent()) === '$2.25');
+  check('prices: a printing the source does not price wears nothing',
+    await page.locator('.tcg-card[data-card-id="base1-97"] .price-pill').isHidden());
+  await page.waitForFunction(() => /\$10,25\d/.test(document.querySelector('#set-value')?.textContent || ''));
+  check('prices: the set page says what the whole set is worth, and what of it is owned', /^\$0\.00 owned of \$10,25\d$/.test(await page.textContent("#set-value")));
+  await page.click('.tcg-card[data-card-id="base1-4"][data-variant="holo"] .info-btn');
+  await page.waitForSelector('#card-modal[open] .price-box .price-now');
+  check('prices: the details show today\'s figure with low, high and the source',
+    (await page.textContent('#card-modal .price-now')) === '$412.50' &&
+    /low \$300 · high \$900/.test(await page.textContent('#card-modal .price-box')) &&
+    /TCGplayer market price/.test(await page.textContent('#card-modal .price-box')));
+  await page.waitForSelector('#card-modal .price-box:has-text("history starts today")');
+  check('prices: one day of history says so instead of drawing a line', (await page.locator('#card-modal .price-spark').count()) === 0);
+  await page.click('#card-modal .modal-close');
+
   // ---- no master tools outside Administration: ever, for anyone ----
   await page.goto('http://localhost:3111/#/set/base1');
   await page.waitForSelector('.tcg-card');

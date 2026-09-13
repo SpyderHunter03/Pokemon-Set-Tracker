@@ -51,6 +51,19 @@ function makeLang(lang) {
     'swsh3-136': { id: 'swsh3-136', localId: '136', name: tr('Furret', 'Fouinar'), rarity: 'Uncommon', category: 'Pokemon', dexId: [162], types: ['Colorless'], hp: 110, illustrator: 'Kagemaru Himeno', variants: { normal: true, reverse: true, holo: false }, image: ASSET('swsh3/136') },
     'swsh3-20': { id: 'swsh3-20', localId: '20', name: tr('Charizard VMAX', 'Dracaufeu VMAX'), rarity: 'Ultra Rare', category: 'Pokemon', dexId: [6], types: ['Fire'], hp: 330, variants: { normal: false, holo: true }, image: ASSET('swsh3/20') },
   };
+  // market prices, the way TCGdex relays them (TCGplayer per finish, Cardmarket per card)
+  const today = new Date().toISOString().slice(0, 10);
+  CARDS['base1-4'].pricing = { tcgplayer: { updated: today, unit: 'USD',
+    'unlimited-holofoil': { lowPrice: 300, midPrice: 400, highPrice: 900, marketPrice: 412.5 },
+    '1st-edition-holofoil': { lowPrice: 5000, midPrice: 9000, highPrice: 20000, marketPrice: 9800 } },
+    cardmarket: { updated: today, unit: 'EUR', trend: 380.2, avg30: 371.9, 'trend-holo': 385.1 } };
+  CARDS['base1-58'].pricing = { tcgplayer: { updated: today, unit: 'USD',
+    unlimited: { lowPrice: 1, midPrice: 2, highPrice: 5, marketPrice: 2.25 },
+    '1st-edition': { lowPrice: 20, midPrice: 40, highPrice: 90, marketPrice: 38 } },
+    cardmarket: { updated: today, unit: 'EUR', trend: 1.9, avg30: 2.1 } };
+  CARDS['swsh3-136'].pricing = { tcgplayer: { updated: today, unit: 'USD',
+    normal: { lowPrice: 0.05, midPrice: 0.2, highPrice: 1, marketPrice: 0.12 },
+    'reverse-holofoil': { lowPrice: 0.15, midPrice: 0.4, highPrice: 2, marketPrice: 0.31 } } };
   return { SETS, SET_DETAILS, CARDS, SERIES };
 }
 
