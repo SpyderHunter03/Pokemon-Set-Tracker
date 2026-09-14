@@ -275,6 +275,37 @@ function fail(msg) {
     check('a collector can withdraw an open report, never an answered one', wdDone === 404 && wdOpen.ok === true);
     const openNow = await jfetch('http://localhost:3111/api/reports/all?status=open', { headers: aAuth });
     check('answered and withdrawn reports leave the open list', !openNow.reports.some((r) => r.id === rep.report.id || r.id === repCard.report.id));
+
+    // ---- collaborators: the administrator hands out the curation side, and only that ----
+    const meB0 = await jfetch('http://localhost:3111/api/me', { headers: bAuth2 });
+    check('collaborator: a fresh account is a plain user (role, no curator flag)', meB0.role === 'user' && meB0.curator === false && meB0.admin === false && meB0.openReports === undefined);
+    const cListDenied = (await fetch('http://localhost:3111/api/collaborators', { headers: bAuth2 })).status;
+    const cSetDenied = (await fetch('http://localhost:3111/api/collaborators', { method: 'POST', headers: bAuth2, body: JSON.stringify({ username: 'notmineuser' }) })).status;
+    check('collaborator: only the administrator lists or assigns the role', cListDenied === 403 && cSetDenied === 403);
+    const cEmpty = (await fetch('http://localhost:3111/api/collaborators', { method: 'POST', headers: aAuth, body: JSON.stringify({ username: '  ' }) })).status;
+    const cNobody = (await fetch('http://localhost:3111/api/collaborators', { method: 'POST', headers: aAuth, body: JSON.stringify({ username: 'no-such-person' }) })).status;
+    const cSelf = (await fetch('http://localhost:3111/api/collaborators', { method: 'POST', headers: aAuth, body: JSON.stringify({ username: 'ptcgadmin' }) })).status;
+    check('collaborator: an empty name is 400, an unknown account 404, the administrator cannot be made one (400)', cEmpty === 400 && cNobody === 404 && cSelf === 400);
+    const cMade = await jfetch('http://localhost:3111/api/collaborators', { method: 'POST', headers: aAuth, body: JSON.stringify({ username: 'NotMineUser', collaborator: true }) });
+    check('collaborator: the administrator grants the role by account name, any case', cMade.ok === true && cMade.collaborator === true && cMade.username === 'notmineuser');
+    const cList = await jfetch('http://localhost:3111/api/collaborators', { headers: aAuth });
+    check('collaborator: the list names them', cList.collaborators.length === 1 && cList.collaborators[0].username === 'notmineuser');
+    const meB1 = await jfetch('http://localhost:3111/api/me', { headers: bAuth2 });
+    check('collaborator: /me now says collaborator, curator, not admin, with the open-report count', meB1.role === 'collaborator' && meB1.curator === true && meB1.admin === false && typeof meB1.openReports === 'number');
+    const cHidden = (await fetch('http://localhost:3111/api/hidden-cards?lang=en&set=base1', { headers: bAuth2 })).status;
+    const cAll = (await fetch('http://localhost:3111/api/reports/all', { headers: bAuth2 })).status;
+    const cMlStatus = (await fetch('http://localhost:3111/api/masterlist/status?lang=en', { headers: bAuth2 })).status;
+    check('collaborator: the curation endpoints open up (hidden cards, all reports, masterlist status)', cHidden === 200 && cAll === 200 && cMlStatus === 200);
+    const cMail = (await fetch('http://localhost:3111/api/mail-settings', { headers: bAuth2 })).status;
+    const cPublish = (await fetch('http://localhost:3111/api/catalog/publish', { method: 'POST', headers: bAuth2, body: '{}' })).status;
+    const cOidc = (await fetch('http://localhost:3111/api/oidc-settings', { headers: bAuth2 })).status;
+    const cColl = (await fetch('http://localhost:3111/api/collaborators', { headers: bAuth2 })).status;
+    check('collaborator: mail, publish, sign-on and the collaborator list stay the administrator\'s (403)', cMail === 403 && cPublish === 403 && cOidc === 403 && cColl === 403);
+    const cGone = await jfetch('http://localhost:3111/api/collaborators', { method: 'POST', headers: aAuth, body: JSON.stringify({ username: 'notmineuser', collaborator: false }) });
+    const meB2 = await jfetch('http://localhost:3111/api/me', { headers: bAuth2 });
+    const cHidden2 = (await fetch('http://localhost:3111/api/hidden-cards?lang=en&set=base1', { headers: bAuth2 })).status;
+    const cList2 = await jfetch('http://localhost:3111/api/collaborators', { headers: aAuth });
+    check('collaborator: taking the role away makes them a plain user again on the same session', cGone.ok === true && cGone.collaborator === false && meB2.role === 'user' && meB2.curator === false && cHidden2 === 403 && cList2.collaborators.length === 0);
   }
 
   // ---- prices: history grows a day at a time; the sweep is the administrator's to start ----

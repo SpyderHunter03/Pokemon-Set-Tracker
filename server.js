@@ -188,6 +188,10 @@ try { db.exec("ALTER TABLE users ADD COLUMN plan TEXT NOT NULL DEFAULT 'free'");
 // id); every later subscription event names only the customer, so this is
 // the join.
 try { db.exec('ALTER TABLE users ADD COLUMN stripe_customer TEXT'); } catch { /* already present */ }
+// Collaborators: accounts the administrator has let into the curation side of
+// Administration (Card database, Curation, Reports) — never the server's own
+// settings (mail, sign-on) and never publishing.
+try { db.exec('ALTER TABLE users ADD COLUMN collaborator INTEGER NOT NULL DEFAULT 0'); } catch { /* already present */ }
 // Whether a shared binder admits which cards its owner actually holds. On by
 // default, because "here is my binder" is what sharing one usually means —
 // but a link is also a partial inventory of somebody's house, so it should be
@@ -393,7 +397,7 @@ function writeJSONAtomic(file, obj) {
 
 // ---------- user & collection queries ----------
 
-const rowToUser = (r) => (r ? { id: r.id, username: r.username, display: r.display, salt: r.salt, hash: r.hash, created: r.created, admin: !!r.admin, email: r.email || null, emailVerified: !!r.email_verified, totpSecret: r.totp_secret || null, totpEnabled: !!r.totp_enabled, oidcIss: r.oidc_iss || null, oidcSub: r.oidc_sub || null, plan: r.plan === 'premium' ? 'premium' : 'free', stripeCustomer: r.stripe_customer || null } : null);
+const rowToUser = (r) => (r ? { id: r.id, username: r.username, display: r.display, salt: r.salt, hash: r.hash, created: r.created, admin: !!r.admin, email: r.email || null, emailVerified: !!r.email_verified, totpSecret: r.totp_secret || null, totpEnabled: !!r.totp_enabled, oidcIss: r.oidc_iss || null, oidcSub: r.oidc_sub || null, plan: r.plan === 'premium' ? 'premium' : 'free', stripeCustomer: r.stripe_customer || null, collaborator: !!r.collaborator } : null);
 
 const _getUserById = db.prepare('SELECT * FROM users WHERE id = ?');
 const _getUserByName = db.prepare('SELECT * FROM users WHERE username = ?');
@@ -1679,6 +1683,11 @@ function isAdminUser(user) {
   const earliest = rowToUser(_earliestUser.get());
   return !!earliest && earliest.id === user.id;
 }
+/** The curation side: the administrator, and anyone they have made a collaborator. */
+function isCuratorUser(user) { return isAdminUser(user) || user.collaborator === true; }
+function roleOf(user) { return isAdminUser(user) ? 'admin' : user.collaborator ? 'collaborator' : 'user'; }
+const _collaborators = db.prepare('SELECT username, display, created FROM users WHERE collaborator = 1 ORDER BY display');
+const _setCollaborator = db.prepare('UPDATE users SET collaborator = ? WHERE id = ?');
 
 /** Which tier this account gets treated as. Admins are premium without the
  * column saying so; everyone else is what the billing webhook last wrote.
@@ -2674,7 +2683,7 @@ async function handleApi(req, res, pathname, ip, url) {
   }
   if (pathname === '/api/prices/sweep' && req.method === 'POST') {
     const admin = authUser(req);
-    if (!admin || !isAdminUser(admin)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    if (!admin || !isCuratorUser(admin)) return sendJSON(res, 403, { error: 'Curator account required' });
     if (build.running) return sendJSON(res, 409, { error: 'The card database is busy — try again when the job finishes' });
     const started = startPriceSweep();
     return sendJSON(res, 200, { ok: true, started, running: true });
@@ -2683,7 +2692,7 @@ async function handleApi(req, res, pathname, ip, url) {
   // hidden (tombstoned) cards of a set — lets the admin see and restore them
   if (pathname === '/api/hidden-cards' && req.method === 'GET') {
     const hUser = authUser(req);
-    if (!hUser || !isAdminUser(hUser)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    if (!hUser || !isCuratorUser(hUser)) return sendJSON(res, 403, { error: 'Curator account required' });
     const qLang = LANG_RE.test(url.searchParams.get('lang') || '') ? url.searchParams.get('lang') : 'en';
     const setId = url.searchParams.get('set') || '';
     if (!SET_ID_RE.test(setId)) return sendJSON(res, 400, { error: 'A valid set id is required' });
@@ -2693,7 +2702,7 @@ async function handleApi(req, res, pathname, ip, url) {
   // hidden (bypassed) sets — lets the admin see and restore them
   if (pathname === '/api/hidden-sets' && req.method === 'GET') {
     const hUser = authUser(req);
-    if (!hUser || !isAdminUser(hUser)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    if (!hUser || !isCuratorUser(hUser)) return sendJSON(res, 403, { error: 'Curator account required' });
     const qLang = LANG_RE.test(url.searchParams.get('lang') || '') ? url.searchParams.get('lang') : 'en';
     return sendJSON(res, 200, { sets: _hiddenSets.all(qLang).map((x) => ({ id: x.id, name: x.name })) });
   }
@@ -2756,7 +2765,7 @@ async function handleApi(req, res, pathname, ip, url) {
   // the master's index and gets its own cards from the overlay instead.
   if (pathname === '/api/scan-index/rebuild' && req.method === 'POST') {
     const rbUser = authUser(req);
-    if (!rbUser || !isAdminUser(rbUser)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    if (!rbUser || !isCuratorUser(rbUser)) return sendJSON(res, 403, { error: 'Curator account required' });
     if (build.running) return sendJSON(res, 409, { error: 'Another job is already running' });
     if (!dbExists()) {
       return sendJSON(res, 400, { error: 'There are no card images on this server to hash. Cards you add here are fingerprinted as you upload their pictures, so the scanner already knows them.' });
@@ -2777,7 +2786,7 @@ async function handleApi(req, res, pathname, ip, url) {
    * missing language can't flood the panel — the counts stay true. */
   if (pathname === '/api/catalog/data-health' && req.method === 'GET') {
     const dhUser = authUser(req);
-    if (!dhUser || !isAdminUser(dhUser)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    if (!dhUser || !isCuratorUser(dhUser)) return sendJSON(res, 403, { error: 'Curator account required' });
     const CAP = 300;
     const capped = (rows) => ({ count: rows.length, sample: rows.slice(0, CAP) });
     const cardsNoImage = db.prepare(`SELECT lang, id, set_id, name FROM cards
@@ -2868,7 +2877,7 @@ async function handleApi(req, res, pathname, ip, url) {
   // fresh install that reads from the shared card database).
   if (pathname === '/api/catalog/pull' && req.method === 'POST') {
     const admin = authUser(req);
-    if (!admin || !isAdminUser(admin)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    if (!admin || !isCuratorUser(admin)) return sendJSON(res, 403, { error: 'Curator account required' });
     if (build.running) return sendJSON(res, 409, { error: 'Another job is already running' });
     const source = catalogSource();
     if (!source) return sendJSON(res, 400, { error: 'No card source is configured — set PTCG_API_BASE (+ PTCG_API_TOKEN), or cdnBase in public/config.js' });
@@ -2918,7 +2927,7 @@ async function handleApi(req, res, pathname, ip, url) {
   // what a master update would ADD — the admin reviews this before pulling
   if (pathname === '/api/catalog/preview' && req.method === 'POST') {
     const admin = authUser(req);
-    if (!admin || !isAdminUser(admin)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    if (!admin || !isCuratorUser(admin)) return sendJSON(res, 403, { error: 'Curator account required' });
     if (build.running) return sendJSON(res, 409, { error: 'Another job is already running' });
     const source = catalogSource();
     if (!source) return sendJSON(res, 400, { error: 'No card source is configured — set PTCG_API_BASE (+ PTCG_API_TOKEN), or cdnBase in public/config.js' });
@@ -2946,8 +2955,8 @@ async function handleApi(req, res, pathname, ip, url) {
     if (dbExists()) {
       // database already present → only the administrator may re-run/update it
       const admin = authUser(req);
-      if (!admin || !isAdminUser(admin)) {
-        return sendJSON(res, 403, { error: 'Administrator account required to update the card database' });
+      if (!admin || !isCuratorUser(admin)) {
+        return sendJSON(res, 403, { error: 'Curator account required to update the card database' });
       }
     }
     startBuild({ langs, quality });
@@ -3414,13 +3423,13 @@ async function handleApi(req, res, pathname, ip, url) {
     const portalApi = !!user.stripeCustomer && !!(process.env.PTCG_STRIPE_SECRET_KEY || '').trim();
     const portalUrl = user.stripeCustomer && !portalApi ? ((process.env.PTCG_STRIPE_PORTAL_URL || '').trim() || null) : null;
     return sendJSON(res, 200, {
-      username: user.display, admin: isAdminUser(user),
+      username: user.display, admin: isAdminUser(user), curator: isCuratorUser(user), role: roleOf(user),
       plan: planOf(user), upgradeUrl, portalUrl, portalApi,
       email: user.email, emailVerified: user.emailVerified,
       totpEnabled: user.totpEnabled,
       recoveryLeft: user.totpEnabled ? _countRecovery.get(user.id).n : 0,
       oidcLinked: !!user.oidcSub,
-      openReports: isAdminUser(user) ? _reportsOpenTotal.get().n : undefined,
+      openReports: isCuratorUser(user) ? _reportsOpenTotal.get().n : undefined,
     });
   }
 
@@ -3671,7 +3680,7 @@ async function handleApi(req, res, pathname, ip, url) {
 
   // ---- admin: define a custom printing (e.g. "Cracked Ice Holo") for a card ----
   if (pathname === '/api/custom-variant' && req.method === 'POST') {
-    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    if (!isCuratorUser(user)) return sendJSON(res, 403, { error: 'Curator account required' });
     const body = await readBody(req);
     const cardId = typeof body.cardId === 'string' && CARD_ID_RE.test(body.cardId) ? body.cardId : null;
     const label = typeof body.label === 'string' ? body.label.trim().slice(0, 80) : '';
@@ -3695,7 +3704,7 @@ async function handleApi(req, res, pathname, ip, url) {
 
   // ---- admin: the masterlist mirror — sync a sheet, read its links ----
   if (pathname === '/api/masterlist/sync' && req.method === 'POST') {
-    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    if (!isCuratorUser(user)) return sendJSON(res, 403, { error: 'Curator account required' });
     // a whole masterlist is tens of thousands of rows — well past the usual body cap
     const raw = await readRawBody(req, 64 * 1024 * 1024).catch(() => null);
     if (!raw) return sendJSON(res, 413, { error: 'That sheet is too large to sync in one go' });
@@ -3723,18 +3732,18 @@ async function handleApi(req, res, pathname, ip, url) {
     return sendJSON(res, 200, { ok: true, ...result });
   }
   if (pathname === '/api/masterlist/rows' && req.method === 'GET') {
-    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    if (!isCuratorUser(user)) return sendJSON(res, 403, { error: 'Curator account required' });
     const mLang = LANG_RE.test(url.searchParams.get('lang') || '') ? url.searchParams.get('lang') : 'en';
     return sendJSON(res, 200, { ok: true, ...masterlistPending(mLang) });
   }
   // ---- admin: the curator's remembered matches (cards by identity, printings by wording) ----
   if (pathname === '/api/import-card-aliases' && req.method === 'GET') {
-    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    if (!isCuratorUser(user)) return sendJSON(res, 403, { error: 'Curator account required' });
     const aLang = LANG_RE.test(url.searchParams.get('lang') || '') ? url.searchParams.get('lang') : 'en';
     return sendJSON(res, 200, { aliases: _cardAliasList.all(aLang).map((r) => ({ key: r.key, raw: r.raw, cardId: r.card_id })) });
   }
   if (pathname === '/api/import-card-aliases' && req.method === 'POST') {
-    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    if (!isCuratorUser(user)) return sendJSON(res, 403, { error: 'Curator account required' });
     const body = await readBody(req);
     const aLang = LANG_RE.test(body.lang || '') ? body.lang : 'en';
     const key = typeof body.key === 'string' ? body.key.trim().slice(0, 200) : '';
@@ -3746,12 +3755,12 @@ async function handleApi(req, res, pathname, ip, url) {
     return sendJSON(res, 200, { ok: true, key, cardId });
   }
   if (pathname === '/api/import-variant-aliases' && req.method === 'GET') {
-    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    if (!isCuratorUser(user)) return sendJSON(res, 403, { error: 'Curator account required' });
     const aLang = LANG_RE.test(url.searchParams.get('lang') || '') ? url.searchParams.get('lang') : 'en';
     return sendJSON(res, 200, { aliases: _varAliasList.all(aLang).map((r) => ({ key: r.key, raw: r.raw, variant: r.variant })) });
   }
   if (pathname === '/api/import-variant-aliases' && req.method === 'POST') {
-    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    if (!isCuratorUser(user)) return sendJSON(res, 403, { error: 'Curator account required' });
     const body = await readBody(req);
     const aLang = LANG_RE.test(body.lang || '') ? body.lang : 'en';
     const raw = typeof body.raw === 'string' ? body.raw.trim().slice(0, 120) : '';
@@ -3764,20 +3773,20 @@ async function handleApi(req, res, pathname, ip, url) {
     return sendJSON(res, 200, { ok: true, key, variant });
   }
   if (pathname === '/api/masterlist/status' && req.method === 'GET') {
-    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    if (!isCuratorUser(user)) return sendJSON(res, 403, { error: 'Curator account required' });
     const mLang = LANG_RE.test(url.searchParams.get('lang') || '') ? url.searchParams.get('lang') : 'en';
     const c = _mlCounts.get(mLang);
     return sendJSON(res, 200, { total: c.total || 0, gone: c.gone || 0, linked: _mlLinkedCount.get(mLang).n, lastSync: c.last_seen || null });
   }
   if (pathname === '/api/masterlist/links' && req.method === 'GET') {
-    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    if (!isCuratorUser(user)) return sendJSON(res, 403, { error: 'Curator account required' });
     const mLang = LANG_RE.test(url.searchParams.get('lang') || '') ? url.searchParams.get('lang') : 'en';
     const cardId = url.searchParams.get('cardId') || '';
     if (!CARD_ID_RE.test(cardId)) return sendJSON(res, 400, { error: 'cardId is required' });
     return sendJSON(res, 200, { links: _mlLinksOfCard.all(mLang, cardId).map((l) => ({ key: l.key, variant: l.variant, rowNo: l.row_no, gone: !!l.gone, sheetVariant: l.sheet_variant, sheetSet: l.set_name, keep: l.keep ? JSON.parse(l.keep) : [] })) });
   }
   if (pathname === '/api/masterlist/links' && req.method === 'POST') {
-    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    if (!isCuratorUser(user)) return sendJSON(res, 403, { error: 'Curator account required' });
     const body = await readBody(req);
     const mLang = LANG_RE.test(body.lang || '') ? body.lang : 'en';
     if (!Array.isArray(body.links)) return sendJSON(res, 400, { error: 'links must be an array of {key, cardId, variant}' });
@@ -3804,12 +3813,12 @@ async function handleApi(req, res, pathname, ip, url) {
 
   // ---- admin: the sheet-import set matches (alias -> set), remembered ----
   if (pathname === '/api/import-aliases' && req.method === 'GET') {
-    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    if (!isCuratorUser(user)) return sendJSON(res, 403, { error: 'Curator account required' });
     const lang = LANG_RE.test(url.searchParams.get('lang') || '') ? url.searchParams.get('lang') : 'en';
     return sendJSON(res, 200, { aliases: _aliasList.all(lang).map((r) => ({ alias: r.alias, raw: r.raw, setId: r.set_id })) });
   }
   if (pathname === '/api/import-aliases' && req.method === 'POST') {
-    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    if (!isCuratorUser(user)) return sendJSON(res, 403, { error: 'Curator account required' });
     const body = await readBody(req);
     const aLang = LANG_RE.test(body.lang || '') ? body.lang : 'en';
     const raw = typeof body.alias === 'string' ? body.alias.trim().slice(0, 120) : '';
@@ -3825,7 +3834,7 @@ async function handleApi(req, res, pathname, ip, url) {
 
   // ---- admin: create a whole new card, or edit any card's details ----
   if (pathname === '/api/card' && req.method === 'POST') {
-    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    if (!isCuratorUser(user)) return sendJSON(res, 403, { error: 'Curator account required' });
     const body = await readBody(req);
     const cLang = LANG_RE.test(body.lang || '') ? body.lang : 'en';
     const patch = sanitizeCardPatch(body);
@@ -3878,7 +3887,7 @@ async function handleApi(req, res, pathname, ip, url) {
 
   // ---- admin: create a brand-new set (for promos and the like) ----
   if (pathname === '/api/set-create' && req.method === 'POST') {
-    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    if (!isCuratorUser(user)) return sendJSON(res, 403, { error: 'Curator account required' });
     const body = await readBody(req);
     const cLang = LANG_RE.test(body.lang || '') ? body.lang : 'en';
     const setId = typeof body.id === 'string' && SET_ID_RE.test(body.id) ? body.id : null;
@@ -3895,7 +3904,7 @@ async function handleApi(req, res, pathname, ip, url) {
   // On the master workspace a hide publishes as a deletion to every install;
   // on a normal install it is a local hide that master updates can't undo.
   if (pathname === '/api/card-hide' && req.method === 'POST') {
-    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    if (!isCuratorUser(user)) return sendJSON(res, 403, { error: 'Curator account required' });
     const body = await readBody(req);
     const cLang = LANG_RE.test(body.lang || '') ? body.lang : 'en';
     const cardId = typeof body.cardId === 'string' && CARD_ID_RE.test(body.cardId) ? body.cardId : null;
@@ -3913,7 +3922,7 @@ async function handleApi(req, res, pathname, ip, url) {
   // Restore: re-add a printing with the same name, or re-tick the variant in
   // the card editor.
   if (pathname === '/api/variant-remove' && req.method === 'POST') {
-    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    if (!isCuratorUser(user)) return sendJSON(res, 403, { error: 'Curator account required' });
     const body = await readBody(req);
     const cLang = LANG_RE.test(body.lang || '') ? body.lang : 'en';
     const cardId = typeof body.cardId === 'string' && CARD_ID_RE.test(body.cardId) ? body.cardId : null;
@@ -3938,7 +3947,7 @@ async function handleApi(req, res, pathname, ip, url) {
   // ---- admin: hide (tombstone) or restore a whole set ----
   // Restoring also unhides the set's own soft-hidden cards.
   if (pathname === '/api/set-hide' && req.method === 'POST') {
-    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    if (!isCuratorUser(user)) return sendJSON(res, 403, { error: 'Curator account required' });
     const body = await readBody(req);
     const cLang = LANG_RE.test(body.lang || '') ? body.lang : 'en';
     const setId = typeof body.id === 'string' && SET_ID_RE.test(body.id) ? body.id : null;
@@ -3952,7 +3961,7 @@ async function handleApi(req, res, pathname, ip, url) {
 
   // ---- admin: upload the card's own picture (its base image) ----
   if (pathname === '/api/card-image' && req.method === 'POST') {
-    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    if (!isCuratorUser(user)) return sendJSON(res, 403, { error: 'Curator account required' });
     const cardId = url.searchParams.get('cardId') || '';
     const cLang = LANG_RE.test(url.searchParams.get('lang') || '') ? url.searchParams.get('lang') : 'en';
     if (!CARD_ID_RE.test(cardId)) return sendJSON(res, 400, { error: 'A valid cardId query parameter is required' });
@@ -3990,7 +3999,7 @@ async function handleApi(req, res, pathname, ip, url) {
 
   // ---- admin: upload your own image for a specific printing of a card ----
   if (pathname === '/api/variant-image' && req.method === 'POST') {
-    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    if (!isCuratorUser(user)) return sendJSON(res, 403, { error: 'Curator account required' });
     const cardId = url.searchParams.get('cardId') || '';
     const variant = url.searchParams.get('variant') || '';
     const lang = LANG_RE.test(url.searchParams.get('lang') || '') ? url.searchParams.get('lang') : 'en';
@@ -4058,6 +4067,26 @@ async function handleApi(req, res, pathname, ip, url) {
     return sendJSON(res, 200, { ok: true, updatedAt, count: Object.keys(clean).length });
   }
 
+  /* ---------- collaborators: who else may curate ----------
+   * The administrator names them by account; a collaborator gets the Card
+   * database, Curation and Reports tabs and every endpoint behind them, and
+   * nothing else. The administrator cannot be demoted here. */
+  if (pathname === '/api/collaborators' && req.method === 'GET') {
+    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    return sendJSON(res, 200, { collaborators: _collaborators.all().map((r) => ({ username: r.display, created: r.created })) });
+  }
+  if (pathname === '/api/collaborators' && req.method === 'POST') {
+    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    const body = await readBody(req);
+    const who = typeof body.username === 'string' ? body.username.trim().toLowerCase() : '';
+    if (!who) return sendJSON(res, 400, { error: 'username is required' });
+    const target = getUserByName(who);
+    if (!target) return sendJSON(res, 404, { error: `No account called "${body.username.trim()}"` });
+    if (isAdminUser(target)) return sendJSON(res, 400, { error: 'That account is the administrator already' });
+    _setCollaborator.run(body.collaborator === false ? 0 : 1, target.id);
+    return sendJSON(res, 200, { ok: true, username: target.display, collaborator: body.collaborator !== false });
+  }
+
   /* ---------- reports: what the catalog is missing ----------
    * Any signed-in account may say "this card / this printing is not here".
    * The curator sees them all, answers, and adds to the catalog for everyone
@@ -4090,12 +4119,12 @@ async function handleApi(req, res, pathname, ip, url) {
     return sendJSON(res, r.changes ? 200 : 404, r.changes ? { ok: true } : { error: 'No open report of yours with that id' });
   }
   if (pathname === '/api/reports/all' && req.method === 'GET') {
-    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    if (!isCuratorUser(user)) return sendJSON(res, 403, { error: 'Curator account required' });
     const st = ['open', 'done', 'dismissed', 'all'].includes(url.searchParams.get('status')) ? url.searchParams.get('status') : 'open';
     return sendJSON(res, 200, { open: _reportsOpenTotal.get().n, reports: _reportsAll.all(st, st).map(reportRow) });
   }
   if (pathname === '/api/reports/resolve' && req.method === 'POST') {
-    if (!isAdminUser(user)) return sendJSON(res, 403, { error: 'Administrator account required' });
+    if (!isCuratorUser(user)) return sendJSON(res, 403, { error: 'Curator account required' });
     const body = await readBody(req);
     const id = Number(body.id);
     const status = ['open', 'done', 'dismissed'].includes(body.status) ? body.status : null;

@@ -1333,6 +1333,40 @@ const { chromium } = require('playwright');
     (await page.locator('#admin-page .settings-card button').count()) === 0 &&
     (await page.textContent('#admin-page')).includes('belongs to the account that set this install up'));
 
+  // ---- collaborator: the administrator hands this account the curation side ----
+  {
+    const setRole = (collaborator) => page.evaluate(async ({ u, collaborator }) => {
+      const l = await (await fetch('api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'ptcgadmin', password: 'password123' }) })).json();
+      const r = await fetch('api/collaborators', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + l.token }, body: JSON.stringify({ username: u, collaborator }) });
+      return r.status;
+    }, { u: uniq, collaborator });
+    check('collaborator: the administrator grants the role', (await setRole(true)) === 200);
+    await page.goto('http://localhost:3111/#/account');
+    await page.waitForSelector('#account-page button:has-text("Sign out")');
+    await page.waitForSelector('#account-page a:has-text("Administration")', { timeout: 5000 });
+    check('collaborator: the account page now offers Administration', true);
+    await page.goto('http://localhost:3111/#/admin');
+    await page.waitForSelector('#admin-page nav.tabs a');
+    const tabLabels = await page.$$eval('#admin-page nav.tabs a', (as) => as.map((a) => a.textContent.trim()));
+    check('collaborator: exactly the three curation tabs, no Mail / Sign-on / Server',
+      tabLabels.join('|') === 'Card database|Curation|Reports');
+    check('collaborator: the page says who they are', (await page.locator('#admin-collab-note').count()) === 1);
+    check('collaborator: Publish and the auto-update choice stay off the Card database tab',
+      (await page.locator('#admin-page h3:has-text("Publish")').count()) === 0 && !(await page.textContent('#admin-page')).includes('When the master database moves on'));
+    await page.goto('http://localhost:3111/#/admin/server');
+    await page.waitForSelector('#admin-page nav.tabs a.active');
+    check('collaborator: typing the Server tab’s address falls back to the Card database',
+      (await page.textContent('#admin-page nav.tabs a.active')).trim() === 'Card database' && (await page.locator('#collab-list').count()) === 0);
+    await page.goto('http://localhost:3111/#/admin/reports');
+    await page.waitForSelector('#admin-page nav.tabs a.active:has-text("Reports")');
+    check('collaborator: the Reports tab opens', true);
+    check('collaborator: the administrator takes the role back', (await setRole(false)) === 200);
+    await page.goto('http://localhost:3111/#/admin');
+    await page.waitForSelector('#admin-page .settings-card');
+    await page.waitForFunction(() => document.getElementById('admin-page').textContent.includes('belongs to the account that set this install up'));
+    check('collaborator: without the role the page turns them away again', true);
+  }
+
   // ---- card data comes from the server's database (not R2/static JSON) ----
   await page.goto('http://localhost:3111/#/set/base1');
   await page.waitForSelector('.tcg-card img');

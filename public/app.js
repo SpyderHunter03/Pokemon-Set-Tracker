@@ -1,7 +1,7 @@
 /* Pokémon TCG Tracker — app logic (vanilla JS, no build step) */
 'use strict';
 
-const APP_VERSION = '3.84.0';
+const APP_VERSION = '3.85.0';
 
 /* ============================================================
  * Storage helpers
@@ -1268,7 +1268,7 @@ async function openCardModal(brief, { variant, onOwnershipChange, onCardChanged 
   } catch { /* offline — show what we have */ }
   if (!card.variants && brief.variants) card.variants = brief.variants;
   const me = await ensureMe();
-  const isAdmin = !!(me && me.admin);
+  const isAdmin = !!(me && me.curator);   // the curation side: administrator or collaborator
 
   const rows = [];
   const kv = (k, v) => { if (v) rows.push(h('div', { class: 'kv' }, h('span', {}, k), h('span', {}, String(v)))); };
@@ -3549,7 +3549,7 @@ function renderAccountPage(tab) {
   (async () => {
     try {
       const me = await apiCall('me');
-      if (me.admin) head.append(h('a', { class: 'btn ghost small', href: '#/admin', style: 'margin-left:auto' }, 'Administration'));
+      if (me.curator) head.append(h('a', { class: 'btn ghost small', href: '#/admin', style: 'margin-left:auto' }, 'Administration'));
     } catch { /* the cards below will say what went wrong */ }
   })();
 
@@ -3761,16 +3761,14 @@ function adminReportsTab() {
 }
 
 /* ---- the administration page ---- */
-function adminTabList() {
-  const tabs = [['cards', 'Card database']];
-  tabs.push(['curate', 'Curation'], ['reports', 'Reports'], ['mail', 'Mail'], ['signon', 'Sign-on']);
-  tabs.push(['server', 'Server']);
+/** The administrator sees everything; a collaborator sees the curation side. */
+function adminTabList(role) {
+  const tabs = [['cards', 'Card database'], ['curate', 'Curation'], ['reports', 'Reports']];
+  if (role === 'admin') tabs.push(['mail', 'Mail'], ['signon', 'Sign-on'], ['server', 'Server']);
   return tabs;
 }
 
 function renderAdminPage(tab) {
-  const tabs = adminTabList();
-  if (!tabs.some(([id]) => id === tab)) tab = 'cards';
   const backLink = () => h('a', { class: 'back-link', href: '#/account' }, '\u2190 Account');
   const page = h('div', { class: 'settings-page', id: 'admin-page' }, backLink(), settingsHead('Administration'), spinner());
   view.replaceChildren(page);
@@ -3783,12 +3781,16 @@ function renderAdminPage(tab) {
     let me;
     try { me = await apiCall('me'); }
     catch (e) { return only('Could not ask this server who you are: ' + e.message); }
-    if (!me.admin) {
+    if (!me.curator) {
       return only('This page belongs to the account that set this install up. Yours is not it \u2014 which is exactly as it should be.');
     }
+    const tabs = adminTabList(me.role);
+    if (!tabs.some(([id]) => id === tab)) tab = 'cards';
     page.replaceChildren(...[
       backLink(),
       settingsHead('Administration'),
+      me.role === 'collaborator' ? h('p', { class: 'muted small', id: 'admin-collab-note', style: 'margin:0 0 8px' },
+        '\ud83e\udd1d You are a collaborator: the card database, curation and reports are yours to work on. The server\u2019s own settings stay with the administrator.') : null,
       appConfig.master ? h('p', { class: 'muted small', style: 'border:1px solid var(--owned); border-radius:8px; padding:8px 10px' },
         '🛠️ Master curation workspace \u2014 edits made here become the master database when you publish (scripts/publish-images.js). This is not a personal install.') : null,
       settingsTabs('admin', tabs, tab),
@@ -3797,7 +3799,7 @@ function renderAdminPage(tab) {
         : tab === 'mail' ? settingsCard(mailSettingsSection())
           : tab === 'signon' ? settingsCard(providerSettingsSection())
             : tab === 'server' ? adminServerTab()
-              : adminCardsTab(),
+              : adminCardsTab(me),
       pageFooter('#/account', '\u2190 Account'),
     ].filter(Boolean));
   })();
@@ -5046,7 +5048,8 @@ function adminCurateTab() {
 
 /** Card database: what is here, whether the master has moved on, and the
  * jobs that rebuild the parts of it this server derives for itself. */
-function adminCardsTab() {
+function adminCardsTab(me) {
+  const isAdmin = !!(me && me.admin);
   const content = h('div', {});
 
   async function renderControls() {
@@ -5113,7 +5116,7 @@ function adminCardsTab() {
     // deletions and skips the review of its additions — so it is opt-in and
     // says so in words.
     const autoArea = h('div', { class: 'ce-field' });
-    if (appConfig.remoteCatalog && !appConfig.master) {
+    if (isAdmin && appConfig.remoteCatalog && !appConfig.master) {
       const modes = [
         ['check', 'Check for updates, tell me'],
         ['apply', 'Check and update by itself'],
@@ -5165,7 +5168,7 @@ function adminCardsTab() {
     // The other half of the workspace: nothing edited here reaches anyone
     // until it is published. Preview is the review step — it lists exactly
     // what would move, and moves nothing.
-    const publishCard = appConfig.master ? (() => {
+    const publishCard = appConfig.master && isAdmin ? (() => {
       const logBox = h('pre', { style: 'display:none; max-height:240px; overflow:auto; margin:10px 0 0; padding:10px; font-size:11.5px; line-height:1.5; background:rgba(0,0,0,0.25); border:1px solid var(--line, rgba(255,255,255,0.12)); border-radius:8px; white-space:pre-wrap' });
       const btnPrev = h('button', { class: 'btn ghost small' }, '👀 Preview (changes nothing)');
       const btnPub = h('button', { class: 'btn small' }, '🚀 Publish to every install');
@@ -5315,13 +5318,54 @@ function adminServerTab() {
     : appConfig.remoteCatalog ? 'Follows the master database.'
       : 'No master database configured \u2014 the catalog cannot update itself.';
 
-  return h('div', {}, conn, settingsCard(
+  return h('div', {}, conn, collaboratorsCard(), settingsCard(
     h('h3', { style: 'margin:0 0 6px' }, 'This server'),
     h('p', { class: 'muted small', style: 'margin:0 0 6px' }, kind),
     appConfig.remoteCatalog ? h('p', { class: 'muted small', style: 'margin:0 0 6px' }, `Master database: ${appConfig.remoteCatalog}`) : null,
     h('p', { class: 'muted small', style: 'margin:0' },
       `Release ${appConfig.release ? 'v' + appConfig.release : 'unknown'} \u00b7 app build ${APP_VERSION}`),
   ));
+}
+
+/** Who else may curate. A collaborator sees Card Database, Curation and
+ * Reports in Administration and nothing else there; only the admin can grant
+ * or take the role away, and the admin account itself is never demoted. */
+function collaboratorsCard() {
+  const list = h('div', { id: 'collab-list' }, h('p', { class: 'muted small', style: 'margin:0' }, 'Loading…'));
+  const name = h('input', { id: 'collab-name', type: 'text', placeholder: 'account name', autocomplete: 'off', style: 'flex:1;min-width:0' });
+  const add = h('button', { id: 'collab-add', class: 'btn small' }, 'Make collaborator');
+
+  async function setRole(username, collaborator) {
+    try {
+      await apiCall('collaborators', { method: 'POST', body: JSON.stringify({ username, collaborator }) });
+      toast(collaborator ? `${username} can now curate` : `${username} is a regular account again`);
+      name.value = '';
+      load();
+    } catch (e) { toast(e.message); }
+  }
+  async function load() {
+    let rows;
+    try { rows = (await apiCall('collaborators')).collaborators || []; }
+    catch (e) { list.replaceChildren(h('p', { class: 'muted small', style: 'margin:0' }, `Could not load collaborators: ${e.message}`)); return; }
+    if (!rows.length) {
+      list.replaceChildren(h('p', { class: 'muted small', style: 'margin:0' }, 'No collaborators yet.'));
+      return;
+    }
+    list.replaceChildren(...rows.map((r) => h('div', { class: 'collab-row', style: 'display:flex;align-items:center;gap:8px;margin:4px 0' },
+      h('span', { style: 'flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis' }, r.username),
+      h('button', { class: 'btn ghost small', onclick: () => setRole(r.username, false) }, 'Remove'))));
+  }
+  add.onclick = () => { const v = name.value.trim(); if (v) setRole(v, true); };
+  name.onkeydown = (e) => { if (e.key === 'Enter') add.click(); };
+  load();
+
+  return settingsCard(
+    h('h3', { style: 'margin:0 0 6px' }, 'Collaborators'),
+    h('p', { class: 'muted small', style: 'margin:0 0 8px' },
+      'A collaborator can use the Card Database, Curation and Reports tabs here. Mail, sign-on and this server stay yours.'),
+    list,
+    h('div', { style: 'display:flex;gap:8px;margin-top:10px;flex-wrap:wrap' }, name, add),
+  );
 }
 
 /* ============================================================
